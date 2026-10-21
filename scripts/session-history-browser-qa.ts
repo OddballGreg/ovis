@@ -5,17 +5,21 @@
  * resumed pane's session (App's RecentResume record), a session a pane already shows selected instead of
  * started, a row without a verified resume listed with no button, the keyboard along the rows,
  * the agent picker (each agent with its mark, no Shell, its open list taking Escape alone, disabled
- * while a resume is in flight), and a PC whose bridge answers 404 for the route, whose menu has no item. No herdr pane is
- * touched; every request stays on this loopback server.
+ * while a resume is in flight), a PC whose bridge answers 404 for the route, whose menu has no item, and
+ * Claude's store-bound Resume: the list asked for from a pane of the workspace, one POST sessions/resume
+ * per double click (never tab/create), the same UUID reported by a pane on another store left to Resume, a
+ * store that changed read again, and a bridge from before store-bound Resume (rows without a source, no
+ * resume route) offering no Resume rather than an unbound one. No herdr pane is touched; every request
+ * stays on this loopback server.
  */
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium, type Page } from "playwright-core";
-import type { SessionHistoryResponse, TabCreated } from "../shared/protocol.ts";
+import type { SessionHistoryResponse, SessionResumeResponse, TabCreated } from "../shared/protocol.ts";
 import type {} from "./session-history-fixture.tsx";
-import { OLDER_SESSION, SESSION_ROWS } from "./session-history-fixture-data.ts";
+import { CLAUDE_OTHER, CLAUDE_ROWS, CLAUDE_SHARED, CLAUDE_STORE_KEY, OLDER_SESSION, SESSION_ROWS } from "./session-history-fixture-data.ts";
 import { chromePath } from "./chrome-path.ts";
 import { contextMenuKey } from "./context-menu-key.ts";
 const repo = join(import.meta.dir, "..");
@@ -29,6 +33,12 @@ const tabCreates: Array<Record<string, unknown>> = [];
 let holdTabCreate = false;
 const releases: Array<() => void> = [];
 const probes: string[] = [];
+/** every Claude list's query and every POST sessions/resume body, in order */
+const claudeLists: string[] = [];
+const resumes: Array<Record<string, unknown>> = [];
+let holdResume = false;
+/** how the bridge answers the next resumes: start it, name a pane already showing it, refuse a changed store, or have no route */
+let resumeAnswer: "created" | "opened" | "stale" | "missing" = "created";
 const json = (body: unknown, status = 200) => Response.json(body, { status, headers: { "cache-control": "no-store" } });
 const refusal = (code: string, message: string, status: number) => json({ error: { code, message } }, status);
 /** every bounded animation (the sheet's rise) over, then two frames; a looping one (a breathing status dot) never finishes and is not waited for */
@@ -50,8 +60,24 @@ try {
       if (!url.searchParams.get("workspace_id")) return refusal("missing_workspace_id", "workspace_id is required", 400);
       const agent = url.searchParams.get("agent") ?? "";
       const workspaceId = url.searchParams.get("workspace_id")!;
+      if (agent === "claude" && (workspaceId === "w3" || workspaceId === "w4")) {
+        claudeLists.push(url.search);
+        const paneId = url.searchParams.get("pane_id");
+        // w4's bridge is from before store-bound Resume: it ignores pane_id and gives no source
+        const sessions = CLAUDE_ROWS.map((row) => workspaceId === "w3" && paneId !== null && row.resume ? { ...row, resume: { ...row.resume, source: { pane_id: paneId, store_key: CLAUDE_STORE_KEY } } } : row);
+        return json({ workspace_id: workspaceId, agent: "claude", cwd: `/fixture/${workspaceId}`, sessions } satisfies SessionHistoryResponse);
+      }
       const answer: SessionHistoryResponse = { workspace_id: workspaceId, agent: agent as SessionHistoryResponse["agent"], cwd: `/fixture/${workspaceId}`, sessions: agent === "codex" ? SESSION_ROWS : [] };
       return json(answer);
+    }
+    if (path === "/api/sessions/resume") {
+      const body = await request.json() as Record<string, unknown>;
+      resumes.push(body);
+      if (holdResume) await new Promise<void>((resolve) => releases.push(resolve));
+      if (resumeAnswer === "missing") return refusal("not_found", `unknown endpoint ${path}`, 404);
+      if (resumeAnswer === "stale") return refusal("stale_source", "the pane's Claude store changed since the list: list the sessions again", 409);
+      if (resumeAnswer === "opened") return json({ action: "opened", workspace_id: String(body["workspace_id"]), pane_id: "p3" } satisfies SessionResumeResponse);
+      return json({ action: "created", workspace_id: String(body["workspace_id"]), pane_id: `p-claude-${resumes.length}`, agent_started: true } satisfies SessionResumeResponse);
     }
     if (path === "/api/agents") return json({ agents: [{ kind: "codex", label: "Codex", installed: true }, { kind: "claude", label: "Claude Code", installed: true }] });
     if (path === "/api/worktree/list") return refusal("not_a_repository", "no git repository here", 409);
@@ -218,6 +244,68 @@ try {
   await page.keyboard.press("Escape");
   await dialog.waitFor({ state: "detached" });
   console.log("PASS the agent picker lists the agents with their marks, closes its list alone on Escape and takes the keys; an empty store is said in words");
+  // Claude: the list is asked for from a pane of the workspace (its store's), and the same UUID reported by a
+  // pane on another store is not that row's session: Resume, not Open
+  await openHistory("w3");
+  assert.equal(await picker.locator(".agent-picker-label").textContent(), "Claude Code");
+  assert.ok(claudeLists.length >= 1 && claudeLists.every((query) => new URLSearchParams(query).get("pane_id") === "p3"), `the list names its source pane: ${JSON.stringify(claudeLists)}`);
+  const shared = dialog.locator(".session-row").first();
+  assert.equal(await shared.locator(".pill").count(), 0, "p4 reports the same id from another store: no Already open");
+  await shared.getByRole("button", { name: /^Resume / }).waitFor();
+  await settled(page);
+  await page.screenshot({ path: join(evidence, "claude-store-rows.png") });
+  // one store-bound request per double click, never the argv-only tab/create
+  const tabsBefore = tabCreates.length;
+  holdResume = true;
+  await shared.getByRole("button", { name: /^Resume / }).dblclick();
+  await page.waitForFunction(() => document.querySelector(".session-row.is-pending") !== null);
+  await page.getByRole("status").filter({ hasText: "Resuming…" }).waitFor();
+  assert.equal(resumes.length, 1, `a double click sends one sessions/resume, not ${resumes.length}`);
+  assert.deepEqual(resumes[0], { workspace_id: "w3", pane_id: "p3", agent: "claude", session_id: CLAUDE_SHARED, store_key: CLAUDE_STORE_KEY });
+  holdResume = false;
+  releases.splice(0).forEach((release) => release());
+  await dialog.waitFor({ state: "detached" });
+  await page.waitForFunction(() => window.qa.resumed.some((opened) => opened.pane_id === "p-claude-1"));
+  assert.equal(tabCreates.length, tabsBefore, "Claude's Resume sends no tab/create");
+  console.log("PASS a Claude list names its source pane; one store-bound resume per double click, no tab/create, and a pane on another store is not Open");
+  // a store that changed since the list: read again and said so, nothing started elsewhere
+  resumeAnswer = "stale";
+  await openHistory("w3");
+  const listsBefore = claudeLists.length;
+  await dialog.getByRole("button", { name: /^Resume / }).last().click();
+  await page.getByRole("status").filter({ hasText: "The pane's Claude store changed, so its sessions were read again." }).waitFor();
+  await dialog.locator(".session-row").first().waitFor();
+  assert.ok(claudeLists.length > listsBefore, "the list was read again");
+  assert.equal(resumes.at(-1)?.["session_id"], CLAUDE_OTHER);
+  await settled(page);
+  await page.screenshot({ path: join(evidence, "claude-store-relisted.png") });
+  // the bridge names the pane already showing it on that store: selected, as Open does, nothing made
+  resumeAnswer = "opened";
+  await dialog.getByRole("button", { name: /^Resume / }).last().click();
+  await dialog.waitFor({ state: "detached" });
+  await page.waitForFunction(() => window.qa.selected === "p3");
+  // a bridge with source rows but no resume route: said so, and never an unbound tab/create instead
+  resumeAnswer = "missing";
+  await openHistory("w3");
+  await dialog.getByRole("button", { name: /^Resume / }).last().click();
+  await dialog.locator(".session-error").filter({ hasText: "This PC's bridge does not offer this yet" }).waitFor();
+  assert.equal(tabCreates.length, tabsBefore, "a 404 resume route falls back to no tab/create");
+  await page.keyboard.press("Escape");
+  await dialog.waitFor({ state: "detached" });
+  resumeAnswer = "created";
+  console.log("PASS a changed store is read again, an already shown session is selected, and a missing resume route never falls back to tab/create");
+  // an older bridge: rows without a store source offer no Resume at all
+  const resumesBefore = resumes.length;
+  await openHistory("w4");
+  assert.equal(await dialog.getByRole("button", { name: /^Resume / }).count(), 0, "no Resume for a row its bridge bound to no store");
+  assert.equal(await dialog.locator(".pill", { hasText: "Resume unavailable" }).count(), CLAUDE_ROWS.length);
+  await settled(page);
+  await page.screenshot({ path: join(evidence, "claude-older-bridge.png") });
+  await page.keyboard.press("Escape");
+  await dialog.waitFor({ state: "detached" });
+  assert.equal(resumes.length, resumesBefore, "nothing is sent for an older bridge's rows");
+  assert.equal(tabCreates.length, tabsBefore);
+  console.log("PASS an older bridge's Claude rows show Resume unavailable and send nothing");
   // a PC whose bridge is from before the route: asked once without listing anything, and the item stays away
   const probed = page.waitForResponse((response) => response.url().includes("/api/machines/old-pc/sessions/history"));
   await page.evaluate(() => window.qa.machine("old-pc"));
@@ -243,6 +331,10 @@ try {
     "POST /api/tab/create bodies, in order (the double click on Resume sent the one below):",
     ...tabCreates.map((body, index) => `${index + 1}. ${JSON.stringify(body)}`),
     `old-pc probes: ${JSON.stringify(probes)}`,
+    "Claude list queries, in order:",
+    ...claudeLists.map((query, index) => `${index + 1}. ${query}`),
+    "POST /api/sessions/resume bodies, in order:",
+    ...resumes.map((body, index) => `${index + 1}. ${JSON.stringify(body)}`),
   ].join("\n") + "\n");
   assert.deepEqual(errors, []);
   console.log("PASS no browser errors");

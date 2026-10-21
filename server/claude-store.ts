@@ -13,6 +13,7 @@
  * id is a UUID herdr reports, so at most one file answers to it.
  */
 
+import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { open, readFile, readdir, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -56,8 +57,23 @@ export function defaultClaudeConfigDir(home: string): string {
   return process.env["CLAUDE_CONFIG_DIR"] || join(home, ".claude");
 }
 
-/** What readProcessConfigDir found, by pid and argv, and when: a process's environment does not change. */
-const processDirs = new Map<string, { dir: string | null; at: number }>();
+/**
+ * What a Claude process says of the store it writes: an exported CLAUDE_CONFIG_DIR (`dir` "" when
+ * it was exported empty, which Claude reads as its default, told apart from none exported), none
+ * exported (only a complete read of its environment proves that), an environment that could not be
+ * read in full, or several Windows stores holding its PID record. Windows lets no one read another
+ * process's environment: its PID record proves the store, not how it was chosen, so ~/.claude found
+ * that way is `store` (an override may or may not have named it), and another store is an override.
+ */
+export type ClaudeSource =
+  | { state: "override"; dir: string }
+  | { state: "absent" }
+  | { state: "store"; dir: string }
+  | { state: "unreadable" }
+  | { state: "ambiguous" };
+
+/** What readClaudeSource found, by pid and argv, and when: a process's environment does not change. */
+const processDirs = new Map<string, { read: SourceRead; at: number }>();
 const PROCESS_DIR_TTL_MS = 30_000;
 
 /**
@@ -124,36 +140,148 @@ async function windowsProcessStore(home: string, pid: number, table: () => Promi
   return owners[0] ?? null;
 }
 
-async function readProcessConfigDir(pid: number, home: string, platform: string, table: () => Promise<ProcessRow[]>): Promise<string | null> {
-  let dir: string | null = null;
-  try {
-    if (platform === "win32") {
-      dir = await windowsProcessStore(home, pid, table);
-    } else if (platform === "linux") {
-      dir = (await readFile(`/proc/${pid}/environ`, "utf8")).split("\0").find((entry) => entry.startsWith("CLAUDE_CONFIG_DIR="))?.slice(18) || null;
-    } else if (platform === "darwin") {
-      const child = Bun.spawn(["/bin/ps", "-E", "-ww", "-p", String(pid), "-o", "command="], { stdout: "pipe", stderr: "ignore" });
-      const timer = setTimeout(() => child.kill(), 3000);
-      try {
-        const text = await new Response(child.stdout).text();
-        await child.exited;
-        dir = configDirInPsLine(text);
-      } finally { clearTimeout(timer); }
-    }
-  } catch (error) {
-    if (error instanceof AmbiguousClaudeStore) throw error;
-    dir = null;
-  }
+/** A named store: an absolute path to a directory, else null. */
+async function namedDirectory(dir: string | null): Promise<string | null> {
   if (dir === null || !isAbsolute(dir)) return null;
   try { return (await stat(dir)).isDirectory() ? dir : null; } catch { return null; }
 }
 
+/** A read of one process: the strict source, and the directory the live chat has always taken from it (null: the default store). */
+interface SourceRead { source: ClaudeSource; legacy: string | null }
+
+/** An exported value as a source: empty is its own override; any other value must name a directory, or the store is not known. */
+async function overrideSource(value: string): Promise<ClaudeSource> {
+  if (value === "") return { state: "override", dir: "" };
+  const dir = await namedDirectory(value);
+  return dir === null ? { state: "unreadable" } : { state: "override", dir };
+}
+
+async function readClaudeSource(pid: number, home: string, platform: string, table: () => Promise<ProcessRow[]>): Promise<SourceRead> {
+  const unreadable: SourceRead = { source: { state: "unreadable" }, legacy: null };
+  try {
+    if (platform === "win32") {
+      const owner = await windowsProcessStore(home, pid, table);
+      if (owner === null) return unreadable;
+      const implicit = claudeStoreKey(owner, null) === claudeStoreKey(join(home, ".claude"), null);
+      return { source: implicit ? { state: "store", dir: owner } : { state: "override", dir: owner }, legacy: await namedDirectory(owner) };
+    }
+    if (platform === "linux") {
+      const entries = (await readFile(`/proc/${pid}/environ`, "utf8")).split("\0").filter((entry) => entry !== "");
+      // an environment read empty is a process gone or not ours to read, not one without the variable
+      if (entries.length === 0) return unreadable;
+      const named = entries.filter((entry) => entry.startsWith("CLAUDE_CONFIG_DIR=")).map((entry) => entry.slice(18));
+      const legacy = await namedDirectory(named[0] || null);
+      if (named.length > 1) return { source: { state: "unreadable" }, legacy };
+      return { source: named.length === 0 ? { state: "absent" } : await overrideSource(named[0]!), legacy };
+    }
+    if (platform === "darwin") {
+      const child = Bun.spawn(["/bin/ps", "-E", "-ww", "-p", String(pid), "-o", "command="], { stdout: "pipe", stderr: "ignore" });
+      const timer = setTimeout(() => child.kill(), 3000);
+      let text: string;
+      let code: number;
+      try {
+        text = await new Response(child.stdout).text();
+        code = await child.exited;
+      } finally { clearTimeout(timer); }
+      const legacy = await namedDirectory(configDirInPsLine(text));
+      if (code !== 0 || text.trim() === "") return { source: { state: "unreadable" }, legacy };
+      const assignments = [...text.matchAll(/(?:^|\s)CLAUDE_CONFIG_DIR=/g)].length;
+      // ps cannot tell an argument or a value containing ` NAME=` from an assignment: two are no answer
+      if (assignments > 1) return { source: { state: "unreadable" }, legacy };
+      if (assignments === 1) return { source: await overrideSource(configDirInPsLine(text) ?? ""), legacy };
+      // a process that overwrote its environment's memory shows none of it: no variable seen is a proof only beside others
+      return { source: /(?:^|\s)(?:HOME|PATH)=/.test(text) ? { state: "absent" } : { state: "unreadable" }, legacy };
+    }
+    return unreadable;
+  } catch (error) {
+    if (error instanceof AmbiguousClaudeStore) return { source: { state: "ambiguous" }, legacy: null };
+    return unreadable;
+  }
+}
+
+/**
+ * The source of a Claude process's store (ClaudeSource), kept for PROCESS_DIR_TTL_MS under the
+ * process's pid and argv: /proc on Linux, `ps -E` (same user only) on macOS, the store holding its
+ * PID record on Windows, where a process with no record yet is asked again on the next read.
+ */
+async function processRead(pid: number, argv: readonly string[], home: string, platform: string, table: () => Promise<ProcessRow[]>): Promise<SourceRead> {
+  const key = `${pid}\0${argv.join("\0")}`;
+  const known = processDirs.get(key);
+  if (known && Date.now() - known.at < PROCESS_DIR_TTL_MS) return known.read;
+  const read = await readClaudeSource(pid, home, platform, table);
+  processDirs.delete(key);
+  // Claude writes its PID record as it starts: on Windows a miss is asked again on the next read,
+  // and two stores holding it are remembered no more than a miss
+  if (platform === "win32" && (read.source.state === "unreadable" || read.source.state === "ambiguous")) return read;
+  processDirs.set(key, { read, at: Date.now() });
+  if (processDirs.size > 256) processDirs.delete(processDirs.keys().next().value!);
+  return read;
+}
+
+export async function processClaudeSource(
+  pid: number,
+  argv: readonly string[] = [],
+  home = process.env["HOME"] ?? "",
+  platform: string = process.platform,
+  table: () => Promise<ProcessRow[]> = recentProcessTable,
+): Promise<ClaudeSource> {
+  return (await processRead(pid, argv, home, platform, table)).source;
+}
+
+/** A pane's foreground processes, as herdr's `pane.process_info` lists them. */
+export type PaneProcess = { pid: number; name?: string | null; argv0?: string | null; argv?: readonly string[] | null };
+
+/**
+ * The store source of a pane's Claude, by its foreground processes: null when no Claude runs there,
+ * ambiguous when more than one does (which one a session belongs to cannot be told).
+ */
+export async function paneClaudeSource(
+  processes: readonly PaneProcess[],
+  home = process.env["HOME"] ?? "",
+  platform: string = process.platform,
+  table: () => Promise<ProcessRow[]> = recentProcessTable,
+): Promise<ClaudeSource | null> {
+  const claude = processes.filter((entry) => isClaudeProcess({ name: entry.name ?? undefined, argv0: entry.argv0 ?? undefined, argv: entry.argv ?? undefined }));
+  if (claude.length === 0) return null;
+  if (claude.length > 1) return { state: "ambiguous" };
+  const only = claude[0]!;
+  return processClaudeSource(only.pid, only.argv ?? [only.argv0 ?? only.name ?? ""], home, platform, table);
+}
+
+/**
+ * The store a source lists and resumes in: its directory, how a resumed Claude is told it (`env`:
+ * the variable to export; null: none, as the source had none; `unsupported`: the source does not say
+ * whether one was exported), and its key, a hash of the store's identity (claudeStoreKey) and of
+ * that choice, which says nothing of the path. An implicit ~/.claude and one exported by name are
+ * two keys. A pane with no Claude (`null`) has the server's default store. Null when the source
+ * cannot be told: never the default store in its place.
+ */
+export async function claudeStoreOf(
+  source: ClaudeSource | null,
+  home = process.env["HOME"] ?? "",
+  env: Record<string, string | undefined> = process.env,
+): Promise<{ dir: string; env: { CLAUDE_CONFIG_DIR: string } | null | "unsupported"; key: string } | null> {
+  const chosen = source ?? (env["CLAUDE_CONFIG_DIR"] === undefined ? { state: "absent" as const } : { state: "override" as const, dir: env["CLAUDE_CONFIG_DIR"] });
+  let dir: string;
+  let launch: { CLAUDE_CONFIG_DIR: string } | null | "unsupported";
+  let how: string;
+  switch (chosen.state) {
+    case "override": dir = chosen.dir || join(home, ".claude"); launch = { CLAUDE_CONFIG_DIR: chosen.dir }; how = chosen.dir === "" ? "empty" : "explicit"; break;
+    case "absent": dir = join(home, ".claude"); launch = null; how = "implicit"; break;
+    case "store": dir = chosen.dir; launch = "unsupported"; how = "unknown"; break;
+    default: return null;
+  }
+  let id: { dev: bigint; ino: bigint } | null = null;
+  try { id = await stat(dir, { bigint: true }); } catch { /* not there yet: its spelling stands for it */ }
+  const key = createHash("sha256").update(`${how}\0${claudeStoreKey(dir, id)}`).digest("hex").slice(0, 24);
+  return { dir, env: launch, key };
+}
+
 /**
  * The CLAUDE_CONFIG_DIR a Claude process was started with (a launcher such as cac keeps one store
- * per environment), or null when it has none. /proc on Linux, `ps -E` (same user only) on macOS,
- * the store holding its PID record on Windows, kept for PROCESS_DIR_TTL_MS under the process's
- * pid and argv. Throws AmbiguousClaudeStore, remembered no more than a miss, when several Windows
- * stores hold it.
+ * per environment), or null when it has none, as the live chat reads it (processClaudeSource,
+ * read leniently: the first or last assignment seen, an unreadable environment as none). Throws
+ * AmbiguousClaudeStore, remembered no more than a miss, when several Windows stores hold it.
  */
 export async function processClaudeConfigDir(
   pid: number,
@@ -162,16 +290,9 @@ export async function processClaudeConfigDir(
   platform: string = process.platform,
   table: () => Promise<ProcessRow[]> = recentProcessTable,
 ): Promise<string | null> {
-  const key = `${pid}\0${argv.join("\0")}`;
-  const known = processDirs.get(key);
-  if (known && Date.now() - known.at < PROCESS_DIR_TTL_MS) return known.dir;
-  const dir = await readProcessConfigDir(pid, home, platform, table);
-  processDirs.delete(key);
-  // Claude writes its PID record as it starts: on Windows a miss is asked again on the next read
-  if (dir === null && platform === "win32") return null;
-  processDirs.set(key, { dir, at: Date.now() });
-  if (processDirs.size > 256) processDirs.delete(processDirs.keys().next().value!);
-  return dir;
+  const read = await processRead(pid, argv, home, platform, table);
+  if (read.source.state === "ambiguous") throw new AmbiguousClaudeStore(pid);
+  return read.legacy;
 }
 
 /** Only an absent path is a miss: an unreadable store is an error to report, not an empty one. */

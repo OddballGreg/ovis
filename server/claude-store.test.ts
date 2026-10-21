@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, win32 } from "node:path";
-import { AmbiguousClaudeStore, claudeForegroundSession, claudeProcessSession, claudeSessionTempDir, claudeStoreKey, claudeProjectDir, claudeTranscriptFile, configDirInPsLine, forgetClaudeSessions, isClaudeProcess, processClaudeConfigDir } from "./claude-store.ts";
+import { AmbiguousClaudeStore, claudeForegroundSession, claudeProcessSession, claudeSessionTempDir, claudeStoreKey, claudeStoreOf, claudeProjectDir, claudeTranscriptFile, configDirInPsLine, forgetClaudeSessions, isClaudeProcess, paneClaudeSource, processClaudeConfigDir, processClaudeSource } from "./claude-store.ts";
 import type { ProcessRow } from "./windows-processes.ts";
 
 const NATIVE = process.platform === "linux" || process.platform === "darwin";
@@ -359,6 +359,69 @@ describe("CLAUDE_CONFIG_DIR", () => {
   });
 });
 
+describe("a Claude process's store source", () => {
+  // a started user process stands for Claude: macOS hides system binaries' environments
+  const children: { kill: () => void }[] = [];
+  const roots: string[] = [];
+  afterEach(() => {
+    forgetClaudeSessions();
+    for (const child of children.splice(0)) child.kill();
+    for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+  });
+  const standIn = async (env: Record<string, string>) => {
+    const child = Bun.spawn([process.execPath, "-e", "console.log('ready'); await Bun.sleep(20000)"], { env: { PATH: process.env["PATH"] ?? "", HOME: process.env["HOME"] ?? "", ...env }, stdout: "pipe" });
+    children.push(child);
+    await child.stdout.getReader().read();
+    return child.pid;
+  };
+  const tempDir = () => { const dir = mkdtempSync(join(tmpdir(), "herdr-claude-source-")); roots.push(dir); return dir; };
+
+  it.skipIf(!NATIVE)("reads an exported store, an empty export and none exported as three sources", async () => {
+    const store = tempDir();
+    expect(await processClaudeSource(await standIn({ CLAUDE_CONFIG_DIR: store }))).toEqual({ state: "override", dir: store });
+    expect(await processClaudeSource(await standIn({ CLAUDE_CONFIG_DIR: "" }))).toEqual({ state: "override", dir: "" });
+    expect(await processClaudeSource(await standIn({}))).toEqual({ state: "absent" });
+  });
+
+  it.skipIf(!NATIVE)("unreadable Claude environment is not a proven absent override", async () => {
+    // a process that is gone (its environment cannot be read) and a named store that is not a directory
+    const gone = Bun.spawn([process.execPath, "-e", "0"]);
+    await gone.exited;
+    expect(await processClaudeSource(gone.pid, ["gone"])).toEqual({ state: "unreadable" });
+    expect(await processClaudeSource(await standIn({ CLAUDE_CONFIG_DIR: join(tempDir(), "missing") }))).toEqual({ state: "unreadable" });
+    expect(await processClaudeSource(await standIn({ CLAUDE_CONFIG_DIR: "relative/store" }))).toEqual({ state: "unreadable" });
+    // neither lists the default store in its place, and the live chat still reads both as no override
+    expect(await claudeStoreOf({ state: "unreadable" }, tempDir(), {})).toBeNull();
+    expect(await processClaudeConfigDir(gone.pid, ["gone"])).toBeNull();
+  });
+
+  it("reads a pane with no Claude as the server's default store, and two Claudes as no answer", async () => {
+    const shell = { pid: 1, name: "bash", argv: ["bash"] };
+    expect(await paneClaudeSource([shell])).toBeNull();
+    expect(await paneClaudeSource([{ pid: 2, name: "claude" }, { pid: 3, name: "claude" }])).toEqual({ state: "ambiguous" });
+    const home = tempDir();
+    expect((await claudeStoreOf(null, home, {}))?.env).toBeNull();
+    expect((await claudeStoreOf(null, home, { CLAUDE_CONFIG_DIR: join(home, "server-store") }))?.env).toEqual({ CLAUDE_CONFIG_DIR: join(home, "server-store") });
+  });
+
+  it("implicit and explicit default store routes remain distinct", async () => {
+    const home = tempDir();
+    mkdirSync(join(home, ".claude"));
+    const implicit = await claudeStoreOf({ state: "absent" }, home, {});
+    const explicit = await claudeStoreOf({ state: "override", dir: join(home, ".claude") }, home, {});
+    const empty = await claudeStoreOf({ state: "override", dir: "" }, home, {});
+    // one directory, three ways of choosing it: each lists ~/.claude, each resumes as it was chosen
+    expect([implicit?.dir, explicit?.dir, empty?.dir]).toEqual([join(home, ".claude"), join(home, ".claude"), join(home, ".claude")]);
+    expect([implicit?.env, explicit?.env, empty?.env]).toEqual([null, { CLAUDE_CONFIG_DIR: join(home, ".claude") }, { CLAUDE_CONFIG_DIR: "" }]);
+    expect(new Set([implicit?.key, explicit?.key, empty?.key]).size).toBe(3);
+    for (const key of [implicit?.key, explicit?.key, empty?.key]) expect(key).toMatch(/^[0-9a-f]{24}$/);
+    // the key names the store, not the path: another spelling of the same directory is the same key
+    symlinkSync(join(home, ".claude"), join(home, "link"));
+    expect((await claudeStoreOf({ state: "override", dir: join(home, "link") }, home, {}))?.key).toBe(explicit?.key);
+    expect(explicit?.key).not.toContain(home);
+  });
+});
+
 describe("a Windows Claude's store", () => {
   // Windows lets no one read another process's environment: the store is the one holding the
   // live PID record. These run anywhere, with the process table handed in (windows-native.test.ts
@@ -524,6 +587,22 @@ describe("a Windows Claude's store", () => {
       expect(claudeStoreKey(`${store}-work`, id, win32)).not.toBe(claudeStoreKey(store, id, win32));
     }
     expect(claudeStoreKey("C:\\a", { dev: 7n, ino: 42n }, win32)).toBe(claudeStoreKey("\\\\?\\D:\\b", { dev: 7n, ino: 42n }, win32));
+  });
+
+  it("tells a ~/.claude found by its PID record from an override, which Resume needs and the record cannot say", async () => {
+    const dir = home();
+    record(join(dir, ".claude"));
+    expect(await processClaudeSource(PID, [CLAUDE_EXE], dir, "win32", table)).toEqual({ state: "store", dir: join(dir, ".claude") });
+    const store = await claudeStoreOf({ state: "store", dir: join(dir, ".claude") }, dir, {});
+    expect(store?.env).toBe("unsupported");
+    forgetClaudeSessions();
+    rmSync(join(dir, ".claude"), { recursive: true });
+    record(join(dir, ".claude-second"));
+    expect(await processClaudeSource(PID, [CLAUDE_EXE], dir, "win32", table)).toEqual({ state: "override", dir: join(dir, ".claude-second") });
+    record(join(dir, ".claude-copy"));
+    forgetClaudeSessions();
+    expect(await processClaudeSource(PID, [CLAUDE_EXE], dir, "win32", table)).toEqual({ state: "ambiguous" });
+    expect(await claudeStoreOf({ state: "ambiguous" }, dir, {})).toBeNull();
   });
 
   it("looks again after a miss, since Claude writes its record as it starts", async () => {

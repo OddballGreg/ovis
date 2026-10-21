@@ -49,7 +49,7 @@ import { handleVoiceRequest, VoiceService } from "./voice.ts";
 import { BRIDGE_PROTOCOL } from "../shared/machines.ts";
 import { bridgeIdentity, registerBridge } from "./bridge.ts";
 import { handleMachineRequest, nonCanonicalPath } from "./machine-api.ts";
-import { handleSessionHistoryRequest, SESSION_HISTORY_PATH } from "./session-history-routes.ts";
+import { handleSessionHistoryRequest, handleSessionResumeRequest, SESSION_HISTORY_PATH, SESSION_RESUME_PATH } from "./session-history-routes.ts";
 import { HerdrSidebarConfig, herdrConfigPath } from "./herdr-sidebar.ts";
 import { closeCodexDaemonSources } from "./codex-daemon.ts";
 import { MachineRelay } from "./machine-relay.ts";
@@ -253,7 +253,7 @@ export function createServer(
       const url = new URL(request.url);
       let { pathname } = url;
       const bridgeAuthorized = isAuthenticated(request, bridgeToken);
-      const bridgePath = pathname === "/api/bridge" || pathname === "/api/session" || pathname === SESSION_HISTORY_PATH || pathname === "/api/agents" || pathname === "/api/agent/rename" || pathname === "/api/agent/commands" || pathname === "/api/integrations" || pathname === "/api/plugins/actions" || pathname === "/api/plugin/action" || pathname.startsWith("/api/pane/") || pathname.startsWith("/api/workspace/") || pathname.startsWith("/api/worktree/") || pathname.startsWith("/api/tab/") || pathname === "/api/layout/ratio" || pathname.startsWith("/api/fs/") || pathname === "/ws";
+      const bridgePath = pathname === "/api/bridge" || pathname === "/api/session" || pathname === SESSION_HISTORY_PATH || pathname === SESSION_RESUME_PATH || pathname === "/api/agents" || pathname === "/api/agent/rename" || pathname === "/api/agent/commands" || pathname === "/api/integrations" || pathname === "/api/plugins/actions" || pathname === "/api/plugin/action" || pathname.startsWith("/api/pane/") || pathname.startsWith("/api/workspace/") || pathname.startsWith("/api/worktree/") || pathname.startsWith("/api/tab/") || pathname === "/api/layout/ratio" || pathname.startsWith("/api/fs/") || pathname === "/ws";
       const ip = bunServer.requestIP(request);
       const loopback = ip !== null && isLoopbackAddress(ip.address);
       const forwarded = cameThroughProxy(request.headers);
@@ -509,6 +509,12 @@ export function createServer(
       if (pathname === SESSION_HISTORY_PATH) {
         setRequestRoute(SESSION_HISTORY_PATH);
         return handleSessionHistoryRequest(request, url, { readOnly, stores: { codexHome: options.codexHome, opencodeDb: options.opencodeDb, hermesHome: options.hermesHome } });
+      }
+
+      if (pathname === SESSION_RESUME_PATH) {
+        setRequestRoute(SESSION_RESUME_PATH);
+        // agent.start can legitimately take a minute; Bun's default idle timeout is shorter
+        return handleSessionResumeRequest(request, { readOnly, stores: { codexHome: options.codexHome, opencodeDb: options.opencodeDb, hermesHome: options.hermesHome }, extendTimeout: () => bunServer.timeout(request, 75) });
       }
 
       if (pathname.startsWith("/api/pane/prompt")) {

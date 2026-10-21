@@ -1419,6 +1419,18 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
   An empty store says **No earlier Codex sessions in this folder.**; a PC whose bridge answers
   404 for the route says the bridge does not offer this yet, and the workspace menu of such a PC
   has no item (the bridge is asked once, without a workspace, so nothing is listed by the probe).
+- Claude keeps one store per `CLAUDE_CONFIG_DIR`, and two stores can hold the same session id. A
+  Claude list is the store of the pane it is opened from (the pane asking; from a workspace row,
+  the selected pane, else the workspace's first in tab order), and each row's Resume is bound to
+  that pane and store: it goes to `POST /api/sessions/resume`, never the argv-only tab request,
+  which starts it in the same store or names the pane already showing it there (selected, as
+  **Open** is). A pane that reports the same id is **Already open** for the row only when it is the
+  list's own pane; another may be on another store. A store that changed since the list is read
+  again, with a `role="status"` line saying so. A row its bridge bound to no store (an older
+  bridge, or a store whose choice cannot be repeated) shows a quiet **Resume unavailable** pill
+  instead of the button: no store selector is added, and nothing is started in the default store
+  in its place. This keeps the Codex CLI and Claude Code pickers' one-session-per-row design;
+  Claude Code itself only ever lists the store it runs on, which is what binding to the pane does.
 - Keyboard: the first row's button takes the focus once the rows are in (the agent field until
   then; focus the user moved meanwhile stays), ArrowUp/ArrowDown and Home/End move along the
   rows' buttons, Tab stays inside, Enter resumes, Escape, the X, Cancel and the scrim close, and
@@ -1430,6 +1442,8 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
   above them because the folder may hold several agents' sessions.
 - The browser demo answers `GET /api/sessions/history` with two fictional sessions per agent and
   marks a tab resumed through it as showing that session, so the **Already open** path shows too.
+  Its flaky-retry-test workspace answers Claude's list as an older bridge would (no store source,
+  no resume route), so **Resume unavailable** shows there.
 
 ### Changes list and diff viewer (`.repo-changes`, `.repo-diff*`)
 - Files has two faces, **Browse** | **Changes** (`.segmented` in its header). **Changes** lists

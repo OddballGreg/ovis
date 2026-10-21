@@ -545,7 +545,7 @@ export function App() {
   // the dialog makes a tab in this workspace instead of a workspace, while set
   const [newTab, setNewTab] = useState<NewTabTarget | null>(null);
   // the earlier sessions of a workspace's folder (components/SessionHistory.tsx), while open
-  const [sessionHistory, setSessionHistory] = useState<{ machineId: string; workspaceId: string; agent: SessionHistoryAgent } | null>(null);
+  const [sessionHistory, setSessionHistory] = useState<{ machineId: string; workspaceId: string; agent: SessionHistoryAgent; paneId: string | null } | null>(null);
   const [connected, setConnected] = useState(false);
   /** the active terminal's socket has been connected on this page before (PaneTerminal reports it): not
    *  connected, the chip says reconnecting; before this page's first connection to the PC, connecting */
@@ -1482,8 +1482,15 @@ export function App() {
         // a pane's own agent, or nothing; for a workspace, the agent named, else the pane in front's, else any of it
         const agent = sessionHistoryListAgent(target, found.agent, found.panes.map((pane) => pane.agent));
         if (agent === null) return;
+        // the pane the list is for (a Claude list is its store's): the pane asking, else the one selected
+        // in the workspace, else the workspace's first in tab order
+        const selected = selectionRef.current.machineId === found.machineId ? selectionRef.current.paneId : null;
+        const tabs = machinesRef.current.find((m) => m.id === found.machineId)?.snapshot?.tabs ?? [];
+        const tabNumber = (tabId: string) => tabs.find((tab) => tab.tab_id === tabId)?.number ?? Number.MAX_SAFE_INTEGER;
+        const paneId = target?.paneId ?? found.panes.find((pane) => pane.pane_id === selected)?.pane_id
+          ?? [...found.panes].sort((one, other) => tabNumber(one.tab_id) - tabNumber(other.tab_id))[0]?.pane_id ?? null;
         setDrawerOpen(false);
-        setSessionHistory({ machineId: found.machineId, workspaceId: found.workspace.workspace_id, agent });
+        setSessionHistory({ machineId: found.machineId, workspaceId: found.workspace.workspace_id, agent, paneId });
       },
       openPalette,
       agentStarted: (machineId, paneId) => lenses.startedAgent(paneStorageId(machineId, paneId), window.matchMedia?.("(pointer: coarse)").matches === true),
@@ -1909,7 +1916,7 @@ export function App() {
                         onPeek={active && item && item.pane_id === selectedPaneId && attach ? (request: PeekRequest) => setTerminalPeek({ ...request, slot, machineId, paneId: item.pane_id }) : undefined}
                         onEndPeek={endPeek}
                         // /resume lists the pane's own agent's sessions, and only for an agent whose store is read
-                        onOpenHistory={item && sessionHistoryAgent(item.agent) !== null ? () => actions.openSessionHistory({ machineId, workspaceId: item.workspace_id, agent: item.agent, scope: "pane" }) : undefined}
+                        onOpenHistory={item && sessionHistoryAgent(item.agent) !== null ? () => actions.openSessionHistory({ machineId, workspaceId: item.workspace_id, agent: item.agent, scope: "pane", paneId: item.pane_id }) : undefined}
                         // the composer's new-agent button: the New tab dialog on this pane's workspace, as the tab menu opens it
                         onOpenNewSession={item ? () => actions.openNewTab({ machineId, workspaceId: item.workspace_id }) : undefined}
                         // the other half never takes the keyboard: a press in it makes it active first
@@ -1971,13 +1978,14 @@ export function App() {
         workspace={sessionHistoryWorkspace.workspace}
         panes={sessionHistoryWorkspace.panes}
         agent={sessionHistory.agent}
+        sourcePaneId={sessionHistory.paneId}
         recent={recentResumes}
         onClose={closeSessionHistory}
         onSelectPane={(paneId) => { closeSessionHistory(); selectTarget(sessionHistory.machineId, paneId); }}
         onResumed={(opened, session) => {
           closeSessionHistory();
           if (opened.agent_started) {
-            rememberResume({ machineId: sessionHistory.machineId, workspaceId: sessionHistory.workspaceId, agent: session.agent, id: session.id, paneId: opened.pane_id });
+            rememberResume({ machineId: sessionHistory.machineId, workspaceId: sessionHistory.workspaceId, agent: session.agent, id: session.id, store: session.store, paneId: opened.pane_id });
             actions.agentStarted(sessionHistory.machineId, opened.pane_id);
           }
           selectTarget(sessionHistory.machineId, opened.pane_id);
