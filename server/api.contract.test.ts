@@ -4227,12 +4227,13 @@ describe("workspace order evidence", () => {
 describe("POST /api/sessions/resume", () => {
   const NATIVE = process.platform === "linux" && Bun.which("node") !== null && process.env["HERDR_TEST_MODE"] !== "unit";
   const SESSION = "resume";
-  const config = mkdtempSync("/tmp/hwr-");
-  const root = mkdtempSync(join(tmpdir(), "herdr-web-ui-claude-resume-"));
-  const home = join(root, "home");
-  const alternate = join(root, "alternate-store");
-  const project = join(root, "project");
-  const socket = join(config, "herdr", "sessions", SESSION, "herdr.sock");
+  // made in beforeAll, so a run whose filter leaves these tests out leaves no directory behind
+  let config = "";
+  let root = "";
+  let home = "";
+  let alternate = "";
+  let project = "";
+  let socket = "";
   const herdr = process.env["HERDR_WEB_HERDR_BIN"] || Bun.which("herdr") || "herdr";
   const ID = "00000000-0000-4000-8000-0000000000c1";
   const OTHER = "00000000-0000-4000-8000-0000000000c2";
@@ -4284,6 +4285,12 @@ describe("POST /api/sessions/resume", () => {
 
   beforeAll(async () => {
     if (!NATIVE) return;
+    config = mkdtempSync("/tmp/hwr-");
+    root = mkdtempSync(join(tmpdir(), "herdr-web-ui-claude-resume-"));
+    home = join(root, "home");
+    alternate = join(root, "alternate-store");
+    project = join(root, "project");
+    socket = join(config, "herdr", "sessions", SESSION, "herdr.sock");
     mkdirSync(join(home, ".claude"), { recursive: true });
     mkdirSync(alternate, { recursive: true });
     mkdirSync(project, { recursive: true });
@@ -4352,8 +4359,8 @@ setInterval(() => {}, 1 << 30);
       await daemon.exited;
     }
     listener?.stop(true);
-    rmSync(config, { recursive: true, force: true });
-    rmSync(root, { recursive: true, force: true });
+    if (config !== "") rmSync(config, { recursive: true, force: true });
+    if (root !== "") rmSync(root, { recursive: true, force: true });
   });
 
   it.skipIf(!NATIVE)("real tab.create plus agent.start preserve Claude override presence and store", async () => {
