@@ -64,10 +64,10 @@ export function paneShowingSession(panes: readonly HerdrPane[], workspaceId: str
  * the same id in another pane may be another store's session (the server decides those on Resume).
  */
 export function paneShowingRow(panes: readonly HerdrPane[], workspaceId: string, agent: SessionHistoryAgent, row: SessionHistoryRow): HerdrPane | undefined {
-  const pane = paneShowingSession(panes, workspaceId, agent, row.id);
-  if (agent !== "claude") return pane;
+  if (agent !== "claude") return paneShowingSession(panes, workspaceId, agent, row.id);
   const source = row.resume?.source;
-  return source !== undefined && pane?.pane_id === source.pane_id ? pane : undefined;
+  // the source pane itself, wherever the roster lists it: another pane reporting the id first proves nothing
+  return source === undefined ? undefined : paneShowingSession(panes.filter((pane) => pane.pane_id === source.pane_id), workspaceId, agent, row.id);
 }
 
 /** A row's store key: a Claude row's source store, else "" (one store per agent). */

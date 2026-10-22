@@ -1,6 +1,6 @@
 import { describe, expect, it, beforeAll, afterAll, spyOn } from "bun:test";
 import { Database } from "bun:sqlite";
-import { appendFileSync, chmodSync, closeSync, constants as fsConstants, copyFileSync, mkdirSync, mkdtempSync, existsSync, readFileSync, readdirSync, realpathSync, openSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, closeSync, constants as fsConstants, copyFileSync, mkdirSync, mkdtempSync, existsSync, readFileSync, readdirSync, realpathSync, openSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, watch, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -17,7 +17,7 @@ import { Telemetry } from "./telemetry.ts";
 import { NOTICE_VERSION, telemetryHarnesses, type TelemetryActive, type TelemetryEvent, type TelemetryStatus } from "../shared/telemetry.ts";
 import { DEFAULT_SETTINGS, telemetrySettingsSnapshot } from "../src/lib/settings.ts";
 import { HerdrSocket } from "../src/lib/ws.ts";
-import { HerdrError, herdrRpc, paneRead, ping, sessionSnapshot, tabCreate, workspaceCreate, workspaceClose } from "./herdr/client.ts";
+import { HerdrError, herdrRpc, paneRead, ping, sessionSnapshot, subscribeEvents, tabCreate, workspaceCreate, workspaceClose } from "./herdr/client.ts";
 import { startFakePushService, type FakePushService } from "./push.fake.ts";
 import { descriptorPath, type BridgeDescriptor } from "./bridge.ts";
 import { handleMachineRequest } from "./machine-api.ts";
@@ -4247,7 +4247,7 @@ describe("POST /api/sessions/resume", () => {
   let cwd = "";
   let workspaceId = "";
   let foreignWorkspace = "";
-  const saved = { HERDR_SOCKET: process.env["HERDR_SOCKET"], HOME: process.env["HOME"], CLAUDE_CONFIG_DIR: process.env["CLAUDE_CONFIG_DIR"] };
+  const saved = { HERDR_SOCKET: process.env["HERDR_SOCKET"], HOME: process.env["HOME"], CLAUDE_CONFIG_DIR: process.env["CLAUDE_CONFIG_DIR"], PATH: process.env["PATH"] };
   const restore = (name: keyof typeof saved) => { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; };
   const rpc = <T,>(method: string, params: Record<string, unknown>) => herdrRpc<T>(method, params, socket);
   const snapshotNow = async () => (await rpc<{ snapshot: SessionSnapshot }>("session.snapshot", {})).snapshot;
@@ -4282,6 +4282,57 @@ describe("POST /api/sessions/resume", () => {
     const response = await fetch(`http://127.0.0.1:${app!.port}/api/sessions/resume`, { method: "POST", headers: { ...guard, ...headers }, body: JSON.stringify(body) });
     return [response.status, await response.json()] as [number, SessionResumeResponse & { error?: { code: string; message: string } }];
   };
+  /** herdr up on `path`: tried when its folder changes, and at once again while it refuses (between bind and listen); bounded */
+  const herdrUp = (path: string) => new Promise<void>((resolve, reject) => {
+    let over = false;
+    let trying = false;
+    const finish = (error?: Error) => { if (over) return; over = true; clearTimeout(timer); watcher.close(); if (error) reject(error); else resolve(); };
+    const attempt = async (): Promise<void> => {
+      if (over || trying || !existsSync(path)) return;
+      trying = true;
+      try { await herdrRpc("ping", {}, path, 2_000); finish(); } catch { setImmediate(() => void attempt()); } finally { trying = false; }
+    };
+    const watcher = watch(dirname(path), () => void attempt());
+    const timer = setTimeout(() => finish(new Error("the resume test's herdr did not start")), 15_000);
+    void attempt();
+  });
+  /** A herdr session of its own on `path`, its shells handed `env` over the stand-in PATH and this HOME. */
+  const startHerdr = async (session: string, configDir: string, path: string, env: Record<string, string>) => {
+    mkdirSync(dirname(path), { recursive: true });
+    const started = Bun.spawn([herdr, "--session", session, "server"], { stdin: "ignore", stdout: "ignore", stderr: "ignore", env: {
+      ...Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("HERDR_") && name !== "CLAUDE_CONFIG_DIR")),
+      ...testShellEnv(configDir), XDG_CONFIG_HOME: configDir, HOME: home, PATH: `${join(root, "bin")}:${saved.PATH ?? ""}`, ...env,
+    } });
+    await herdrUp(path);
+    return started;
+  };
+  const stopHerdr = async (session: string, configDir: string, started: ReturnType<typeof Bun.spawn>) => {
+    await Bun.spawn([herdr, "--session", session, "server", "stop"], { stdin: "ignore", stdout: "ignore", stderr: "ignore", env: { ...process.env, XDG_CONFIG_HOME: configDir } }).exited;
+    started.kill();
+    await started.exited;
+  };
+  /** Reads `check` until it holds: once herdr's subscription starts, and again on each event of the pane; bounded */
+  const untilPane = (pane: string, check: () => Promise<boolean>, what: string, start: () => Promise<unknown>) => new Promise<void>((resolve, reject) => {
+    let over = false;
+    let reading = false;
+    let again = false;
+    const finish = (error?: Error) => { if (over) return; over = true; clearTimeout(timer); subscription.close(); if (error) reject(error); else resolve(); };
+    const read = async (): Promise<void> => {
+      if (over) return;
+      if (reading) { again = true; return; }
+      reading = true;
+      try { if (await check()) finish(); } catch (error) { finish(error as Error); } finally {
+        reading = false;
+        if (again && !over) { again = false; void read(); }
+      }
+    };
+    const subscription = subscribeEvents([{ type: "pane.updated", pane_id: pane }, { type: "pane.agent_status_changed", pane_id: pane }], {
+      onStarted: () => { start().then(() => read(), (error: Error) => finish(error)); },
+      onEvent: () => void read(),
+      onError: (error) => finish(error),
+    }, socket);
+    const timer = setTimeout(() => finish(new Error(`herdr never ${what}`)), 10_000);
+  });
 
   beforeAll(async () => {
     if (!NATIVE) return;
@@ -4325,17 +4376,7 @@ setInterval(() => {}, 1 << 30);
     writeSession(join(home, ".claude"), ID, "default store prompt");
     writeSession(alternate, ID, "alternate store prompt");
     // herdr's shells: the stand-in first on PATH, this HOME, and no CLAUDE_CONFIG_DIR of their own
-    const env = {
-      ...Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("HERDR_") && name !== "CLAUDE_CONFIG_DIR")),
-      ...testShellEnv(config), XDG_CONFIG_HOME: config, HOME: home, PATH: `${bin}:${process.env["PATH"] ?? ""}`,
-    };
-    mkdirSync(join(socket, ".."), { recursive: true });
-    daemon = Bun.spawn([herdr, "--session", SESSION, "server"], { stdin: "ignore", stdout: "ignore", stderr: "ignore", env });
-    for (const deadline = Date.now() + 15_000; ;) {
-      try { if (existsSync(socket)) { await herdrRpc("ping", {}, socket, 2_000); break; } } catch { /* not up yet */ }
-      if (Date.now() > deadline) throw new Error("the resume test's herdr did not start");
-      await Bun.sleep(50);
-    }
+    daemon = await startHerdr(SESSION, config, socket, {});
     // the server under test reads herdr, the default store and the variable from its own environment
     process.env["HERDR_SOCKET"] = socket;
     process.env["HOME"] = home;
@@ -4353,11 +4394,7 @@ setInterval(() => {}, 1 << 30);
     restore("HERDR_SOCKET");
     restore("HOME");
     restore("CLAUDE_CONFIG_DIR");
-    if (daemon) {
-      await Bun.spawn([herdr, "--session", SESSION, "server", "stop"], { stdin: "ignore", stdout: "ignore", stderr: "ignore", env: { ...process.env, XDG_CONFIG_HOME: config } }).exited;
-      daemon.kill();
-      await daemon.exited;
-    }
+    if (daemon) await stopHerdr(SESSION, config, daemon);
     listener?.stop(true);
     if (config !== "") rmSync(config, { recursive: true, force: true });
     if (root !== "") rmSync(root, { recursive: true, force: true });
@@ -4365,6 +4402,10 @@ setInterval(() => {}, 1 << 30);
 
   it.skipIf(!NATIVE)("real tab.create plus agent.start preserve Claude override presence and store", async () => {
     const before = readFileSync(transcript(join(home, ".claude"), ID), "utf8");
+    // a pane whose processes herdr reports, none of them Claude: the server's default store, bound to it
+    const shellOnly = (await rpc<{ root_pane: { pane_id: string } }>("tab.create", { workspace_id: workspaceId, cwd, focus: false })).root_pane.pane_id;
+    const [shellStatus, shellList] = await list(shellOnly);
+    expect([shellStatus, shellList.sessions.map((row) => [row.firstMessage, row.resume?.source?.pane_id])]).toEqual([200, [["default store prompt", shellOnly]]]);
     // an exported alternate store: listed from it, resumed in it, the variable still exported
     const exported = await sourcePane(alternate);
     const [status, listed] = await list(exported.pane);
@@ -4452,25 +4493,54 @@ setInterval(() => {}, 1 << 30);
     await refused({ ...valid, pane_id: unreadable.pane }, [409, "claude_store_unknown"]);
     // two Claudes in front of one pane: which one a session belongs to cannot be told
     const tab = await rpc<{ root_pane: { pane_id: string } }>("tab.create", { workspace_id: workspaceId, cwd, focus: false });
-    await rpc("pane.send_text", { pane_id: tab.root_pane.pane_id, text: `sh -c 'claude & CLAUDE_CONFIG_DIR=${alternate} claude; wait'\n` });
-    await nextReport(); await nextReport();
-    // herdr's own process list catches up with the two a moment after they start: read it until it does
+    // herdr's own process list catches up with the two a moment after they start: read it again on each of the pane's events until it does
     const claudes = async () => ((await rpc<{ process_info: { foreground_processes?: { name?: string }[] } }>("pane.process_info", { pane_id: tab.root_pane.pane_id })).process_info.foreground_processes ?? []).filter((entry) => entry.name === "claude").length;
-    for (const deadline = Date.now() + 10_000; await claudes() < 2;) {
-      if (Date.now() > deadline) throw new Error("herdr never listed both Claude processes");
-      await Bun.sleep(50);
-    }
+    await untilPane(tab.root_pane.pane_id, async () => await claudes() >= 2, "listed both Claude processes", async () => {
+      await rpc("pane.send_text", { pane_id: tab.root_pane.pane_id, text: `sh -c 'claude & CLAUDE_CONFIG_DIR=${alternate} claude; wait'\n` });
+      await nextReport(); await nextReport();
+    });
     expect((await list(tab.root_pane.pane_id))[0]).toBe(409);
     await refused({ ...valid, pane_id: tab.root_pane.pane_id }, [409, "claude_store_unknown"]);
-    // none exported by Claude, but its shell exports one: a new tab would not start in the same store
-    const unsupported = await sourcePane(null, { CLAUDE_CONFIG_DIR: alternate });
-    const [, unsupportedList] = await list(unsupported.pane);
-    expect(unsupportedList.sessions.map((row) => row.firstMessage)).toEqual(["default store prompt"]);
-    await refused({ ...valid, pane_id: unsupported.pane, store_key: unsupportedList.sessions[0]!.resume!.source!.store_key }, [409, "launch_unsupported"]);
     // nothing was started in the default store, and no refusal names a store or a prompt
     expect(readFileSync(transcript(join(home, ".claude"), ID), "utf8")).toBe(defaultBefore);
     expect(JSON.stringify(refusals)).not.toMatch(/alternate|prompt|missing-store/);
   }, 90_000);
+
+  it.skipIf(!NATIVE)("a source shell without the override is no proof: herdr exporting one withholds Resume before any tab", async () => {
+    // the implicit store's key, as a list from a pane with none exported gives it
+    const implicitKey = (await list((await sourcePane(null)).pane))[1].sessions[0]!.resume!.source!.store_key;
+    const exportedSession = "resume-exported";
+    const exportedConfig = mkdtempSync("/tmp/hwr-");
+    const exportedSocket = join(exportedConfig, "herdr", "sessions", exportedSession, "herdr.sock");
+    const exportedRpc = <T,>(method: string, params: Record<string, unknown>) => herdrRpc<T>(method, params, exportedSocket);
+    const defaultBefore = readFileSync(transcript(join(home, ".claude"), ID), "utf8");
+    const alternateBefore = readFileSync(transcript(alternate, ID), "utf8");
+    let exported: ReturnType<typeof Bun.spawn> | undefined;
+    try {
+      // a herdr whose own environment exports the alternate store: every new tab of it inherits that
+      exported = await startHerdr(exportedSession, exportedConfig, exportedSocket, { CLAUDE_CONFIG_DIR: alternate });
+      process.env["HERDR_SOCKET"] = exportedSocket;
+      const workspace = (await exportedRpc<Awaited<ReturnType<typeof workspaceCreate>>>("workspace.create", { cwd, label: "herdr-web-ui-test-claude-resume-exported", focus: false })).workspace.workspace_id;
+      const pane = (await exportedRpc<{ root_pane: { pane_id: string } }>("tab.create", { workspace_id: workspace, cwd, focus: false })).root_pane.pane_id;
+      // the pane's shell drops it before Claude starts: the pane alone says none exported
+      await exportedRpc("pane.send_text", { pane_id: pane, text: "exec env -u CLAUDE_CONFIG_DIR /bin/sh -c 'claude; exec /bin/sh'\n" });
+      expect(await nextReport()).toMatchObject({ has: false });
+      const listed = await fetch(`http://127.0.0.1:${app!.port}/api/sessions/history?workspace_id=${encodeURIComponent(workspace)}&agent=claude&pane_id=${encodeURIComponent(pane)}`);
+      const rows = ((await listed.json()) as SessionHistoryResponse).sessions;
+      // the pane's own store is listed, but a new tab would start in herdr's: no Resume for it
+      expect([listed.status, rows.map((row) => [row.firstMessage, row.resume?.source])]).toEqual([200, [["default store prompt", undefined]]]);
+      const tabs = (await exportedRpc<{ snapshot: SessionSnapshot }>("session.snapshot", {})).snapshot.tabs.filter((tab) => tab.workspace_id === workspace).length;
+      const [status, refused] = await resume({ workspace_id: workspace, pane_id: pane, agent: "claude", session_id: ID, store_key: implicitKey });
+      expect([status, refused.error?.code]).toEqual([409, "launch_unsupported"]);
+      expect((await exportedRpc<{ snapshot: SessionSnapshot }>("session.snapshot", {})).snapshot.tabs.filter((tab) => tab.workspace_id === workspace).length).toBe(tabs);
+      expect(readFileSync(transcript(join(home, ".claude"), ID), "utf8")).toBe(defaultBefore);
+      expect(readFileSync(transcript(alternate, ID), "utf8")).toBe(alternateBefore);
+    } finally {
+      process.env["HERDR_SOCKET"] = socket;
+      if (exported) await stopHerdr(exportedSession, exportedConfig, exported);
+      rmSync(exportedConfig, { recursive: true, force: true });
+    }
+  }, 60_000);
 
   it.skipIf(!NATIVE)("answers another PC's Resume through the PC proxy, refusing a stale key there too", async () => {
     // a session no pane shows yet (the first test left one showing ID): Resume makes a tab for it

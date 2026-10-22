@@ -102,6 +102,8 @@ describe("a Claude row bound to its store", () => {
     expect(paneShowingRow(panes, "w1", "claude", claudeRow(ALTERNATE, "p1"))).toBeUndefined();
     // the source pane itself reporting it is the same store by construction
     expect(paneShowingRow([reporting("p1")], "w1", "claude", claudeRow(ALTERNATE, "p1"))?.pane_id).toBe("p1");
+    // wherever the roster lists it: another pane reporting the id before it does not hide it
+    expect(paneShowingRow([reporting("p2"), reporting("p1")], "w1", "claude", claudeRow(ALTERNATE, "p1"))?.pane_id).toBe("p1");
     // a row from a bridge that gave no source is shown by no pane, and other agents keep the UUID match
     expect(paneShowingRow([reporting("p1")], "w1", "claude", claudeRow(null))).toBeUndefined();
     expect(paneShowingRow([pane({ agent_session: { agent: "codex", kind: "id", source: "herdr:codex", value: id } })], "w1", "codex", row())?.pane_id).toBe("p1");

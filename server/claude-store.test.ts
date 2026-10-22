@@ -1,8 +1,8 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, win32 } from "node:path";
-import { AmbiguousClaudeStore, claudeForegroundSession, claudeProcessSession, claudeSessionTempDir, claudeStoreKey, claudeStoreOf, claudeProjectDir, claudeTranscriptFile, configDirInPsLine, forgetClaudeSessions, isClaudeProcess, paneClaudeSource, processClaudeConfigDir, processClaudeSource } from "./claude-store.ts";
+import { AmbiguousClaudeStore, claudeForegroundSession, claudeProcessSession, claudeSessionTempDir, claudeStoreKey, claudeStoreOf, claudeProjectDir, claudeTranscriptFile, configDirInPsLine, forgetClaudeSessions, herdrLaunchSource, isClaudeProcess, paneClaudeSource, processClaudeConfigDir, processClaudeSource, type ClaudeSource } from "./claude-store.ts";
 import type { ProcessRow } from "./windows-processes.ts";
 
 const NATIVE = process.platform === "linux" || process.platform === "darwin";
@@ -361,15 +361,17 @@ describe("CLAUDE_CONFIG_DIR", () => {
 
 describe("a Claude process's store source", () => {
   // a started user process stands for Claude: macOS hides system binaries' environments
-  const children: { kill: () => void }[] = [];
+  const children: { kill: () => void; exited: Promise<number> }[] = [];
   const roots: string[] = [];
-  afterEach(() => {
+  afterEach(async () => {
     forgetClaudeSessions();
-    for (const child of children.splice(0)) child.kill();
+    for (const child of children.splice(0)) { child.kill(); await child.exited; }
     for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
   });
+  // alive until the test ends it: it waits on a stdin nothing writes to, and says it is ready first
+  const KEEP_ALIVE = "process.stdin.resume(); console.log('ready')";
   const standIn = async (env: Record<string, string>) => {
-    const child = Bun.spawn([process.execPath, "-e", "console.log('ready'); await Bun.sleep(20000)"], { env: { PATH: process.env["PATH"] ?? "", HOME: process.env["HOME"] ?? "", ...env }, stdout: "pipe" });
+    const child = Bun.spawn([process.execPath, "-e", KEEP_ALIVE], { env: { PATH: process.env["PATH"] ?? "", HOME: process.env["HOME"] ?? "", ...env }, stdin: "pipe", stdout: "pipe" });
     children.push(child);
     await child.stdout.getReader().read();
     return child.pid;
@@ -378,9 +380,55 @@ describe("a Claude process's store source", () => {
 
   it.skipIf(!NATIVE)("reads an exported store, an empty export and none exported as three sources", async () => {
     const store = tempDir();
-    expect(await processClaudeSource(await standIn({ CLAUDE_CONFIG_DIR: store }))).toEqual({ state: "override", dir: store });
-    expect(await processClaudeSource(await standIn({ CLAUDE_CONFIG_DIR: "" }))).toEqual({ state: "override", dir: "" });
+    // macOS's ps cannot bound an exported value (below): there only none exported is a proof
+    const exported = (dir: string): ClaudeSource => process.platform === "darwin" ? { state: "unreadable" } : { state: "override", dir };
+    expect(await processClaudeSource(await standIn({ CLAUDE_CONFIG_DIR: store }))).toEqual(exported(store));
+    expect(await processClaudeSource(await standIn({ CLAUDE_CONFIG_DIR: "" }))).toEqual(exported(""));
     expect(await processClaudeSource(await standIn({}))).toEqual({ state: "absent" });
+  });
+
+  it("ambiguous macOS ps output is no proof of a store", async () => {
+    const store = tempDir();
+    const home = tempDir();
+    // ps prints arguments and environment as one line: a value holding ` OTHER=` and a separate
+    // OTHER read the same, and so do an argument naming the variable and an assignment
+    const lines = [
+      `claude CLAUDE_CONFIG_DIR=${store} OTHER=value HOME=${home} PATH=/usr/bin\n`,
+      `claude --settings CLAUDE_CONFIG_DIR=${store} HOME=${home} PATH=/usr/bin\n`,
+      `claude HOME=${home} PATH=/usr/bin CLAUDE_CONFIG_DIR=${store}\n`,
+      `claude HOME=${home} PATH=/usr/bin\n`,
+    ];
+    const spawned = spyOn(Bun, "spawn").mockImplementation(((command: string[]) => {
+      expect(command[0]).toBe("/bin/ps");
+      return { stdout: new Response(lines.shift()).body, exited: Promise.resolve(0), kill: () => {} };
+    }) as unknown as typeof Bun.spawn);
+    try {
+      const read = async () => { forgetClaudeSessions(); return processClaudeSource(4242, ["claude"], home, "darwin"); };
+      expect(await read()).toEqual({ state: "unreadable" });
+      expect(await read()).toEqual({ state: "unreadable" });
+      expect(await read()).toEqual({ state: "unreadable" });
+      // none named anywhere, beside the rest of an environment: none exported
+      expect(await read()).toEqual({ state: "absent" });
+    } finally { spawned.mockRestore(); }
+  });
+
+  it.skipIf(process.platform !== "linux")("herdr's launch source is the environment of the server on its socket", async () => {
+    const root = tempDir();
+    const store = tempDir();
+    // a stand-in herdr server: listens on its socket, then says it is ready, alive until the test ends it
+    const server = async (socket: string, env: Record<string, string>) => {
+      const child = Bun.spawn([process.execPath, "-e", `Bun.listen({ unix: ${JSON.stringify(socket)}, socket: { data() {} } }); ${KEEP_ALIVE}`], { env: { PATH: process.env["PATH"] ?? "", HOME: process.env["HOME"] ?? "", ...env }, stdin: "pipe", stdout: "pipe" });
+      children.push(child);
+      await child.stdout.getReader().read();
+    };
+    await server(join(root, "exported.sock"), { CLAUDE_CONFIG_DIR: store });
+    await server(join(root, "none.sock"), {});
+    // the pane's shell may have dropped the variable: herdr's own environment is what a new tab gets
+    expect(await herdrLaunchSource(join(root, "exported.sock"))).toEqual({ state: "override", dir: store });
+    expect(await herdrLaunchSource(join(root, "none.sock"))).toEqual({ state: "absent" });
+    // no server on the socket, or a platform where it is not read: no proof
+    expect(await herdrLaunchSource(join(root, "nobody.sock"))).toEqual({ state: "unreadable" });
+    expect(await herdrLaunchSource(join(root, "none.sock"), "darwin")).toEqual({ state: "unreadable" });
   });
 
   it.skipIf(!NATIVE)("unreadable Claude environment is not a proven absent override", async () => {

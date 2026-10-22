@@ -37,8 +37,10 @@ const probes: string[] = [];
 const claudeLists: string[] = [];
 const resumes: Array<Record<string, unknown>> = [];
 let holdResume = false;
-/** how the bridge answers the next resumes: start it, name a pane already showing it, refuse a changed store, or have no route */
-let resumeAnswer: "created" | "opened" | "stale" | "missing" = "created";
+/** true: the next Claude lists wait for a release, as a list read again after a changed store does */
+let holdList = false;
+/** how the bridge answers the next resumes: start it, name a pane already showing it, refuse a changed store or one a new tab would not keep, or have no route */
+let resumeAnswer: "created" | "opened" | "stale" | "unsupported" | "missing" = "created";
 const json = (body: unknown, status = 200) => Response.json(body, { status, headers: { "cache-control": "no-store" } });
 const refusal = (code: string, message: string, status: number) => json({ error: { code, message } }, status);
 /** every bounded animation (the sheet's rise) over, then two frames; a looping one (a breathing status dot) never finishes and is not waited for */
@@ -62,6 +64,7 @@ try {
       const workspaceId = url.searchParams.get("workspace_id")!;
       if (agent === "claude" && (workspaceId === "w3" || workspaceId === "w4")) {
         claudeLists.push(url.search);
+        if (holdList) await new Promise<void>((resolve) => releases.push(resolve));
         const paneId = url.searchParams.get("pane_id");
         // w4's bridge is from before store-bound Resume: it ignores pane_id and gives no source
         const sessions = CLAUDE_ROWS.map((row) => workspaceId === "w3" && paneId !== null && row.resume ? { ...row, resume: { ...row.resume, source: { pane_id: paneId, store_key: CLAUDE_STORE_KEY } } } : row);
@@ -75,6 +78,7 @@ try {
       resumes.push(body);
       if (holdResume) await new Promise<void>((resolve) => releases.push(resolve));
       if (resumeAnswer === "missing") return refusal("not_found", `unknown endpoint ${path}`, 404);
+      if (resumeAnswer === "unsupported") return refusal("launch_unsupported", "a new tab here would not start Claude in the same store", 409);
       if (resumeAnswer === "stale") return refusal("stale_source", "the pane's Claude store changed since the list: list the sessions again", 409);
       if (resumeAnswer === "opened") return json({ action: "opened", workspace_id: String(body["workspace_id"]), pane_id: "p3" } satisfies SessionResumeResponse);
       return json({ action: "created", workspace_id: String(body["workspace_id"]), pane_id: `p-claude-${resumes.length}`, agent_started: true } satisfies SessionResumeResponse);
@@ -272,9 +276,23 @@ try {
   resumeAnswer = "stale";
   await openHistory("w3");
   const listsBefore = claudeLists.length;
-  await dialog.getByRole("button", { name: /^Resume / }).last().click();
-  await page.getByRole("status").filter({ hasText: "The pane's Claude store changed, so its sessions were read again." }).waitFor();
-  await dialog.locator(".session-row").first().waitFor();
+  const asked = dialog.getByRole("button", { name: /^Resume / }).last();
+  const askedLabel = await asked.getAttribute("aria-label");
+  const geometry = () => dialog.evaluate((element) => { const box = element.getBoundingClientRect(); return [box.top, box.height]; });
+  const before = await geometry();
+  holdList = true;
+  await asked.click();
+  // read again: the rows stay where they were, without their buttons, until the new ones come
+  await page.getByRole("status").filter({ hasText: "Reading sessions…" }).waitFor();
+  assert.equal(await dialog.locator(".session-row").count(), CLAUDE_ROWS.length, "the rows stay while the list is read again");
+  assert.equal(await dialog.getByRole("button", { name: /^Resume / }).evaluateAll((buttons) => buttons.every((button) => (button as HTMLButtonElement).disabled)), true, "no Resume while the list is read again");
+  assert.deepEqual(await geometry(), before, "nothing moves while the list is read again");
+  holdList = false;
+  releases.splice(0).forEach((release) => release());
+  await page.getByRole("status").filter({ hasText: "Claude's store changed; the list was read again." }).waitFor();
+  await page.waitForFunction((label) => document.activeElement?.getAttribute("aria-label") === label, askedLabel);
+  await settled(page);
+  assert.deepEqual(await geometry(), before, "the list read again sits where it was");
   assert.ok(claudeLists.length > listsBefore, "the list was read again");
   assert.equal(resumes.at(-1)?.["session_id"], CLAUDE_OTHER);
   await settled(page);
@@ -290,10 +308,15 @@ try {
   await dialog.getByRole("button", { name: /^Resume / }).last().click();
   await dialog.locator(".session-error").filter({ hasText: "This PC's bridge does not offer this yet" }).waitFor();
   assert.equal(tabCreates.length, tabsBefore, "a 404 resume route falls back to no tab/create");
+  // a store a new tab would not keep: said in the user's words, nothing started
+  resumeAnswer = "unsupported";
+  await dialog.getByRole("button", { name: /^Resume / }).last().click();
+  await dialog.locator(".session-error").filter({ hasText: "This PC can't start this session in the store it was listed from" }).waitFor();
+  assert.equal(tabCreates.length, tabsBefore, "an unsupported launch falls back to no tab/create");
   await page.keyboard.press("Escape");
   await dialog.waitFor({ state: "detached" });
   resumeAnswer = "created";
-  console.log("PASS a changed store is read again, an already shown session is selected, and a missing resume route never falls back to tab/create");
+  console.log("PASS a changed store is read again in place with the focus kept, an already shown session is selected, and a missing route or unsupported launch never falls back to tab/create");
   // an older bridge: rows without a store source offer no Resume at all
   const resumesBefore = resumes.length;
   await openHistory("w4");

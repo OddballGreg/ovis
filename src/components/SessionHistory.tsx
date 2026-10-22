@@ -11,7 +11,8 @@
  * whose resume syntax is not verified is listed with no button. A Claude row is the session in the
  * store of the pane the list was asked for from (`sourcePaneId`): its Resume goes to POST
  * /api/sessions/resume, which starts it in that store or names the pane already showing it there;
- * a store that changed since the list is read again, and a bridge that gives no source (an older
+ * a store that changed since the list is read again with its rows held in place and the focus kept
+ * on the row that asked, and a bridge that gives no source (an older
  * one, or a store it cannot choose again) offers no Resume rather than one in another store. Escape, the scrim and Cancel close
  * it, Tab stays inside, arrows move along the rows, and focus returns to what opened it. The design follows the resume pickers of Codex CLI (`/resume`)
  * and Claude Code (`claude --resume`): one session per row, newest first, the first prompt as its
@@ -68,11 +69,16 @@ export function SessionHistory({ workspace, panes, agent: firstAgent, sourcePane
   /** bumped to read the list again: a Claude store that changed since it was read */
   const [reload, setReload] = useState(0);
   const [relisted, setRelisted] = useState(false);
+  /** the list being read again after a changed store: its rows stay, without their buttons, until the new ones come */
+  const [relisting, setRelisting] = useState(false);
+  const keepRows = useRef(false);
+  /** the session whose Resume found the store changed: its row takes the focus back once the list is read again */
+  const refocus = useRef<string | null>(null);
   const guard = useRef(inFlightGuard());
   /** a refusal in the user's words: a bridge without the route, and the two a Claude store gives, are said here; the rest as the bridge says them */
   const refusal = (reason: unknown): string => {
     if (routeMissing(reason)) return t("This PC's bridge does not offer this yet");
-    if (reason instanceof ApiError && reason.code === "claude_store_unknown") return t("Which Claude store this pane uses can't be told, so its sessions aren't listed.");
+    if (reason instanceof ApiError && reason.code === "claude_store_unknown") return t("Which Claude store this pane uses can't be told, so its sessions aren't listed. Check that one Claude runs in this pane and its store folder exists, then open the list again.");
     if (reason instanceof ApiError && reason.code === "launch_unsupported") return t("This PC can't start this session in the store it was listed from");
     return said(reason);
   };
@@ -95,6 +101,10 @@ export function SessionHistory({ workspace, panes, agent: firstAgent, sourcePane
   // the user moved meanwhile (Tab to Cancel, the field opened) stays where they put it
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
+      const again = refocus.current;
+      refocus.current = null;
+      const row = again === null ? null : list.current?.querySelector<HTMLElement>(`[data-session-id="${CSS.escape(again)}"] button:not(:disabled)`);
+      if (row) { row.focus(); placed.current = row; return; }
       const active = document.activeElement;
       if (surface.current?.contains(active) && active !== placed.current) return;
       // an open agent list keeps the focus: its keys and Escape still belong to the list
@@ -126,11 +136,13 @@ export function SessionHistory({ workspace, panes, agent: firstAgent, sourcePane
   }, [fetchAgentKinds]);
   useEffect(() => {
     let cancelled = false;
-    setAnswer(null);
+    // a list read again after a changed store keeps its rows until the new ones come: nothing moves under the pointer
+    if (!keepRows.current) setAnswer(null);
+    keepRows.current = false;
     setError(null);
     fetchSessionHistory(workspace.workspace_id, agent, sourcePaneId).then(
-      (listing) => { if (!cancelled) setAnswer(listing); },
-      (reason: unknown) => { if (!cancelled) setError(refusal(reason)); },
+      (listing) => { if (!cancelled) { setAnswer(listing); setRelisting(false); } },
+      (reason: unknown) => { if (!cancelled) { setAnswer(null); setError(refusal(reason)); setRelisting(false); } },
     );
     return () => { cancelled = true; };
   }, [agent, fetchSessionHistory, reload, sourcePaneId, t, workspace.workspace_id]);
@@ -141,10 +153,17 @@ export function SessionHistory({ workspace, panes, agent: firstAgent, sourcePane
   }, [firstAgent, kinds]);
   const agentLabel = options.find((option) => option.kind === agent)?.label ?? agent;
   const now = useMemo(() => Date.now(), [answer]);
-  const failed = (reason: unknown): void => {
+  const failed = (row: SessionHistoryRow, reason: unknown): void => {
     setPending(null);
     // the pane's Claude is on another store now, or gone: its rows are read again, never resumed elsewhere
-    if (reason instanceof ApiError && reason.status === 409 && reason.code === "stale_source") { setRelisted(true); setReload((count) => count + 1); return; }
+    if (reason instanceof ApiError && reason.status === 409 && reason.code === "stale_source") {
+      keepRows.current = true;
+      refocus.current = row.id;
+      setRelisting(true);
+      setRelisted(true);
+      setReload((count) => count + 1);
+      return;
+    }
     setError(refusal(reason));
   };
   const resume = (row: SessionHistoryRow): void => {
@@ -170,7 +189,7 @@ export function SessionHistory({ workspace, panes, agent: firstAgent, sourcePane
         if (opened.agent_started === false && opened.error) { setPending(null); setError(opened.error.message); return; }
         onResumed(opened, { agent, id: row.id, store });
       },
-      failed,
+      (reason: unknown) => failed(row, reason),
     );
   };
   const closeFromScrim = (event: MouseEvent<HTMLDivElement>): void => {
@@ -209,7 +228,7 @@ export function SessionHistory({ workspace, panes, agent: firstAgent, sourcePane
         <div className="modal-body">
           <div className="field session-agent">
             <span className="field-label" id={`${id}-agent`}>{t("Agent")}</span>
-            <AgentPicker ref={picker} agents={options} value={agent} shell={false} disabled={pending !== null} labelledBy={`${id}-agent`} onChange={(kind) => setAgent(kind as SessionHistoryAgent)} />
+            <AgentPicker ref={picker} agents={options} value={agent} shell={false} disabled={pending !== null || relisting} labelledBy={`${id}-agent`} onChange={(kind) => setAgent(kind as SessionHistoryAgent)} />
             {answer && <span className="field-hint session-folder">{t("Sessions started in {folder}", { folder: "\u0000" }).split("\u0000").map((part, index) => index === 0 ? <span key="before">{part}</span> : <span key="after"><code>{answer.cwd}</code>{part}</span>)}</span>}
           </div>
           {rows === null && !error ? (
@@ -232,7 +251,7 @@ export function SessionHistory({ workspace, panes, agent: firstAgent, sourcePane
                 // a Claude row its bridge bound to no store: no Resume that could start it in another
                 const unbound = resumable && agent === "claude" && claudeResumeRequest(row, workspace.workspace_id) === null;
                 return (
-                  <li key={key} className={`session-row${pending === key ? " is-pending" : ""}`} aria-label={when ? `${title} · ${when.label}` : title}>
+                  <li key={key} data-session-id={row.id} className={`session-row${pending === key ? " is-pending" : ""}`} aria-label={when ? `${title} · ${when.label}` : title}>
                     <span className="session-copy">
                       <span className={`session-title${row.title === null && row.firstMessage === null ? " session-id" : ""}`}>{title}</span>
                       {detail !== null && <span className="session-detail">{detail}</span>}
@@ -242,12 +261,12 @@ export function SessionHistory({ workspace, panes, agent: firstAgent, sourcePane
                       {shown || withheld ? (
                         <span className="session-actions">
                           <span className="pill">{t("Already open")}</span>
-                          <button type="button" className="btn session-action" disabled={pending !== null || shown === undefined} aria-label={t("Open the pane showing {title}", { title })} onClick={() => { if (shown) onSelectPane(shown.pane_id); }}>{t("Open")}</button>
+                          <button type="button" className="btn session-action" disabled={pending !== null || relisting || shown === undefined} aria-label={t("Open the pane showing {title}", { title })} onClick={() => { if (shown) onSelectPane(shown.pane_id); }}>{t("Open")}</button>
                         </span>
                       ) : unbound ? (
                         <span className="pill" title={t("This PC can't start this session in the store it was listed from")}>{t("Resume unavailable")}</span>
                       ) : resumable && (
-                        <button type="button" className="btn session-action" disabled={pending !== null} aria-label={t("Resume {title}", { title })} onClick={() => resume(row)}>{t("Resume")}</button>
+                        <button type="button" className="btn session-action" disabled={pending !== null || relisting} aria-label={t("Resume {title}", { title })} onClick={() => resume(row)}>{t("Resume")}</button>
                       )}
                     </span>
                   </li>
@@ -255,8 +274,8 @@ export function SessionHistory({ workspace, panes, agent: firstAgent, sourcePane
               })}
             </ul>
           )}
-          {pending !== null && <p className="field-hint" role="status">{t("Resuming…")}</p>}
-          {relisted && pending === null && <p className="field-hint" role="status">{t("The pane's Claude store changed, so its sessions were read again.")}</p>}
+          {/* one line kept under the rows, so none of them moves when it speaks: Resuming, Reading again, why it was read again */}
+          {rows && rows.length > 0 && <p className="field-hint session-status" role="status">{pending !== null ? t("Resuming…") : relisting ? t("Reading sessions…") : relisted ? t("Claude's store changed; the list was read again.") : null}</p>}
           {error && <p className="field-hint session-error" role="alert">{error}</p>}
         </div>
         <footer className="modal-footer">

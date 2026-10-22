@@ -15,7 +15,7 @@
 
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { open, readFile, readdir, stat } from "node:fs/promises";
+import { open, readFile, readdir, readlink, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import nodePath, { basename, dirname, isAbsolute, join, type PlatformPath } from "node:path";
 import { directoryKey, withoutVerbatimPrefix } from "./codex.ts";
@@ -156,6 +156,17 @@ async function overrideSource(value: string): Promise<ClaudeSource> {
   return dir === null ? { state: "unreadable" } : { state: "override", dir };
 }
 
+/** A Linux process's environment as /proc/<pid>/environ holds it, read in full, as a source. */
+async function environSource(environ: string): Promise<SourceRead> {
+  const entries = environ.split("\0").filter((entry) => entry !== "");
+  // an environment read empty is a process gone or not ours to read, not one without the variable
+  if (entries.length === 0) return { source: { state: "unreadable" }, legacy: null };
+  const named = entries.filter((entry) => entry.startsWith("CLAUDE_CONFIG_DIR=")).map((entry) => entry.slice(18));
+  const legacy = await namedDirectory(named[0] || null);
+  if (named.length > 1) return { source: { state: "unreadable" }, legacy };
+  return { source: named.length === 0 ? { state: "absent" } : await overrideSource(named[0]!), legacy };
+}
+
 async function readClaudeSource(pid: number, home: string, platform: string, table: () => Promise<ProcessRow[]>): Promise<SourceRead> {
   const unreadable: SourceRead = { source: { state: "unreadable" }, legacy: null };
   try {
@@ -165,15 +176,7 @@ async function readClaudeSource(pid: number, home: string, platform: string, tab
       const implicit = claudeStoreKey(owner, null) === claudeStoreKey(join(home, ".claude"), null);
       return { source: implicit ? { state: "store", dir: owner } : { state: "override", dir: owner }, legacy: await namedDirectory(owner) };
     }
-    if (platform === "linux") {
-      const entries = (await readFile(`/proc/${pid}/environ`, "utf8")).split("\0").filter((entry) => entry !== "");
-      // an environment read empty is a process gone or not ours to read, not one without the variable
-      if (entries.length === 0) return unreadable;
-      const named = entries.filter((entry) => entry.startsWith("CLAUDE_CONFIG_DIR=")).map((entry) => entry.slice(18));
-      const legacy = await namedDirectory(named[0] || null);
-      if (named.length > 1) return { source: { state: "unreadable" }, legacy };
-      return { source: named.length === 0 ? { state: "absent" } : await overrideSource(named[0]!), legacy };
-    }
+    if (platform === "linux") return await environSource(await readFile(`/proc/${pid}/environ`, "utf8"));
     if (platform === "darwin") {
       const child = Bun.spawn(["/bin/ps", "-E", "-ww", "-p", String(pid), "-o", "command="], { stdout: "pipe", stderr: "ignore" });
       const timer = setTimeout(() => child.kill(), 3000);
@@ -185,11 +188,11 @@ async function readClaudeSource(pid: number, home: string, platform: string, tab
       } finally { clearTimeout(timer); }
       const legacy = await namedDirectory(configDirInPsLine(text));
       if (code !== 0 || text.trim() === "") return { source: { state: "unreadable" }, legacy };
-      const assignments = [...text.matchAll(/(?:^|\s)CLAUDE_CONFIG_DIR=/g)].length;
-      // ps cannot tell an argument or a value containing ` NAME=` from an assignment: two are no answer
-      if (assignments > 1) return { source: { state: "unreadable" }, legacy };
-      if (assignments === 1) return { source: await overrideSource(configDirInPsLine(text) ?? ""), legacy };
-      // a process that overwrote its environment's memory shows none of it: no variable seen is a proof only beside others
+      // ps prints the arguments and the environment as one line: a value holding ` NAME=` is cut
+      // there, and an argument naming the variable reads as an assignment, so no value it shows
+      // proves the store. Only none shown at all proves none, and only beside the rest of an
+      // environment: a process that overwrote its environment's memory shows none of it
+      if (/(?:^|\s)CLAUDE_CONFIG_DIR=/.test(text)) return { source: { state: "unreadable" }, legacy };
       return { source: /(?:^|\s)(?:HOME|PATH)=/.test(text) ? { state: "absent" } : { state: "unreadable" }, legacy };
     }
     return unreadable;
@@ -226,6 +229,46 @@ export async function processClaudeSource(
   table: () => Promise<ProcessRow[]> = recentProcessTable,
 ): Promise<ClaudeSource> {
   return (await processRead(pid, argv, home, platform, table)).source;
+}
+
+/**
+ * The store source a new herdr tab inherits: the environment of the herdr server listening on
+ * `socket`, which every shell it starts is handed (a tab's own env aside). A pane's shell does not
+ * say it: it may have dropped or changed the variable herdr handed down. On Linux, the processes
+ * holding that listening socket, each read in full from /proc, all the same source; elsewhere, or
+ * when none is found or they differ, unreadable.
+ */
+export async function herdrLaunchSource(socket: string, platform: string = process.platform, proc = "/proc"): Promise<ClaudeSource> {
+  const unreadable: ClaudeSource = { state: "unreadable" };
+  if (platform !== "linux") return unreadable;
+  try {
+    // Num RefCount Protocol Flags Type St Inode Path; the listening one has __SO_ACCEPTCON
+    const inodes = new Set((await readFile(join(proc, "net", "unix"), "utf8")).split("\n").slice(1)
+      .map((line) => line.trim().split(/\s+/))
+      .filter((fields) => fields.length >= 8 && fields[3] === "00010000" && fields.slice(7).join(" ") === socket)
+      .map((fields) => `socket:[${fields[6]}]`));
+    if (inodes.size === 0) return unreadable;
+    const sources: ClaudeSource[] = [];
+    for (const entry of await readdir(proc)) {
+      if (!/^\d+$/.test(entry)) continue;
+      let fds: string[];
+      try { fds = await readdir(join(proc, entry, "fd")); } catch { continue; /* gone, or not ours */ }
+      for (const fd of fds) {
+        let target: string;
+        try { target = await readlink(join(proc, entry, "fd", fd)); } catch { continue; }
+        if (!inodes.has(target)) continue;
+        let environ = "";
+        try { environ = await readFile(join(proc, entry, "environ"), "utf8"); } catch { /* read as empty: unreadable */ }
+        sources.push((await environSource(environ)).source);
+        break;
+      }
+    }
+    const first = sources[0];
+    if (first === undefined || sources.some((source) => JSON.stringify(source) !== JSON.stringify(first))) return unreadable;
+    return first;
+  } catch {
+    return unreadable;
+  }
 }
 
 /** A pane's foreground processes, as herdr's `pane.process_info` lists them. */
