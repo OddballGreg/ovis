@@ -20,6 +20,7 @@ export const WORKSPACE_ZH: Record<string, string> = {
   "Reading worktrees…": "正在读取工作树…",
   "No other worktrees of this repository.": "此仓库没有其他工作树。",
   "Already open": "已打开",
+  "Which Claude store this pane uses can't be told, so its sessions aren't listed.": "无法确定此窗格的 Claude 存储，因此不列出其会话。",
   "Resume unavailable": "无法继续",
   "This PC can't start this session in the store it was listed from": "这台电脑无法在列出该会话的存储中启动它",
   "The pane's Claude store changed, so its sessions were read again.": "窗格的 Claude 存储已更改，已重新读取会话。",

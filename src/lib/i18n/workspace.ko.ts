@@ -20,6 +20,7 @@ export const WORKSPACE_KO: Record<string, string> = {
   "Reading worktrees…": "워크트리 읽는 중…",
   "No other worktrees of this repository.": "이 저장소에 다른 워크트리가 없습니다.",
   "Already open": "이미 열림",
+  "Which Claude store this pane uses can't be told, so its sessions aren't listed.": "이 패널의 Claude 저장소를 알 수 없어 세션을 표시하지 않습니다.",
   "Resume unavailable": "이어하기 불가",
   "This PC can't start this session in the store it was listed from": "이 PC는 이 세션을 목록을 읽어 온 저장소에서 시작할 수 없습니다",
   "The pane's Claude store changed, so its sessions were read again.": "패널의 Claude 저장소가 바뀌어 세션을 다시 읽었습니다.",

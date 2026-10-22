@@ -69,6 +69,13 @@ export function SessionHistory({ workspace, panes, agent: firstAgent, sourcePane
   const [reload, setReload] = useState(0);
   const [relisted, setRelisted] = useState(false);
   const guard = useRef(inFlightGuard());
+  /** a refusal in the user's words: a bridge without the route, and the two a Claude store gives, are said here; the rest as the bridge says them */
+  const refusal = (reason: unknown): string => {
+    if (routeMissing(reason)) return t("This PC's bridge does not offer this yet");
+    if (reason instanceof ApiError && reason.code === "claude_store_unknown") return t("Which Claude store this pane uses can't be told, so its sessions aren't listed.");
+    if (reason instanceof ApiError && reason.code === "launch_unsupported") return t("This PC can't start this session in the store it was listed from");
+    return said(reason);
+  };
   const surface = useRef<HTMLDivElement>(null);
   const list = useRef<HTMLUListElement>(null);
   const picker = useRef<HTMLButtonElement>(null);
@@ -123,7 +130,7 @@ export function SessionHistory({ workspace, panes, agent: firstAgent, sourcePane
     setError(null);
     fetchSessionHistory(workspace.workspace_id, agent, sourcePaneId).then(
       (listing) => { if (!cancelled) setAnswer(listing); },
-      (reason: unknown) => { if (!cancelled) setError(routeMissing(reason) ? t("This PC's bridge does not offer this yet") : said(reason)); },
+      (reason: unknown) => { if (!cancelled) setError(refusal(reason)); },
     );
     return () => { cancelled = true; };
   }, [agent, fetchSessionHistory, reload, sourcePaneId, t, workspace.workspace_id]);
@@ -138,7 +145,7 @@ export function SessionHistory({ workspace, panes, agent: firstAgent, sourcePane
     setPending(null);
     // the pane's Claude is on another store now, or gone: its rows are read again, never resumed elsewhere
     if (reason instanceof ApiError && reason.status === 409 && reason.code === "stale_source") { setRelisted(true); setReload((count) => count + 1); return; }
-    setError(routeMissing(reason) ? t("This PC's bridge does not offer this yet") : said(reason));
+    setError(refusal(reason));
   };
   const resume = (row: SessionHistoryRow): void => {
     const store = rowStore(row);

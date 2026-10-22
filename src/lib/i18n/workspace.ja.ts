@@ -20,6 +20,7 @@ export const WORKSPACE_JA: Record<string, string> = {
   "Reading worktrees…": "ワークツリーを読み込んでいます…",
   "No other worktrees of this repository.": "このリポジトリに他のワークツリーはありません。",
   "Already open": "開いています",
+  "Which Claude store this pane uses can't be told, so its sessions aren't listed.": "このペインの Claude の保存先がわからないため、セッションを表示しません。",
   "Resume unavailable": "再開できません",
   "This PC can't start this session in the store it was listed from": "この PC では、一覧を読んだ保存先でこのセッションを開始できません",
   "The pane's Claude store changed, so its sessions were read again.": "ペインの Claude の保存先が変わったため、セッションを読み直しました。",

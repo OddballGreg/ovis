@@ -1426,7 +1426,9 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
   which starts it in the same store or names the pane already showing it there (selected, as
   **Open** is). A pane that reports the same id is **Already open** for the row only when it is the
   list's own pane; another may be on another store. A store that changed since the list is read
-  again, with a `role="status"` line saying so. A row its bridge bound to no store (an older
+  again, with a `role="status"` line saying so; a pane whose store cannot be told (an unreadable
+  environment, or two Claudes in front of it) lists nothing and says why in words. A row its
+  bridge bound to no store (an older
   bridge, or a store whose choice cannot be repeated) shows a quiet **Resume unavailable** pill
   instead of the button: no store selector is added, and nothing is started in the default store
   in its place. This keeps the Codex CLI and Claude Code pickers' one-session-per-row design;
