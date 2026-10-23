@@ -11,7 +11,9 @@ build; see [Later builds](#later-builds)).
 ## 1. The upload key (the owner runs this, once)
 
 Play App Signing keeps the key that signs the app on phones; you upload builds signed with your
-own **upload key**. The key and its passwords never go into the repository or to anyone else.
+own **upload key**. The key and its passwords never go into the repository or to anyone else; the
+repository's `.gitignore` ignores `*.jks`, `*.keystore` and `upload.properties` wherever they are
+put, in case one ends up inside the checkout.
 
 If `~/.config/ovis-android/ovis-upload.jks` and `~/.config/ovis-android/upload.properties`
 already exist on your PC, you have one: skip to [the build](#2-the-build). To see its
@@ -127,26 +129,61 @@ emulator; no real PC or session is in them.
 **Data safety** (as of this test build, without push). Google counts as collected anything the
 app sends off the phone, wherever it goes, so what travels to the user's own PC counts too. Its
 exception for data a user sends to their own storage needs an app that "never collects or
-accesses" that data, and Ovis shows it, so it does not apply. Answer:
+accesses" that data, and Ovis shows it, so it does not apply. Two routes leave the phone:
+
+- **To the user's own PC**: everything the app shows and sends while it is open.
+- **On to the developer, from the PC**: the Ovis server on the PC sends anonymous usage counts to
+  the developer's telemetry Worker (`server/telemetry.ts`, `telemetry/worker.ts`). The client the
+  phone opens tells the PC its settings (`TelemetryNotice` in
+  `src/components/TelemetryControls.tsx`), and the PC puts the settings of the last browser or
+  phone that told it into those counts. Details below.
+
+Answers:
 
 - *Does your app collect or share any of the required user data types?* **Yes.**
 - *Is all of the user data collected by your app encrypted in transit?* **No** (a plain `http`
-  address on a home network is allowed; over Tailscale and `https` it is encrypted).
-- *Do you provide a way for users to request that their data is deleted?* **No** (it is kept on
-  the user's own computer, which the user controls).
-- Data types, each **collected, not shared, not processed ephemerally, required**:
+  address on a home network is allowed; over Tailscale and `https` it is encrypted; the usage
+  counts go to the developer over `https`).
+- *Do you provide a way for users to request that their data is deleted?* **No** (what goes to the
+  PC is kept on the user's own computer; the usage counts hold no account or contact to find a
+  person by).
+- Data types, each **collected, not shared, not processed ephemerally**:
 
-| Data type | What it is in Ovis | Purpose |
-|---|---|---|
-| Messages > Other in-app messages | the agent conversations the app shows and the prompts typed | App functionality |
-| Files and docs | files opened in the file viewer | App functionality |
-| App activity > Other user-generated content | what is typed into terminals | App functionality |
-| Device or other IDs | the sign-in cookie a PC gives the phone when it is paired | App functionality |
-| App info and performance > Diagnostics | connection traces the page reports to the PC for troubleshooting | Analytics |
+| Data type | What it is in Ovis | Required or optional | Purpose |
+|---|---|---|---|
+| Messages > Other in-app messages | the agent conversations the app shows and the prompts typed | required | App functionality |
+| Photos and videos > Photos, Videos | pictures and videos the user attaches in the composer | optional, user-initiated | App functionality |
+| Audio > Voice or sound recordings | dictation recorded with the composer's mic button; the PC passes it to the transcription provider set up there | optional, user-initiated | App functionality |
+| Audio > Music files, Other audio files | audio files the user attaches in the composer | optional, user-initiated | App functionality |
+| Files and docs | files the user attaches in the composer, and files opened in the file viewer | optional, user-initiated | App functionality |
+| App activity > Other user-generated content | what is typed into terminals | required | App functionality |
+| App activity > App interactions | the app settings the user chose (theme, font sizes, language, alert and voice options and the like), in the PC's usage counts to the developer | optional (can be turned off) | Analytics |
+| Device or other IDs | the sign-in cookie a PC gives the phone when it is paired (to the PC); the random ID the PC makes for its usage counts (to the developer) | required (cookie); optional (ID) | App functionality (cookie); Analytics (ID) |
+| Location > Approximate location | the country (two letters) the developer's receiver reads from the address the usage counts come from; the address is not stored | optional (can be turned off) | Analytics |
+| App info and performance > Diagnostics | connection traces the page reports to the PC for troubleshooting | required | Analytics |
 
-All of it goes only to the user's own PC; none of it reaches the developer or a third party.
-`https://ovis.sh/privacy/` says the same and names these as what the Play listing shows as
-collected.
+The composer's attachment picker takes any file (`src/components/Composer.tsx`,
+`uploadPaneImage` in `src/lib/api.ts`), so every file-like type above is listed as optional and
+user-initiated: nothing is sent unless the user picks it. None of it is "shared": the PC is the
+user's own, the transcription provider is one the user chose and is sent to on the user's own
+action, and the developer's receiver runs on Cloudflare as a service provider.
+
+**The usage counts, in full** (the only data that reaches the developer):
+
+- **When**: one event when the server is installed and one per new version, plus one message per
+  UTC day it is in use. Nothing goes out before the client has shown its one-line notice ("Ovis
+  sends anonymous usage counts"), and the first event waits 10 minutes after that, so it can be
+  turned off first.
+- **On or off**: **on by default (opt-out)**. The switch is under Settings > About > Anonymous
+  usage counts, in the PC's browser and in the app alike, next to the exact messages. The PC's
+  owner can also block it with `OVIS_TELEMETRY=0` or `DO_NOT_TRACK=1`.
+- **What they hold**: a random ID made on the PC, the Ovis version, the PC's operating system and
+  CPU type, how Ovis was installed, the allowlisted settings snapshot of the last browser or phone
+  that opened it (no free-form text, paths or account names), and the kinds of coding agents
+  running (such as `claude`). The receiver adds the country and never stores the address. Never
+  included: pane names, paths, terminal content, code or messages.
+
+`https://ovis.sh/privacy/` (and `/ko/privacy/`) says the same.
 
 ## 5. Play Console, click by click (the owner)
 
