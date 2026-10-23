@@ -7,14 +7,15 @@ import { socketAddress } from "../server/herdr/client.ts";
 import { windowsProcessTable } from "../server/windows-processes.ts";
 import { updateStateDir } from "../server/update-state.ts";
 
-it.skipIf(process.platform !== "win32")("runs the Windows launcher with executable and npm shim installations", async () => {
+it.skipIf(process.platform !== "win32")("runs the Windows launcher with executable and npm shim installations in literal percent paths", async () => {
   const scratch = mkdtempSync(join(tmpdir(), "ovis bun shim "));
-  const bin = join(scratch, ".bun", "bin");
+  const prefix = join(scratch, "npm %OS% prefix");
+  const bin = join(prefix, ".bun", "bin");
   mkdirSync(bin, { recursive: true });
-  const launcher = join(scratch, "plugin.ps1");
+  const launcher = join(prefix, "plugin.ps1");
   copyFileSync(join(import.meta.dir, "plugin.ps1"), launcher);
   const result = join(scratch, "arguments.json");
-  writeFileSync(join(scratch, "plugin.ts"), `
+  writeFileSync(join(prefix, "plugin.ts"), `
     await Bun.write(${JSON.stringify(result)}, JSON.stringify(process.argv.slice(2)));
     process.exit(process.argv[2] === "status" ? 7 : 0);
   `);
@@ -39,7 +40,7 @@ it.skipIf(process.platform !== "win32")("runs the Windows launcher with executab
         rmSync(result, { force: true });
         const child = Bun.spawn(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", launcher, command], {
           windowsHide: true,
-          env: { ...process.env, USERPROFILE: scratch },
+          env: { ...process.env, USERPROFILE: prefix, HERDR_PLUGIN_STATE_DIR: scratch },
           stdout: "pipe", stderr: "pipe",
         });
         const timeout = setTimeout(() => child.kill(), 15_000);

@@ -6,13 +6,20 @@ $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 $env:PATH = "$env:USERPROFILE\.bun\bin;$userPath;$env:PATH"
 $bun = Get-Command bun -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
 if (-not $bun) { throw 'Could not find a runnable Bun application (bun.exe or bun.cmd). Install Bun and try again.' }
+$batchShim = [IO.Path]::GetExtension($bun.Source) -in '.cmd', '.bat'
+if ($batchShim) {
+    # Expand each path once from the environment so literal %NAME% pairs are not reinterpreted.
+    $env:OVIS_BUN = $bun.Source
+    $env:OVIS_PLUGIN_SCRIPT = Join-Path $PSScriptRoot 'plugin.ts'
+    $env:OVIS_PLUGIN_COMMAND = $Command
+}
 if ($Command -eq 'start') {
     # A fresh hidden console keeps PowerShell's output pipes out of the detached server.
     $executable = $bun.Source
     $arguments = '"{0}" start' -f (Join-Path $PSScriptRoot 'plugin.ts')
-    if ([IO.Path]::GetExtension($executable) -in '.cmd', '.bat') {
+    if ($batchShim) {
         # Batch shims need a command interpreter, not ShellExecute's document association.
-        $arguments = '/d /s /c ""{0}" {1}"' -f $executable, $arguments
+        $arguments = '/d /s /c ""%OVIS_BUN%" "%OVIS_PLUGIN_SCRIPT%" start"'
         $executable = $env:ComSpec
     }
     $child = Start-Process -FilePath $executable -ArgumentList $arguments -WindowStyle Hidden -PassThru
@@ -27,5 +34,9 @@ if ($Command -eq 'start') {
     Write-Output 'Ovis started'
     exit 0
 }
-& $bun.Source (Join-Path $PSScriptRoot 'plugin.ts') $Command
+if ($batchShim) {
+    & $env:ComSpec /d /s /c '""%OVIS_BUN%" "%OVIS_PLUGIN_SCRIPT%" "%OVIS_PLUGIN_COMMAND%""'
+} else {
+    & $bun.Source (Join-Path $PSScriptRoot 'plugin.ts') $Command
+}
 exit $LASTEXITCODE
