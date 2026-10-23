@@ -1,4 +1,6 @@
-/** Native Windows/PowerShell regression, in the isolated test session. Run after `bun run build`:
+/** Manual native Windows/PowerShell regression (not run by CI), in the isolated test session.
+ * Requires Bun, herdr on PATH and Chromium (`bun node_modules/playwright-core/cli.js install chromium`).
+ * Run after `bun install --frozen-lockfile` and `bun run build`:
  *   bun scripts/windows-terminal-browser-qa.ts
  * CHROME_PATH selects an installed browser; otherwise uses Playwright's Chromium.
  * Never run with HERDR_TEST_LIVE=1. */
@@ -77,8 +79,23 @@ try {
   const writesBeforeTap = scrollWrites;
   await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y }] });
   await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
-  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
-  assert.equal(scrollWrites, writesBeforeTap, "an unmoved tap does not write shared native history");
+  // A real wheel request is the positive control: the same history writer must run before
+  // checking the tap's absence of writes, rather than passing after an arbitrary frame count.
+  const wheelWritten = page.waitForResponse((response) =>
+    response.request().method() === "POST" && new URL(response.url()).pathname === "/api/pane/scroll",
+    { timeout: 15_000 });
+  await host.hover();
+  await page.mouse.wheel(0, -1);
+  const wheelResponse = await wheelWritten;
+  assert.ok(wheelResponse.ok(), "the positive-control wheel writes native history");
+  await wheelResponse.finished();
+  // The writer drains queued writes before waking the metrics reader.
+  await page.waitForResponse((response) =>
+    response.request().method() === "GET" && new URL(response.url()).pathname === "/api/pane/scroll",
+    { timeout: 15_000 });
+  assert.equal(scrollWrites, writesBeforeTap + 1, "only the wheel, not the unmoved tap, writes shared native history");
+  await paneScroll(pane, 0);
+  await until(async () => (await text()).includes("P".repeat(100)), "return to prompt after the control wheel");
   await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y }] });
   for (let step = 1; step <= 8; step++) await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x, y: y + step * 12 }] });
   await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
@@ -88,9 +105,17 @@ try {
   await until(async () => (await text()).includes("P".repeat(100)), "return to prompt");
   await page.locator(".xterm-helper-textarea").focus();
   const pan = async (left: number) => {
-    await host.evaluate((element, value) => { element.scrollLeft = value; }, left);
-    // The viewport publisher settles on the browser's frame, not an arbitrary delay.
-    await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    await host.evaluate((element, value) => new Promise<void>((resolve, reject) => {
+      if (element.scrollLeft === value) { resolve(); return; }
+      // Registered after the app's scroll listener: resolving proves bounds were published.
+      const onScroll = () => { clearTimeout(timer); resolve(); };
+      const timer = setTimeout(() => {
+        element.removeEventListener("scroll", onScroll);
+        reject(new Error("Timed out waiting for horizontal pan scroll event"));
+      }, 15_000);
+      element.addEventListener("scroll", onScroll, { once: true });
+      element.scrollLeft = value;
+    }), left);
     return host.evaluate((element) => element.scrollLeft);
   };
   for (const left of [0, 70, 0]) {
