@@ -1022,13 +1022,15 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
   PC on its own: blocked, then a finish not opened yet, then ready (a finish opened here counts as
   ready, as its row draws it), then working or waiting on background work. Within each, the
   oldest `state_change_seq` comes first, so the agent that has waited longest leads; rows with no
-  counter follow, in herdr's order. It is herdr's own agent view sorted by status, then
-  `state_change_seq` ascending (`agent.view.set`), where Activity is the newest change first.
+  counter follow, in herdr's order. It follows herdr's own agent view sorted by status, then
+  `state_change_seq` ascending (`agent.view.set`), with two differences: an opened finish counts
+  as ready, and BG (waiting) counts as working. Activity puts the newest change first.
 - Appearance's **Agent row title** is **Agent** by default: an agent row's title is what its agent
   says it is doing. **Tab name** names the row, and the header, by its herdr tab once the tab was
   renamed (a tab herdr still names by its place keeps the agent's title), and the agent's title
   opens the second line, where the tab is then not named again. It builds on herdr's own agents
-  panel, which already names a renamed tab beside the agent.
+  panel, which already names a renamed tab beside the agent. Two panes in one renamed tab both
+  have the tab's name as their title, and the second line tells them apart.
 - A DONE opened here draws as ready in the Agents list and its workspace roll-up, as herdr's
   own client does. This follows the Codex app's [unread completion dot](https://github.com/openai/codex/issues/50856).
   A finish read in one browser is read in every browser of the server (a phone and

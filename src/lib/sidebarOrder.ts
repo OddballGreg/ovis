@@ -67,18 +67,19 @@ export function activityOrder<T>(rows: readonly T[], paneOf: (row: T) => Pick<Pa
     .map((entry) => entry.row);
 }
 
-/** Longest wait's ranks, as herdr's own status sort: blocked, an unread finish, ready, then working (BG is working in all but name). */
+/** Longest wait's ranks: blocked, a finish not opened yet, ready, then working (BG counts as working). */
 const WAIT_RANK: Readonly<Record<KnownStatus, number>> = { blocked: 0, done: 1, idle: 2, working: 3, waiting: 3, unknown: 4 };
 
 /**
  * Longest wait first: blocked, then a finish not opened yet, then ready (a finish already opened
  * counts as ready, as its row draws it), then working; within each, herdr's oldest state change
  * first, then the order given. `statusOf` is the status the row draws (shownStatus), not the raw
- * one. herdr's own agent view sorted by status, then state_change_seq ascending, is the same order.
+ * one. This follows herdr's own agent view sorted by status, then state_change_seq ascending, with
+ * two differences: an opened finish counts as ready, and BG (waiting) counts as working.
  */
 export function waitingOrder<T>(rows: readonly T[], paneOf: (row: T) => Pick<PaneInfo, "pane_id">, statusOf: (row: T) => AgentStatus | undefined, seqs: ReadonlyMap<string, number>): T[] {
   return rows
-    .map((row, index) => ({ row, index, rank: WAIT_RANK[knownStatus(statusOf(row))], changed: seqs.get(paneOf(row).pane_id) ?? Infinity }))
+    .map((row, index) => ({ row, index, rank: WAIT_RANK[knownStatus(statusOf(row))] ?? 4, changed: seqs.get(paneOf(row).pane_id) ?? Infinity }))
     .sort((a, b) => a.rank - b.rank || (a.changed === b.changed ? 0 : a.changed < b.changed ? -1 : 1) || a.index - b.index)
     .map((entry) => entry.row);
 }

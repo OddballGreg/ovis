@@ -18,20 +18,27 @@ export interface HeaderCrumb {
   place: string;
   /** the folder written out, as herdr reports it: the More menu's second line */
   path: string | null;
-  /** the context's tooltip: workspace › title, then the full path */
+  /** the context's tooltip: workspace › title (› subtitle), then the full path */
   tooltip: string;
 }
 
-export function headerCrumb(input: { machine: string; machineCount: number; workspace: string; title: string; cwd: string | null | undefined }): HeaderCrumb {
+/**
+ * `subtitle` is the pane's own title when a renamed tab's name is the title (Settings → Agent row
+ * title → Tab name). The second line says it first, so it can say the folder's name too, and the
+ * tooltip keeps it.
+ */
+export function headerCrumb(input: { machine: string; machineCount: number; workspace: string; title: string; subtitle?: string | null; cwd: string | null | undefined }): HeaderCrumb {
   const machine = input.machine.trim();
   const workspace = input.workspace.trim();
   const title = input.title.trim();
+  const subtitle = input.subtitle?.trim() || null;
   // trimmed only to tell an absent folder: a name may end in a space, and is shown as it is
   const path = input.cwd?.trim() ? input.cwd : null;
   const name = path === null ? null : folderName(path);
   // only a name the line shows can have said the folder's: a hidden PC name says nothing
   const showMachine = input.machineCount > 1;
-  const said = name === null || [title, showMachine ? machine : null, workspace].includes(name);
+  const said = name === null || [title, subtitle, showMachine ? machine : null, workspace].includes(name);
+  const named = subtitle === null ? `${workspace} › ${title}` : `${workspace} › ${title} › ${subtitle}`;
   return {
     machine,
     showMachine,
@@ -39,7 +46,7 @@ export function headerCrumb(input: { machine: string; machineCount: number; work
     folder: said ? null : name,
     place: `${machine} › ${workspace}`,
     path,
-    tooltip: path === null ? `${workspace} › ${title}` : `${workspace} › ${title} · ${path}`,
+    tooltip: path === null ? named : `${named} · ${path}`,
   };
 }
 

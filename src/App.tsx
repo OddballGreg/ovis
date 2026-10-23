@@ -1420,7 +1420,7 @@ export function App() {
   const alertsOffDot = bellVisible && !bell.on;
   const connWord = t(connected ? "live" : outputStopped ? "disconnected" : connectedBefore ? "reconnecting" : "connecting");
   const crumb = selectedPane && selectedTitle !== null
-    ? headerCrumb({ machine: selectedMachine?.name ?? selectedMachineId, machineCount: machines.length, workspace: selectedWorkspace?.label ?? selectedPane.workspace_id, title: selectedTitle, cwd: selectedPane.cwd })
+    ? headerCrumb({ machine: selectedMachine?.name ?? selectedMachineId, machineCount: machines.length, workspace: selectedWorkspace?.label ?? selectedPane.workspace_id, title: selectedTitle, subtitle: selectedSubtitle, cwd: selectedPane.cwd })
     : null;
 
   useEffect(() => {
