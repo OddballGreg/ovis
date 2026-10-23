@@ -1,9 +1,12 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import * as fs from "node:fs";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { paneCommands } from "../commands.ts";
-import { ancestorsToRepoRoot, readFrontmatter, walkSkills } from "./walk.ts";
+import { ancestorsToRepoRoot, customCommands, readFrontmatter, walkSkills } from "./walk.ts";
+import { source as claude } from "./claude.ts";
+import { source as devin } from "./devin.ts";
 import type { WalkRules } from "./walk.ts";
 
 const roots: string[] = [];
@@ -25,7 +28,80 @@ function put(path: string, content = ""): void {
 const recursive: WalkRules = { depth: "recursive", looseMarkdown: "root", ignoreFiles: true, requireDescription: true };
 const one: WalkRules = { depth: "one", looseMarkdown: "none", ignoreFiles: false, requireDescription: false };
 
+// A handful of real directories exposes exponentially many paths without an ancestor cycle.
+function lattice(root: string): void {
+  for (let level = 0; level < 8; level++) {
+    const directory = join(root, String(level));
+    for (let entry = 0; entry < 20; entry++) put(join(directory, `file-${entry}.md`), "Body\n");
+    if (level < 7) for (let link = 0; link < 3; link++) {
+      symlinkSync(join(root, String(level + 1)), join(directory, `link-${link}`), "dir");
+    }
+  }
+}
+
 describe("shared skill walk", () => {
+  for (const kind of ["skills", "commands", "one-level"] as const) {
+    it(`bounds entry work in ${kind} even when linked folders repeat`, () => {
+      // Given a linked lattice and a small shared entry allowance.
+      const root = temp();
+      lattice(root);
+      if (kind === "one-level") for (let entry = 0; entry < 200; entry++) put(join(root, `plain-${entry}`));
+      const budget = { folders: 4096, entries: 128, reads: 1024 };
+      const stats = spyOn(fs, "statSync");
+      const opens = spyOn(fs, "openSync");
+      try {
+        // When discovery visits the same real entries through many paths.
+        if (kind === "commands") customCommands(root, "skill", budget);
+        else walkSkills(root, { ...recursive, depth: kind === "one-level" ? "one" : "recursive", ignoreFiles: false, budget });
+        // Then the entry allowance bounds stats, including file-open checks.
+        expect(stats.mock.calls.length).toBeLessThanOrEqual(128 + 1024 - budget.reads);
+        expect(budget.entries).toBeLessThan(128);
+      } finally { stats.mockRestore(); opens.mockRestore(); }
+    });
+  }
+
+  for (const kind of ["skills", "commands"] as const) {
+    it(`bounds file reads in ${kind} independently of entries`, () => {
+      // Given many readable files and a smaller read allowance.
+      const root = temp();
+      lattice(root);
+      const budget = { folders: 4096, entries: 32768, reads: 16 };
+      const opens = spyOn(fs, "openSync");
+      try {
+        // When the walk can visit more files than it may read.
+        if (kind === "commands") customCommands(root, "skill", budget);
+        else walkSkills(root, { ...recursive, looseMarkdown: "nested", requireDescription: false, ignoreFiles: false, budget });
+        // Then every frontmatter and body read shares the allowance.
+        expect(opens.mock.calls.length).toBeGreaterThan(0);
+        expect(opens.mock.calls.length).toBeLessThanOrEqual(16);
+      } finally { opens.mockRestore(); }
+    });
+  }
+
+  for (const [agent, source] of [["claude", claude], ["devin", devin]] as const) {
+    it(`shares the read allowance across ${agent} discovery roots`, () => {
+      // Given user and project roots that each exceed the discovery allowance.
+      const home = temp();
+      const project = join(home, "repo");
+      put(join(project, ".git"), "");
+      lattice(join(home, ".claude", "commands"));
+      lattice(join(project, ".claude", "commands"));
+      lattice(join(home, ".claude", "skills"));
+      lattice(join(project, ".claude", "skills"));
+      for (const base of [home, project]) {
+        put(join(base, ".claude", "skills", "7", "SKILL.md"), "---\ndescription: Leaf\n---\nBody\n");
+      }
+      const opens = spyOn(fs, "openSync");
+      try {
+        // When one discovery crosses roots and command/skill loaders.
+        source.discover({ home, cwd: project, repoRoot: project, env: null, roots: {} });
+        // Then the roots do not each receive a fresh allowance.
+        expect(opens.mock.calls.length).toBeGreaterThan(0);
+        expect(opens.mock.calls.length).toBeLessThanOrEqual(1024);
+      } finally { opens.mockRestore(); }
+    });
+  }
+
   it("keeps one-level names, whole descriptions, and body fallbacks", () => {
     const root = temp();
     put(join(root, "named", "SKILL.md"), `---\nname: valid:name\ndescription: ${"x".repeat(150)}\n---\n`);
