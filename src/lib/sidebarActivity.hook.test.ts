@@ -458,6 +458,127 @@ describe("sidebar finish acknowledgement through React effects", () => {
     }
   });
 
+  it("uses one health request per backoff window for 100 unauthorized finishes", async () => {
+    // Given 100 finishes read while signed out.
+    jest.useFakeTimers();
+    const health = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async () =>
+      Response.json({ auth: { authenticated: false } }), { preconnect: fetch.preconnect }));
+    const share = async () => { throw Object.assign(new Error("unauthorized"), { status: 401 }); };
+    try {
+      const client = await open(roster({ p0: 1 }), "p0", false, share);
+      for (let index = 1; index < 100; index++) await client.update(roster({ [`p${index}`]: 1 }), `p${index}`);
+
+      // When each shared backoff window expires, including at the delay cap.
+      let windows = 0;
+      for (const delay of [1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 30_000]) {
+        await act(async () => { jest.advanceTimersByTime(delay); });
+        windows++;
+
+        // Then pending finish count does not multiply authentication probes.
+        expect(health.mock.calls.map(([url]) => url)).toEqual(
+          Array.from({ length: windows }, () => "/api/health?scope=bridge"),
+        );
+      }
+    } finally { health.mockRestore(); }
+  });
+
+  it("sends each of 100 paused finishes once after one successful auth observation", async () => {
+    // Given 100 pending finishes behind the same authentication gate.
+    jest.useFakeTimers();
+    let authenticated = false;
+    const delivered: SeenFinish[] = [];
+    const health = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async () =>
+      Response.json({ auth: { authenticated } }), { preconnect: fetch.preconnect }));
+    const share = async (finish: SeenFinish) => {
+      if (!authenticated) throw Object.assign(new Error("unauthorized"), { status: 401 });
+      delivered.push(finish);
+    };
+    try {
+      const client = await open(roster({ p0: 1 }), "p0", false, share);
+      for (let index = 1; index < 100; index++) await client.update(roster({ [`p${index}`]: 1 }), `p${index}`);
+      await act(async () => { jest.advanceTimersByTime(1_000); });
+
+      // When one later health response confirms sign-in.
+      authenticated = true;
+      await act(async () => { jest.advanceTimersByTime(2_000); });
+      for (let index = 0; index < 100; index++) await client.update(roster({ [`p${index}`]: 1 }), `p${index}`);
+      await act(async () => { jest.advanceTimersByTime(60_000); });
+
+      // Then every finish is delivered exactly once, and health polling stops.
+      expect(delivered).toHaveLength(100);
+      expect(delivered.map(({ pane }) => pane).sort()).toEqual(
+        Array.from({ length: 100 }, (_, index) => `p${index}`).sort(),
+      );
+      expect(health).toHaveBeenCalledTimes(2);
+    } finally { health.mockRestore(); }
+  });
+
+  for (const failure of [503, "network"] as const) {
+    it(`bounds ${failure} outage retries independently of 100 pending finishes and drains on recovery`, async () => {
+      // Given 100 finishes presented during a transient outage.
+      jest.useFakeTimers();
+      let available = false;
+      let attempts = 0;
+      const delivered: SeenFinish[] = [];
+      const share = async (finish: SeenFinish) => {
+        attempts++;
+        if (!available) throw failure === "network" ? new TypeError("offline")
+          : Object.assign(new Error("restart"), { status: failure });
+        delivered.push(finish);
+      };
+      const client = await open(roster({ p0: 1 }), "p0", false, share);
+      for (let index = 1; index < 100; index++) await client.update(roster({ [`p${index}`]: 1 }), `p${index}`);
+      const initial = attempts;
+      expect(initial).toBe(1);
+
+      // When the outage continues across retry deadlines and roster traffic.
+      let windows = 0;
+      for (const delay of [1_000, 2_000, 4_000, 8_000, 16_000, 30_000]) {
+        for (let index = 0; index < 20; index++) await client.update(roster({ p99: 1 }), "p99");
+        await act(async () => { jest.advanceTimersByTime(delay); });
+        windows++;
+        expect(attempts - initial).toBe(windows);
+      }
+      available = true;
+      await act(async () => { jest.advanceTimersByTime(30_000); });
+      await act(async () => { jest.advanceTimersByTime(60_000); });
+
+      // Then the aggregate outage sends were bounded, but no pending finish was lost.
+      expect(delivered).toHaveLength(100);
+      expect(new Set(delivered.map(({ pane }) => pane)).size).toBe(100);
+      expect(attempts).toBe(initial + windows + 100);
+    });
+  }
+
+  it("does not duplicate an in-flight auth probe or resume shares after unmount", async () => {
+    // Given 100 paused finishes and one unanswered authentication probe.
+    jest.useFakeTimers();
+    const reply = Promise.withResolvers<Response>();
+    const health = spyOn(globalThis, "fetch").mockImplementation(Object.assign(
+      () => reply.promise, { preconnect: fetch.preconnect },
+    ));
+    let attempts = 0;
+    try {
+      const client = await open(roster({ p0: 1 }), "p0", false, async () => {
+        attempts++;
+        throw Object.assign(new Error("unauthorized"), { status: 401 });
+      });
+      for (let index = 1; index < 100; index++) await client.update(roster({ [`p${index}`]: 1 }), `p${index}`);
+      await act(async () => { jest.advanceTimersByTime(1_000); });
+
+      // When time and roster updates pass, then the owner unmounts before the reply.
+      await act(async () => { jest.advanceTimersByTime(60_000); });
+      await client.update(roster({ p99: 1 }), "p99");
+      await client.unmount();
+      await act(async () => { reply.resolve(Response.json({ auth: { authenticated: true } })); });
+      await act(async () => { jest.advanceTimersByTime(60_000); });
+
+      // Then no overlapping health poll or stale resumed share was sent.
+      expect(health).toHaveBeenCalledTimes(1);
+      expect(attempts).toBe(1);
+    } finally { health.mockRestore(); }
+  });
+
   it("upgrades a shared finish when its same-ID answer fingerprint becomes available", async () => {
     const told: SeenFinish[] = [];
     const share = async (finish: SeenFinish) => { told.push(finish); };

@@ -19,7 +19,13 @@ export const useSidebarActivity = (): SidebarActivity => useContext(SidebarActiv
 
 interface MachineSeen { epoch: string; record: SeenRecord }
 interface SharedFinish extends SeenFinish {
-  timer?: ReturnType<typeof setTimeout>;
+  retry?: () => Promise<boolean>;
+}
+interface ShareRecovery {
+  timer: ReturnType<typeof setTimeout> | undefined;
+  unauthorized: boolean;
+  running: boolean;
+  wait: number;
 }
 const unobscured = () => true;
 
@@ -50,6 +56,7 @@ export function useSidebarActivityState(machines: readonly Machine[], selectedMa
   const epochs = useRef(new Map<string, string>());
   // One latest acknowledgement per pane; bounded independently of how many finishes arrive.
   const shared = useRef(new Map<string, SharedFinish>());
+  const recovery = useRef<ShareRecovery>({ timer: undefined, unauthorized: false, running: false, wait: 1_000 });
   const shareRef = useRef(share); shareRef.current = share;
   useEffect(() => {
     const onVisibility = () => setPageVisible(document.visibilityState === "visible");
@@ -75,11 +82,52 @@ export function useSidebarActivityState(machines: readonly Machine[], selectedMa
     return () => {
       stopReceiving();
       document.removeEventListener("visibilitychange", onVisibility);
-      for (const finish of shared.current.values()) clearTimeout(finish.timer);
+      clearTimeout(recovery.current.timer);
+      recovery.current = { timer: undefined, unauthorized: false, running: false, wait: 1_000 };
       shared.current.clear();
     };
   }, []);
   useEffect(() => {
+    const gate = recovery.current;
+    const schedule = () => {
+      if (recovery.current !== gate) return;
+      if (![...shared.current.values()].some((finish) => finish.retry)) {
+        clearTimeout(gate.timer);
+        gate.timer = undefined;
+        return;
+      }
+      if (gate.timer !== undefined || gate.running) return;
+      gate.timer = setTimeout(() => { gate.timer = undefined; void recover(); }, gate.wait);
+    };
+    const recover = async () => {
+      gate.running = true;
+      try {
+        // All finishes pause behind one authentication observation, not one poll per pane.
+        if (gate.unauthorized) {
+          const health = await fetchBridgeHealth();
+          if (recovery.current !== gate) return;
+          if (!health.auth.authenticated) { gate.wait = Math.min(gate.wait * 2, 30_000); return; }
+          gate.unauthorized = false;
+        }
+        // Probe an outage with one queued finish. A failure ends this window; success drains
+        // the remaining finishes serially, so neither retry volume nor concurrency fans out.
+        for (const finish of shared.current.values()) {
+          const resend = finish.retry;
+          if (!resend) continue;
+          delete finish.retry;
+          const completed = await resend();
+          if (recovery.current !== gate) return;
+          if (!completed) { gate.wait = Math.min(gate.wait * 2, 30_000); return; }
+          gate.wait = 1_000;
+        }
+      } catch (error) {
+        gate.wait = Math.min(gate.wait * 2, 30_000);
+        console.warn("Could not tell the other browsers about a read finish", error);
+      } finally {
+        gate.running = false;
+        schedule();
+      }
+    };
     for (const machine of machines) {
       const epoch = machine.snapshot?.finish_epoch;
       if (!epoch) continue;
@@ -88,7 +136,6 @@ export function useSidebarActivityState(machines: readonly Machine[], selectedMa
         cleanSeen([{ pc: machine.id, epoch: previousEpoch }]);
         for (const [key, finish] of shared.current) {
           if (finish.pc === machine.id && finish.epoch === previousEpoch) {
-            clearTimeout(finish.timer);
             shared.current.delete(key);
           }
         }
@@ -109,44 +156,30 @@ export function useSidebarActivityState(machines: readonly Machine[], selectedMa
           const sender = shareRef.current;
           if (sender) {
             const sent: SharedFinish = { ...finish };
-            clearTimeout(previous?.timer);
             shared.current.delete(key);
             shared.current.set(key, sent);
             while (shared.current.size > SEEN_LIMIT) {
               const oldest = shared.current.keys().next().value!;
-              clearTimeout(shared.current.get(oldest)?.timer);
               shared.current.delete(oldest);
             }
-            // The entry owns its retry chain, including while waiting: roster updates never
-            // start another send. Delay is capped, so a long restart can still recover.
-            let wait = 1_000;
-            let unauthorized = false;
-            const retry = () => {
-              if (shared.current.get(key) !== sent) return;
-              sent.timer = setTimeout(() => { void send(); }, wait);
-              wait = Math.min(wait * 2, 30_000);
-            };
             const send = async () => {
-              if (shared.current.get(key) !== sent) return;
+              if (shared.current.get(key) !== sent || recovery.current !== gate) return true;
+              if (gate.unauthorized) { sent.retry = send; return false; }
               try {
-                // A 401 pauses POSTs. Only proof of a later sign-in resumes this finish;
-                // roster traffic and a still-locked page cannot create a refusal loop.
-                if (unauthorized) {
-                  const health = await fetchBridgeHealth();
-                  if (shared.current.get(key) !== sent) return;
-                  if (!health.auth.authenticated) { retry(); return; }
-                  unauthorized = false;
-                }
                 await sender(finish);
               } catch (error) {
-                if (shared.current.get(key) !== sent) return;
+                if (shared.current.get(key) !== sent || recovery.current !== gate) return true;
                 const status = error instanceof Error && "status" in error && typeof error.status === "number" ? error.status : undefined;
-                if (status === 401) unauthorized = true;
-                if (status === undefined || status === 401 || status >= 502) retry();
+                if (status === 401) gate.unauthorized = true;
+                const transient = status === undefined || status === 401 || status >= 502;
+                if (transient) { sent.retry = send; schedule(); }
                 console.warn("Could not tell the other browsers about a read finish", error);
+                return !transient;
               }
+              return true;
             };
-            void send();
+            if (gate.unauthorized || gate.running || gate.timer !== undefined) sent.retry = send;
+            else void send();
           }
         } else if (finish.id === previous.id) {
           // Keep frequently observed panes in the bounded latest-state window.
@@ -155,6 +188,7 @@ export function useSidebarActivityState(machines: readonly Machine[], selectedMa
         }
       }
     }
+    schedule();
     // Read after every acknowledgement and epoch retirement: a later machine can evict an
     // earlier machine's oldest entry while enforcing the shared cap.
     const next = new Map<string, MachineSeen>();
