@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { chmodSync, closeSync, constants as fsConstants, fstatSync, mkdirSync, openSync, readSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { GJC_NATIVE_DIRECTORY, GJC_NATIVE_HEARTBEAT_MS, GJC_NATIVE_LEASE_MS, type GjcNativeBinding } from "../shared/gjc-native.ts";
+import { GJC_NATIVE_DIRECTORY, GJC_NATIVE_HEARTBEAT_MS, GJC_NATIVE_LEASE_MS, isGjcNativeBindingShape, type GjcNativeBinding } from "../shared/gjc-native.ts";
 import { processStartedAt as readProcessStartedAt } from "../server/process-start.ts";
 import { windowsProcessTable } from "../server/windows-processes.ts";
 
@@ -72,33 +72,6 @@ function nativeProcessStartedAt(pid: number): Promise<number | null> {
   return windowsProcessTable().then((rows) => rows.find((row) => row.pid === pid)?.started ?? null);
 }
 
-const recordKeys = ["version", "pid", "processStartedAt", "instanceId", "sequence", "updatedAt", "session"] as const;
-const sessionKeys = ["id", "path", "cwd"] as const;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
-  return Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
-}
-
-// Accept only the record shape server/gjc-native.ts parseBinding accepts, so a record the server rejects is never taken as a live lease.
-function validBinding(value: unknown): value is GjcNativeBinding {
-  if (!isRecord(value) || !hasExactKeys(value, recordKeys)) return false;
-  if (value.version !== 1 || typeof value.pid !== "number" || !Number.isSafeInteger(value.pid) || value.pid <= 0
-    || typeof value.processStartedAt !== "number" || !Number.isSafeInteger(value.processStartedAt) || value.processStartedAt <= 0
-    || typeof value.instanceId !== "string" || value.instanceId.length === 0 || value.instanceId.length > 256 || /[\u0000-\u001f\u007f]/u.test(value.instanceId)
-    || typeof value.sequence !== "number" || !Number.isSafeInteger(value.sequence) || value.sequence < 1
-    || typeof value.updatedAt !== "number" || !Number.isSafeInteger(value.updatedAt) || value.updatedAt < value.processStartedAt) return false;
-  if (value.session === null) return true;
-  const session = value.session;
-  return isRecord(session) && hasExactKeys(session, sessionKeys)
-    && typeof session.id === "string" && session.id !== ""
-    && typeof session.path === "string" && isAbsolute(session.path)
-    && typeof session.cwd === "string" && isAbsolute(session.cwd);
-}
-
 const MAX_RECORD_BYTES = 16 * 1024;
 
 function bindingFromFile(file: string, io: GjcNativeFileSystem): GjcNativeBinding | null {
@@ -112,7 +85,7 @@ function bindingFromFile(file: string, io: GjcNativeFileSystem): GjcNativeBindin
     const bytesRead = io.readSync(fd, bytes, 0, MAX_RECORD_BYTES, 0);
     if (bytesRead !== fileInfo.size) return null;
     const value: unknown = JSON.parse(new TextDecoder().decode(bytes.subarray(0, bytesRead)));
-    return validBinding(value) ? value : null;
+    return isGjcNativeBindingShape(value) ? value : null;
   } catch {
     return null;
   } finally {
@@ -205,7 +178,7 @@ export function createGjcNativePublisher(options: GjcNativePublisherOptions = {}
     const previous = bindingFromFile(ownFile, io);
     if (previous && previous.instanceId !== instanceId) {
       const age = at - previous.updatedAt;
-      if (previous.pid === pid && previous.processStartedAt === startedAt && age >= 0 && age <= GJC_NATIVE_LEASE_MS) return;
+      if (previous.pid === pid && previous.processStartedAt === startedAt && age >= 0 && age < GJC_NATIVE_LEASE_MS) return;
     }
 
     if (!hasPublishedIdentity && previous?.instanceId === instanceId && previous.pid === pid && previous.processStartedAt === startedAt) {

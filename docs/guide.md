@@ -168,8 +168,8 @@ Every agent herdr runs shows up with its live status, terminal and alerts. The c
 | **Antigravity (agy)** | **Experimental; macOS untested.** Native ledger, selected by the running process’s held conversation lock. Linux native-tested; Windows uses terminal text. See [Agy behavior and limits](agy-chat.md). | — use Terminal |
 | **Anything else** | The terminal's text | — use Terminal |
 
-GJC chat uses a native extension rather than SDK session queries. From this checkout on
-each PC that runs GJC, explicitly install the extension:
+GJC chat and GJC done alerts use a native extension rather than SDK session queries. From
+this checkout on each PC that runs GJC, explicitly install the extension:
 
 ```sh
 bun scripts/install-gjc-integration.ts
@@ -178,6 +178,10 @@ bun scripts/install-gjc-integration.ts
 Restart existing GJC sessions to load it. The installer writes only the web UI's extension;
 it does not replace GJC settings or other extensions. To remove it, run the same command
 with `--remove` and restart GJC again. No running session is modified by the installer.
+A remote PC with only the runtime bundle has no checkout: run the installer with the bundle's
+own Bun from its folder, `cd ~/.local/share/herdr-web-ui/remote-vN && bin/bun
+scripts/install-gjc-integration.ts` (on Windows, `bin\bun.exe` in
+`%LOCALAPPDATA%\herdr-web-ui\remote-vN`), where `N` is the bundle version.
 
 The extension reports its current session ID and exact file path on session changes and
 refreshes a short-lived process binding. The bridge checks the process identity and native
@@ -186,6 +190,11 @@ transcript header instead of invoking `gjc sdk` or Git. The default
 Missing, expired, ambiguous or unreadable bindings use Terminal. Existing sessions without
 the extension also use Terminal; there is no SDK fallback. The extension API was probed
 with GJC 0.18.12. Terminal input and prompt handling are unchanged.
+
+Status tracking reads the same binding. Without it, a GJC pane keeps herdr's own status,
+which follows GJC's provider child: a finished turn can stay on working, so no done alert
+comes and no INPUT shows for an open question. Install the extension and restart GJC to
+get both chat and done alerts back.
 
 Devin sessions are never selected by directory or recency alone. A plain `devin` shows the
 terminal text, since herdr does not report its session without its Devin integration; a session

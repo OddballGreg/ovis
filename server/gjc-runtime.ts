@@ -369,10 +369,7 @@ async function lookupNativeTranscript(
     if (!current || !sameBirth(current.processStartedAt, final[0]!.birth, platform) || !sameNativeVersion(binding, current) || token.cancelled) return null;
     const currentPath = validateGjcNativeTranscript(current, cwd, home, platform);
     if (currentPath !== path || token.cancelled) return null;
-    const latest = readGjcNativeBinding(home, owner.pid, options.now?.());
-    return latest && sameNativeVersion(current, latest) && sameBirth(latest.processStartedAt, final[0]!.birth, platform) && !token.cancelled
-      ? currentPath
-      : null;
+    return currentPath;
   } catch {
     return null;
   }

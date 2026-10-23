@@ -1,23 +1,14 @@
 import { closeSync, constants as fsConstants, fstatSync, lstatSync, openSync, readSync, realpathSync, statSync } from "node:fs";
 import nodePath, { join } from "node:path";
 
-import { GJC_NATIVE_DIRECTORY, GJC_NATIVE_LEASE_MS, type GjcNativeBinding } from "../shared/gjc-native.ts";
+import { GJC_NATIVE_DIRECTORY, GJC_NATIVE_LEASE_MS, isGjcNativeBindingShape, type GjcNativeBinding } from "../shared/gjc-native.ts";
 
 export const GJC_NATIVE_MAX_BYTES = 16 * 1024;
 // Keep the transcript header limit independent of the smaller identity-record limit.
 const GJC_TRANSCRIPT_HEADER_BYTES = 64 * 1024;
 
-const recordKeys = ["version", "pid", "processStartedAt", "instanceId", "sequence", "updatedAt", "session"] as const;
-const sessionKeys = ["id", "path", "cwd"] as const;
-
-type NativeSession = NonNullable<GjcNativeBinding["session"]>;
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
-  return Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
 }
 
 function readBytes(fd: number, limit: number): Buffer {
@@ -42,23 +33,10 @@ function childName(root: string, file: string): string | null {
   return parts.length === 1 && parts[0] !== ".." ? parts[0]! : null;
 }
 
-function validNativeSession(value: unknown): value is NativeSession {
-  if (!isRecord(value) || !hasExactKeys(value, sessionKeys)) return false;
-  return typeof value.id === "string" && value.id !== ""
-    && typeof value.path === "string" && nodePath.isAbsolute(value.path)
-    && typeof value.cwd === "string" && nodePath.isAbsolute(value.cwd);
-}
-
 function parseBinding(value: unknown, pid: number, now: number): GjcNativeBinding | null {
-  if (!isRecord(value) || !hasExactKeys(value, recordKeys)) return null;
-  if (value.version !== 1 || typeof value.pid !== "number" || value.pid !== pid || !Number.isSafeInteger(value.pid) || value.pid <= 0
-    || typeof value.processStartedAt !== "number" || !Number.isSafeInteger(value.processStartedAt) || value.processStartedAt <= 0 || value.processStartedAt > now
-    || typeof value.instanceId !== "string" || value.instanceId.length === 0 || value.instanceId.length > 256 || /[\u0000-\u001f\u007f]/u.test(value.instanceId)
-    || typeof value.sequence !== "number" || !Number.isSafeInteger(value.sequence) || value.sequence < 1
-    || typeof value.updatedAt !== "number" || !Number.isSafeInteger(value.updatedAt) || value.updatedAt < value.processStartedAt || value.updatedAt > now
-    || now - value.updatedAt >= GJC_NATIVE_LEASE_MS
-    || !(value.session === null || validNativeSession(value.session))) return null;
-  return value as unknown as GjcNativeBinding;
+  if (!isGjcNativeBindingShape(value) || value.pid !== pid || value.processStartedAt > now
+    || value.updatedAt > now || now - value.updatedAt >= GJC_NATIVE_LEASE_MS) return null;
+  return value;
 }
 
 function readNativeFile(home: string, pid: number): unknown | null {

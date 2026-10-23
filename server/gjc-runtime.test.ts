@@ -325,6 +325,54 @@ it("shares one fresh Windows process-table read between concurrent final checks"
   } finally { forgetGjcState(); f.done(); }
 });
 
+it("starts another fresh Windows read when the pending read predates its initial check", async () => {
+  forgetGjcState();
+  const f = nativeFixture();
+  const gate = Promise.withResolvers<void>();
+  const firstFresh = Promise.withResolvers<void>();
+  try {
+    // Given a final read already pending before the second lookup starts.
+    const path = f.sessionFile("session-a");
+    f.publish(f.record(200, "session-a", path));
+    const rows = [{ pid: 200, parent: 100, path: "gjc.exe", commandLine: "gjc.exe", started: 1_000 }];
+    let tableReads = 0;
+    const options = {
+      platform: "win32",
+      now: f.options.now,
+      processInfo: async () => ({ process_info: { shell_pid: 100 } }),
+      readProcessTable: async () => {
+        const read = ++tableReads;
+        if (read === 2) { firstFresh.resolve(); await gate.promise; }
+        return read === 3 ? rows.map((row) => ({ ...row, started: 2_000 })) : rows;
+      },
+    };
+    const first = gjcTranscriptForPane("pane-a", f.cwd, f.home, options);
+    await firstFresh.promise;
+
+    // When a second lookup reaches its own final check while that read is pending.
+    let infoReads = 0;
+    const second = gjcTranscriptForPane("pane-b", f.cwd, f.home, {
+      ...options,
+      processInfo: async () => {
+        const final = ++infoReads === 2;
+        return { process_info: {
+          get shell_pid() {
+            // Release at the exact final-check entry, before it chooses a table.
+            // Promise settlement cannot clear the pending entry in this synchronous call.
+            if (final) gate.resolve();
+            return 100;
+          },
+        } };
+      },
+    });
+
+    // Then it starts its own read instead of sharing evidence older than its initial check.
+    expect(await second).toBeNull();
+    expect(tableReads).toBe(3);
+    expect(await first).toBe(realpathSync(path));
+  } finally { gate.resolve(); forgetGjcState(); f.done(); }
+});
+
 it("cancels a running identity read when its pane ends", async () => {
   const f = nativeFixture();
   try {

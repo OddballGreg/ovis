@@ -44,8 +44,9 @@ function existingOwnership(path: string): "missing" | "owned" {
   try {
     const target = lstatSync(path);
     if (!target.isFile() || target.isSymbolicLink()) throw new Error(`Refusing to modify ${path}: target is not a regular installer-owned file.`);
-    const firstLine = readFileSync(path, "utf8").split(/\r?\n/, 1)[0];
-    if (firstLine !== GJC_INTEGRATION_OWNERSHIP_BANNER) throw new Error(`Refusing to modify ${path}: ownership banner is missing.`);
+    const [firstLine, secondLine] = readFileSync(path, "utf8").split(/\r?\n/, 2);
+    if (firstLine !== GJC_INTEGRATION_OWNERSHIP_BANNER
+      && !(firstLine === "// @bun" && secondLine === GJC_INTEGRATION_OWNERSHIP_BANNER)) throw new Error(`Refusing to modify ${path}: ownership banner is missing.`);
     return "owned";
   } catch (error) {
     if (error !== null && typeof error === "object" && "code" in error && error.code === "ENOENT") return "missing";
@@ -59,7 +60,12 @@ function replaceAtomically(path: string, content: string): void {
   const temporary = join(directory, `.${basename(path)}.${process.pid}.${randomUUID()}.tmp`);
   try {
     const body = content.endsWith("\n") ? content : `${content}\n`;
-    writeFileSync(temporary, `${GJC_INTEGRATION_OWNERSHIP_BANNER}\n${body}`, { flag: "wx", mode: 0o600 });
+    // Bun recognizes its pragma only on the first line.
+    const pragma = body.match(/^\/\/ @bun\r?\n/);
+    const owned = pragma
+      ? `${pragma[0]}${GJC_INTEGRATION_OWNERSHIP_BANNER}\n${body.slice(pragma[0].length)}`
+      : `${GJC_INTEGRATION_OWNERSHIP_BANNER}\n${body}`;
+    writeFileSync(temporary, owned, { flag: "wx", mode: 0o600 });
     chmodSync(temporary, 0o600);
     if (existingOwnership(path) === "owned") {
       renameSync(temporary, path);
@@ -96,10 +102,6 @@ function parseArguments(args: string[]): InstallGjcIntegrationOptions {
     const arg = args[index];
     if (arg === "--remove") {
       options.remove = true;
-    } else if (arg === "--agent-dir") {
-      const value = args[++index];
-      if (!value || value.startsWith("--")) throw new Error("--agent-dir requires a path.");
-      options.agentDir = value;
     } else {
       throw new Error(`Unknown argument: ${arg}`);
     }
