@@ -177,7 +177,7 @@ try {
 
     // Given: a following transcript. A controlled 20 px upward correction stays inside the
     // layout allowance but outside endpoint rounding, distinguishing input from layout.
-    for (const input of ["down-wheel", "horizontal-wheel", "click", "typing", "down-key", "up-wheel", "body-up-key", "body-page-up", "body-home", "body-shift-space", "drag"] as const) {
+    for (const input of ["down-wheel", "horizontal-wheel", "click", "typing", "down-key", "body-composing-up-key", "body-composing-home", "body-229-up-key", "body-229-home", "up-wheel", "body-up-key", "body-page-up", "body-home", "body-shift-space", "drag"] as const) {
       const upward = ["up-wheel", "body-up-key", "body-page-up", "body-home", "body-shift-space", "drag"].includes(input);
       // When: input and the correction happen in one task, always inside the input window.
       await page.locator(".chat-view").evaluate(async (node, input) => {
@@ -192,9 +192,9 @@ try {
           if (input === "drag") text.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, buttons: 1, clientY: 110 }));
           if (input === "click") text.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
         } else {
-          const key = input === "body-up-key" ? "ArrowUp" : input === "body-page-up" ? "PageUp" : input === "body-home" ? "Home" : input === "body-shift-space" ? " " : input === "down-key" ? "ArrowDown" : "a";
+          const key = input.endsWith("up-key") ? "ArrowUp" : input === "body-page-up" ? "PageUp" : input.endsWith("home") ? "Home" : input === "body-shift-space" ? " " : input === "down-key" ? "ArrowDown" : "a";
           const target = input.startsWith("body-") ? document.body : text;
-          target.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key, shiftKey: input === "body-shift-space" }));
+          target.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key, shiftKey: input === "body-shift-space", isComposing: input.includes("composing"), keyCode: input.includes("229") ? 229 : 0 }));
         }
         node.scrollTop -= 20;
         node.dispatchEvent(new Event("scroll"));

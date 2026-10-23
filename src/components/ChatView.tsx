@@ -1516,7 +1516,7 @@ export const ChatView = memo(function ChatView({ paneId, presentationKey, finish
     const mark = (event: Event): void => {
       const node = scroller.current;
       if (event instanceof KeyboardEvent) {
-        if (!active) return;
+        if (!active || event.isComposing || event.keyCode === 229) return;
         if (event.target instanceof Element && event.target.closest("input, textarea, select, [contenteditable]")) return;
         if (event.key === "ArrowUp" || event.key === "PageUp" || event.key === "Home" || (event.key === " " && event.shiftKey)) scrollInputAt.current = performance.now();
         return;
