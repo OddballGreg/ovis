@@ -35,11 +35,12 @@ export function agyCatalog(path: string): Set<number> {
     fd = openSync(dbPath, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0) | (constants.O_NOFOLLOW ?? 0));
     const before = fstatSync(fd, { bigint: true });
     if (!before.isFile()) throw new AgyUnavailable();
-    // Like session-history's openDatabase: a checkpointed WAL store needs immutable=1
-    // when its side files are gone, or SQLite fails to open it or recreates them.
+    // Like session-history's openDatabase: only a complete side-file pair is live.
+    // Otherwise immutable=1 avoids SQLite creating whichever side files are missing.
     const header = Buffer.alloc(20);
+    const walBefore = existsSync(`${dbPath}-wal`), shmBefore = existsSync(`${dbPath}-shm`);
     const immutable = readSync(fd, header, 0, 20, 0) === 20 && header[18] === 2 && header[19] === 2
-      && !existsSync(`${dbPath}-wal`) && !existsSync(`${dbPath}-shm`);
+      && !(walBefore && shmBefore);
     const descriptor = process.platform === "linux" || (process.platform === "darwin" && immutable) ? `/dev/fd/${fd}` : null;
     const flags = sqliteConstants.SQLITE_OPEN_READONLY | sqliteConstants.SQLITE_OPEN_URI;
     const name = descriptor ?? dbPath;
@@ -53,7 +54,7 @@ export function agyCatalog(path: string): Set<number> {
       const after = statSync(dbPath, { bigint: true }), pinned = fstatSync(fd, { bigint: true });
       if (after.dev !== before.dev || after.ino !== before.ino || realpathSync(dbPath) !== dbPath
         || pinned.size !== before.size || pinned.mtimeNs !== before.mtimeNs || pinned.ctimeNs !== before.ctimeNs
-        || existsSync(`${dbPath}-wal`) || existsSync(`${dbPath}-shm`)) throw new AgyUnavailable();
+        || existsSync(`${dbPath}-wal`) !== walBefore || existsSync(`${dbPath}-shm`) !== shmBefore) throw new AgyUnavailable();
     }
     if (rows.length > MAX_ENTRIES || rows.some((row) => !Number.isSafeInteger(row.idx) || row.idx < 0)) throw new AgyUnavailable();
     return new Set(rows.map((row) => row.idx));
