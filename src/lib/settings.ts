@@ -23,8 +23,8 @@ export type { ResolvedTheme, ThemeSetting };
 export type Density = "compact" | "comfortable";
 /** One line names the workspace; two lines say what its pane is doing, with the workspace under it. */
 export type SidebarRows = "one" | "two";
-/** the Agents list's order: herdr's workspace order, or a waiting agent first and then the latest change */
-export type AgentOrder = "workspace" | "activity";
+/** the Agents list's order: herdr's workspace order; a waiting agent first and then the latest change; or the one waiting longest first */
+export type AgentOrder = "workspace" | "activity" | "waiting";
 /** what an agent row is named by: its agent's title, or its tab's name when the tab was renamed (the title then goes under it) */
 export type AgentRowTitle = "agent" | "tab";
 /** how agent logos are drawn: in their brand colors, or without color: Claude's in the text color, the others in grey (data-marks on <html>) */
@@ -206,7 +206,8 @@ export function telemetrySettingsSnapshot(settings: Settings): TelemetrySettings
     theme: settings.theme,
     density: settings.density,
     sidebarRows: settings.sidebarRows,
-    agentOrder: settings.agentOrder,
+    // the deployed telemetry schema knows only these two: Longest wait counts as the other order by recency
+    agentOrder: settings.agentOrder === "waiting" ? "activity" : settings.agentOrder,
     agentMarks: settings.agentMarks,
     statusIndicators: settings.statusIndicators,
     palette: settings.palette,
@@ -468,7 +469,7 @@ export function sanitizeSettings(raw: unknown): Settings {
     theme,
     density: density === "compact" || density === "comfortable" ? density : DEFAULT_SETTINGS.density,
     sidebarRows: record["sidebarRows"] === "one" || record["sidebarRows"] === "two" ? record["sidebarRows"] : DEFAULT_SETTINGS.sidebarRows,
-    agentOrder: record["agentOrder"] === "workspace" || record["agentOrder"] === "activity" ? record["agentOrder"] : DEFAULT_SETTINGS.agentOrder,
+    agentOrder: record["agentOrder"] === "workspace" || record["agentOrder"] === "activity" || record["agentOrder"] === "waiting" ? record["agentOrder"] : DEFAULT_SETTINGS.agentOrder,
     agentRowTitle: record["agentRowTitle"] === "agent" || record["agentRowTitle"] === "tab" ? record["agentRowTitle"] : DEFAULT_SETTINGS.agentRowTitle,
     agentMarks: record["agentMarks"] === "color" || record["agentMarks"] === "mono" ? record["agentMarks"] : DEFAULT_SETTINGS.agentMarks,
     statusIndicators: record["statusIndicators"] === "classic" || record["statusIndicators"] === "dots" || record["statusIndicators"] === "symbols" ? record["statusIndicators"] : DEFAULT_SETTINGS.statusIndicators,

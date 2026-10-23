@@ -1018,6 +1018,12 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
   It changes only the Agents list; herdr's order and the workspace rows stay as they are.
   A raw counter rollback clears synthetic recency even on older bridges without an epoch.
   This ordering correction never changes finish identities or read records.
+- **Longest wait**, the third Agents order, lists the agents in the order they need a look, each
+  PC on its own: blocked, then a finish not opened yet, then ready (a finish opened here counts as
+  ready, as its row draws it), then working or waiting on background work. Within each, the
+  oldest `state_change_seq` comes first, so the agent that has waited longest leads; rows with no
+  counter follow, in herdr's order. It is herdr's own agent view sorted by status, then
+  `state_change_seq` ascending (`agent.view.set`), where Activity is the newest change first.
 - Appearance's **Agent row title** is **Agent** by default: an agent row's title is what its agent
   says it is doing. **Tab name** names the row, and the header, by its herdr tab once the tab was
   renamed (a tab herdr still names by its place keeps the agent's title), and the agent's title

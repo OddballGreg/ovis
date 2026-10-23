@@ -221,6 +221,9 @@ it("names agent rows by the agent's title unless Tab name was chosen", () => {
 });
 
 describe("telemetry settings snapshot", () => {
+  it("reports Longest wait as Activity, the one other order the deployed schema knows", () => {
+    expect(telemetrySettingsSnapshot(sanitizeSettings({ agentOrder: "waiting" })).agentOrder).toBe("activity");
+  });
   it("reports current enum, boolean and bounded scalar values", () => {
     const settings = sanitizeSettings({
       terminalInputMode: "direct",

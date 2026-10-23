@@ -24,10 +24,20 @@ describe("agent roster", () => {
   it("keeps the pinned card first in pin order and each PC's rows in its own Activity order", () => {
     const machines = [machine("local", "connected", [["a", "done", 1], ["b", "blocked"], ["c", "working"]]), machine("remote", "connected", [["d", "idle"], ["e", "blocked"]])];
     const seqs = new Map<string, ReadonlyMap<string, number>>([["local", new Map([["a", 1], ["b", 2], ["c", 3]])], ["remote", new Map([["d", 9], ["e", 1]])]]);
-    const split = agentRoster(machines, { byActivity: true, seqs: (id) => seqs.get(id) ?? new Map(), pinned: [sidebarPinKey("remote", "d"), sidebarPinKey("local", "c")] });
+    const split = agentRoster(machines, { order: "activity", seqs: (id) => seqs.get(id) ?? new Map(), status: (_id, pane) => pane.agent_status, pinned: [sidebarPinKey("remote", "d"), sidebarPinKey("local", "c")] });
     const key = ({ machine, entry }: { machine: Machine; entry: { pane: HerdrPane } }) => `${machine.id}/${entry.pane.pane_id}`;
     expect(split.pinned.map(key)).toEqual(["remote/d", "local/c"]);
     // blocked first, then the latest change, within each PC; the PCs keep their order
     expect(split.rest.map(key)).toEqual(["local/b", "local/a", "remote/e"]);
+  });
+
+  it("sorts each PC's rows by Longest wait with the status each row draws", () => {
+    const machines = [machine("local", "connected", [["a", "working"], ["b", "done", 1], ["c", "done", 2], ["d", "blocked"]]), machine("remote", "connected", [["e", "idle"], ["f", "done", 1]])];
+    const seqs = new Map<string, ReadonlyMap<string, number>>([["local", new Map([["a", 1], ["b", 4], ["c", 2], ["d", 3]])], ["remote", new Map([["e", 1], ["f", 2]])]]);
+    // c's finish was opened: it draws as ready, so it waits behind b's unread one
+    const status = (id: string, pane: HerdrPane): AgentStatus | undefined => id === "local" && pane.pane_id === "c" ? "idle" : pane.agent_status;
+    const split = agentRoster(machines, { order: "waiting", seqs: (id) => seqs.get(id) ?? new Map(), status, pinned: [] });
+    const key = ({ machine, entry }: { machine: Machine; entry: { pane: HerdrPane } }) => `${machine.id}/${entry.pane.pane_id}`;
+    expect(split.rest.map(key)).toEqual(["local/d", "local/b", "local/c", "local/a", "remote/f", "remote/e"]);
   });
 });

@@ -1,6 +1,6 @@
 /** Activity order uses raw statuses and herdr recency; opened finishes use only bridge finish IDs. */
 import type { AgentStatus, HerdrPane, PaneInfo, SessionSnapshot } from "../../shared/protocol.ts";
-import { knownStatus, paneStatus } from "./status.ts";
+import { knownStatus, paneStatus, type KnownStatus } from "./status.ts";
 
 export type SeenRecord = Readonly<Record<string, number>>;
 
@@ -64,5 +64,21 @@ export function activityOrder<T>(rows: readonly T[], paneOf: (row: T) => Pick<Pa
       return { row, index, rank: knownStatus(pane.agent_status) === "blocked" ? 0 : 1, recent: seqs.get(pane.pane_id) ?? -1 };
     })
     .sort((a, b) => a.rank - b.rank || b.recent - a.recent || a.index - b.index)
+    .map((entry) => entry.row);
+}
+
+/** Longest wait's ranks, as herdr's own status sort: blocked, an unread finish, ready, then working (BG is working in all but name). */
+const WAIT_RANK: Readonly<Record<KnownStatus, number>> = { blocked: 0, done: 1, idle: 2, working: 3, waiting: 3, unknown: 4 };
+
+/**
+ * Longest wait first: blocked, then a finish not opened yet, then ready (a finish already opened
+ * counts as ready, as its row draws it), then working; within each, herdr's oldest state change
+ * first, then the order given. `statusOf` is the status the row draws (shownStatus), not the raw
+ * one. herdr's own agent view sorted by status, then state_change_seq ascending, is the same order.
+ */
+export function waitingOrder<T>(rows: readonly T[], paneOf: (row: T) => Pick<PaneInfo, "pane_id">, statusOf: (row: T) => AgentStatus | undefined, seqs: ReadonlyMap<string, number>): T[] {
+  return rows
+    .map((row, index) => ({ row, index, rank: WAIT_RANK[knownStatus(statusOf(row))], changed: seqs.get(paneOf(row).pane_id) ?? Infinity }))
+    .sort((a, b) => a.rank - b.rank || (a.changed === b.changed ? 0 : a.changed < b.changed ? -1 : 1) || a.index - b.index)
     .map((entry) => entry.row);
 }
