@@ -133,45 +133,46 @@
   height: var(--icon-size);
 }
 
-/* Settings → Terminal → Compact input line: one short row, so a phone keeps more of its grid.
-   The field, Send, the mic and the fold button are drawn --touch-target-compact (36px) tall,
-   and each still reaches --touch-target (44px): the bar's padding above and below is the
-   difference, the buttons grow into it through an invisible ::before expander, and a press on
-   the bar around the field focuses the field. The gap between buttons is the expanders' width
-   past the buttons, so two neighbours never share a tap. The bar is that 44px and its hairline */
-.terminal-input-slot.is-compact {
-  height: calc(var(--hairline) + var(--touch-target));
-}
-
-.terminal-input.is-compact {
-  padding: calc((var(--touch-target) - var(--touch-target-compact)) / 2) var(--space-2);
-  gap: calc(var(--touch-target) - var(--touch-target-compact));
-}
-
-.terminal-input.is-compact .terminal-input-text {
-  min-height: var(--touch-target-compact);
-  /* one row of text and the hairlines fill the field's drawn height */
-  padding: max(0px, (var(--touch-target-compact) - max(16px, var(--fs-md)) * var(--lh-base) - 2 * var(--hairline)) / 2) var(--space-3);
-}
-
-.terminal-input.is-compact .terminal-input-send,
-.terminal-input.is-compact .terminal-input-mic .voice-mic {
-  position: relative;
-  width: var(--touch-target-compact);
-  height: var(--touch-target-compact);
-}
-
-.terminal-input.is-compact .terminal-input-send::before,
-.terminal-input.is-compact .terminal-input-mic .voice-mic::before,
-.terminal-input-keys::before {
-  content: "";
-  position: absolute;
-  inset: calc((var(--touch-target-compact) - var(--touch-target)) / 2);
-}
-
+/* Settings → Terminal → Compact input line, on a phone (the key bar's query, KeyBar.css): one
+   short row, so the phone keeps more of its grid. The field, Send, the mic and the fold button
+   are drawn --touch-target-compact (36px) tall, and each still reaches --touch-target (44px): the
+   bar's padding above and below is the difference, the buttons grow into it through an
+   invisible ::before expander, and a press on the bar around the field focuses the field. The
+   gap between buttons is the expanders' width past the buttons, so two neighbours never share a
+   tap. The bar is that 44px and its hairline. A desktop keeps the full line */
 @media (pointer: coarse), (max-width: 768px) {
   .terminal-input-keys {
     display: inline-flex;
+  }
+
+  .terminal-input-slot.is-compact {
+    height: calc(var(--hairline) + var(--touch-target));
+  }
+
+  .terminal-input.is-compact {
+    padding: calc((var(--touch-target) - var(--touch-target-compact)) / 2) var(--space-2);
+    gap: calc(var(--touch-target) - var(--touch-target-compact));
+  }
+
+  .terminal-input.is-compact .terminal-input-text {
+    min-height: var(--touch-target-compact);
+    /* one row of text and the hairlines fill the field's drawn height */
+    padding: max(0px, (var(--touch-target-compact) - max(16px, var(--fs-md)) * var(--lh-base) - 2 * var(--hairline)) / 2) var(--space-3);
+  }
+
+  .terminal-input.is-compact .terminal-input-send,
+  .terminal-input.is-compact .terminal-input-mic .voice-mic {
+    position: relative;
+    width: var(--touch-target-compact);
+    height: var(--touch-target-compact);
+  }
+
+  .terminal-input.is-compact .terminal-input-send::before,
+  .terminal-input.is-compact .terminal-input-mic .voice-mic::before,
+  .terminal-input-keys::before {
+    content: "";
+    position: absolute;
+    inset: calc((var(--touch-target-compact) - var(--touch-target)) / 2);
   }
 
   .terminal-input.is-compact.has-keys {
@@ -196,5 +197,15 @@
 
   .terminal-input-slot.is-folded > .terminal-input.is-compact {
     padding-bottom: max((var(--touch-target) - var(--touch-target-compact)) / 2, env(safe-area-inset-bottom, 0px));
+  }
+
+  /* the soft keyboard covers the home indicator: the line sits just above the keyboard, as the
+     composer does (Composer.css) */
+  [data-keyboard] .terminal-input-slot.is-compact.is-folded {
+    height: calc(var(--hairline) + var(--touch-target));
+  }
+
+  [data-keyboard] .terminal-input-slot.is-folded > .terminal-input.is-compact {
+    padding-bottom: calc((var(--touch-target) - var(--touch-target-compact)) / 2);
   }
 }

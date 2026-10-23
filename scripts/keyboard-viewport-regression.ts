@@ -46,7 +46,34 @@ const bundle = await Bun.build({ entrypoints: [join(repo, "src/lib/viewport.ts")
 assert.ok(bundle.success, String(bundle.logs));
 const js = bundle.outputs.find((output) => output.path.endsWith(".js"));
 assert.ok(js);
-const css = readFileSync(join(repo, "src/styles.css"), "utf8") + "\n" + readFileSync(join(repo, "src/components/Composer.css"), "utf8");
+const css = ["src/styles.css", "src/components/Composer.css", "src/components/TerminalInput.css"]
+  .map((file) => readFileSync(join(repo, file), "utf8")).join("\n");
+// the terminal lens with the Compact input line and its key bar folded (PaneTerminal.tsx): the line
+// is the bar at the screen's bottom
+const compactLine = `<div class="terminal-input-slot is-compact is-folded"><div class="terminal-input is-compact"><textarea class="terminal-input-text" aria-label="Terminal input" rows="1"></textarea><button class="terminal-input-send" type="button" aria-label="Send"></button></div></div>`;
+
+async function checkCompactLine(page: Page, keyboard: boolean, height: number, inset: number): Promise<void> {
+  const state = await page.evaluate(() => {
+    const slot = document.querySelector(".terminal-input-slot")!;
+    const root = document.documentElement;
+    const px = (name: string) => parseFloat(getComputedStyle(root).getPropertyValue(name));
+    return {
+      keyboard: root.hasAttribute("data-keyboard"),
+      slot: slot.getBoundingClientRect().height,
+      bottom: slot.getBoundingClientRect().bottom,
+      padding: parseFloat(getComputedStyle(slot.firstElementChild!).paddingBottom),
+      hostPadding: parseFloat(getComputedStyle(document.querySelector(".terminal-host")!).paddingBottom),
+      bar: px("--hairline") + px("--touch-target"),
+      pad: (px("--touch-target") - px("--touch-target-compact")) / 2,
+    };
+  });
+  assert.equal(state.keyboard, keyboard, "keyboard flag follows occlusion");
+  assert.equal(state.bottom, height, "the folded line stays at the shell bottom");
+  assert.equal(state.hostPadding, 0, "home-indicator inset is not duplicated by the host");
+  // up, the keyboard covers the home indicator: no band between the field and the keyboard
+  assert.equal(state.slot, keyboard ? state.bar : state.bar + Math.max(0, inset - state.pad), "folded line carries the inset only off the keyboard");
+  assert.equal(state.padding, keyboard ? state.pad : Math.max(state.pad, inset), "folded line's bottom padding drops the inset over the keyboard");
+}
 const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
   const url = new URL(request.url);
   if (url.pathname === "/viewport.js") return new Response(js, { headers: { "content-type": "text/javascript" } });
@@ -57,13 +84,13 @@ const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
       : css;
     return new Response(fixtureCss.replace(/env\(safe-area-inset-bottom,\s*0px\)/g, `${inset}px`), { headers: { "content-type": "text/css" } });
   }
-  return new Response(`<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><link rel="stylesheet" href="/styles.css?inset=${url.searchParams.get("inset") ?? "0"}${url.searchParams.has("short") ? "&short" : ""}"><style>.terminal-host{display:flex;flex-direction:column}.fixture-chat{flex:1;min-height:0}.xterm-helper-textarea{position:absolute;width:1px;height:1px;opacity:0}</style></head><body><div class="app"><div class="app-body"><div class="terminal-host"><div class="fixture-chat"></div><div class="composer"><textarea aria-label="Message"></textarea></div><textarea class="xterm-helper-textarea"></textarea></div></div></div><script src="/viewport.js"></script></body></html>`, { headers: { "content-type": "text/html" } });
+  return new Response(`<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><link rel="stylesheet" href="/styles.css?inset=${url.searchParams.get("inset") ?? "0"}${url.searchParams.has("short") ? "&short" : ""}"><style>.terminal-host{display:flex;flex-direction:column}.fixture-chat{flex:1;min-height:0}.xterm-helper-textarea{position:absolute;width:1px;height:1px;opacity:0}</style></head><body><div class="app"><div class="app-body"><div class="terminal-host"><div class="fixture-chat"></div>${url.searchParams.has("compact") ? compactLine : `<div class="composer"><textarea aria-label="Message"></textarea></div>`}<textarea class="xterm-helper-textarea"></textarea></div></div></div><script src="/viewport.js"></script></body></html>`, { headers: { "content-type": "text/html" } });
 } });
 let browser: Browser | undefined;
 try {
   browser = await chromium.launch({ executablePath: chromePath(), headless: true, args: ["--no-sandbox"] });
-  for (const scenario of ["mobile", "split-view", "desktop", "virtual-keyboard", "standalone", "standalone-full", "browser-short"] as const) {
-    const mobile = scenario !== "desktop";
+  for (const scenario of ["mobile", "split-view", "desktop", "virtual-keyboard", "standalone", "standalone-full", "browser-short", "compact", "compact-desktop"] as const) {
+    const mobile = !scenario.endsWith("desktop");
     const context = await browser.newContext({ viewport: mobile ? { width: 393, height: 852 } : { width: 1280, height: 800 }, isMobile: mobile, hasTouch: mobile });
     try {
       await context.addInitScript(({ mobile, virtualKeyboard, scenario }) => {
@@ -96,6 +123,31 @@ try {
       const page = await context.newPage();
       const errors: string[] = [];
       page.on("pageerror", (error) => errors.push(error.message));
+      if (scenario === "compact") {
+        await page.goto(`http://127.0.0.1:${server.port}/?inset=34&compact`);
+        await checkCompactLine(page, false, 852, 34);
+        await page.getByRole("textbox", { name: "Terminal input", exact: true }).focus();
+        await checkCompactLine(page, false, 852, 34); // hardware keyboard
+        await geometry(page, 472, 852, 852);
+        await checkCompactLine(page, true, 472, 34);
+        await geometry(page, 793, 852, 852, "scroll"); // native dismissal, focus remains
+        await checkCompactLine(page, false, 852, 34);
+        assert.deepEqual(errors, []);
+        continue;
+      }
+      if (scenario === "compact-desktop") {
+        await page.goto(`http://127.0.0.1:${server.port}/?inset=0&compact`);
+        // a desktop keeps the full line: the compact rules are the phone's (TerminalInput.css)
+        const line = await page.evaluate(() => {
+          const root = getComputedStyle(document.documentElement);
+          const input = getComputedStyle(document.querySelector(".terminal-input")!);
+          return { top: parseFloat(input.paddingTop), bottom: parseFloat(input.paddingBottom), space: parseFloat(root.getPropertyValue("--space-2")),
+            send: document.querySelector(".terminal-input-send")!.getBoundingClientRect().height, target: parseFloat(root.getPropertyValue("--touch-target")) };
+        });
+        assert.deepEqual(line, { top: line.space, bottom: 0, space: line.space, send: line.target, target: line.target }, "desktop keeps the full input line");
+        assert.deepEqual(errors, []);
+        continue;
+      }
       await page.goto(`http://127.0.0.1:${server.port}/?inset=${mobile ? 34 : 0}${scenario === "standalone" || scenario === "browser-short" ? "&short" : ""}`);
       await checkState(page, false, mobile ? scenario === "standalone" ? 852 : scenario === "browser-short" ? 793 : 852 : 800, mobile ? 34 : 0, scenario === "standalone");
       if (scenario === "standalone") {
@@ -209,5 +261,5 @@ try {
       assert.deepEqual(errors, []);
     } finally { await context.close(); }
   }
-  console.log("PASS mobile viewport: same-width split view, dismissal without blur, hardware keyboard, dual viewport resize, orientation, standalone, safe area, desktop, zoom, xterm, keyboard geometry");
+  console.log("PASS mobile viewport: same-width split view, dismissal without blur, hardware keyboard, dual viewport resize, orientation, standalone, safe area, desktop, zoom, xterm, keyboard geometry, compact input line");
 } finally { await browser?.close(); server.stop(); }

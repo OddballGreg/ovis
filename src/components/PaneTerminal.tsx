@@ -3281,6 +3281,9 @@ export function PaneTerminal({
   // line is there to bring it back (lib/compactInput.ts)
   const compactInput = settings.compactTerminalInput;
   const foldedKeyBar = keyBarFolded({ compact: compactInput, shown: keyBarShown, inputLine: lineSlot && !chatView && !secretActive });
+  // a held modifier goes with the bar that shows it: kept past the fold, an empty Send would
+  // go out as Ctrl+Enter with nothing on screen saying so
+  useLayoutEffect(() => { if (foldedKeyBar) clearModifiers(); }, [foldedKeyBar, clearModifiers]);
   // What floats from the slot may reach up to the grid's top and no further (TerminalInput.css):
   // in a short pane (a split, a phone in landscape with its keyboard up) a grown line or the masked
   // input would otherwise cover the find bar, or be clipped under the pane's frame

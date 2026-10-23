@@ -2467,11 +2467,17 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
   above still holds: the bar's `4px` padding above and below is each control's hit area, the
   buttons reaching it through an invisible `::before` expander and the field because a press on
   the bar around it focuses it; buttons stand `8px` apart, so two expanders never overlap. The
-  field still grows upward while its text wraps, as the full line does.
+  field still grows upward while its text wraps, as the full line does. The short row is drawn
+  under the key bar's query (coarse pointer or `<=768px`); a desktop keeps the full line.
   The key bar folds away behind that button (chevron, `aria-pressed`, named **Terminal keys**),
-  folded until shown and remembered per device (`compactKeyBarShown`). With the bar folded the
+  folded until shown and remembered per device (`compactKeyBarShown`). Folding or showing it
+  changes the grid's height, so like the switch to direct typing it resizes the shared pane for
+  every client on it. A Ctrl, Alt or Shift held on the bar is let go when it folds, so nothing
+  unseen changes the next Send. With the bar folded the
   line is the bar at the screen's bottom: it carries `env(safe-area-inset-bottom)` itself in
-  place of the host's, so the inset is applied once and no band shows under it. Only a line on
+  place of the host's, so the inset is applied once and no band shows under it; while the soft
+  keyboard is up (`data-keyboard`, lib/viewport.ts) it drops that inset and sits just above the
+  keyboard, as the composer does. Only a line on
   screen folds the bar: with direct typing, or the masked input in the line's place, the bar
   stays, as it holds the way back to the input line. The one-row field that grows with its text
   follows the Claude and Codex phone apps' composers; the fold is this app's own, as those apps
