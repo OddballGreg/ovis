@@ -4,6 +4,8 @@
  * an OVIS_* variable that is not set takes the value of its old name, and one that is set wins.
  * Entry points apply it to their own environment through adopt-legacy-env.ts.
  */
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 const LEGACY_PREFIX = "HERDR_WEB_";
 /** old names that do not map by prefix alone */
@@ -21,6 +23,17 @@ export function adoptLegacyEnv(env: Record<string, string | undefined>): void {
     const next = ovisName(name);
     if (next !== null && value !== undefined && env[next] === undefined) env[next] = value;
   }
+}
+
+/**
+ * The state dir of the launcher (server/managed.ts) that started this supervisor, when that
+ * launcher is from before the rename; null under a launcher of this version (which sets
+ * OVIS_LAUNCHER) or none. An update never replaces a running launcher, and the old one looks for
+ * the active release only under its own state dir, so a supervisor it starts keeps the state there.
+ */
+export function legacyLauncherStateDir(env: Record<string, string | undefined>): string | null {
+  if (env["OVIS_LAUNCHER"] !== undefined || env["HERDR_WEB_SOURCE_ROOT"] === undefined) return null;
+  return env["HERDR_WEB_STATE_DIR"] || join(env["XDG_CONFIG_HOME"] || join(homedir(), ".config"), "herdr-web-ui");
 }
 
 /**

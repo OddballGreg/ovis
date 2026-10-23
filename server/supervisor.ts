@@ -11,6 +11,7 @@ import { DEFAULT_PORT } from "../shared/protocol.ts";
 import { readUpdateIpcRequest } from "../shared/update.ts";
 import { defaultStateDir, HANDOVER_EXIT, moveLegacyStateDir, updateStateDir } from "./update-state.ts";
 import { herdrSocketPath } from "./herdr/client.ts";
+import { legacyLauncherStateDir } from "./legacy-env.ts";
 import { acquireOwnerDirectory } from "./owner-guard.ts";
 import { Updater, type Release } from "./updater.ts";
 
@@ -20,10 +21,13 @@ export async function runSupervisor(root = resolve(import.meta.dir, "..")) {
   const host = process.env["HOST"] ?? "127.0.0.1";
   const probeHost = host === "0.0.0.0" ? "127.0.0.1" : host === "::" ? "[::1]" : host.includes(":") ? `[${host}]` : host;
   const origin = `http://${probeHost}:${port}`;
-  moveLegacyStateDir();
-  const appStateDir = resolve(defaultStateDir());
+  // a launcher from before the rename finds its releases only under the old state dir: the move
+  // waits for a launcher of this version
+  const legacyStateDir = legacyLauncherStateDir(process.env);
+  if (legacyStateDir === null) moveLegacyStateDir();
+  const appStateDir = resolve(legacyStateDir ?? defaultStateDir());
   const socketPath = resolve(herdrSocketPath());
-  const stateDir = updateStateDir(root, port);
+  const stateDir = updateStateDir(root, port, appStateDir);
   mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   // A crash or a forced Windows shutdown skips lock cleanup, and the old PID may belong to
   // someone else by now: the lock records the owner's birth, so only a provably gone owner is replaced.

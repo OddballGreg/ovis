@@ -1,5 +1,10 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
+import { spawnSync } from "node:child_process";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { adoptLegacyEnv, mergeEnvLayers, ovisName } from "./legacy-env.ts";
+import { updateStateDir } from "./update-state.ts";
 
 describe("settings under their names from before the rename", () => {
   it("fill an unset OVIS_* variable", () => {
@@ -29,4 +34,92 @@ describe("settings under their names from before the rename", () => {
     expect(mergeEnvLayers([{ OVIS_TOKEN: "parent" }, { HERDR_WEB_TOKEN: "file" }])["OVIS_TOKEN"]).toBe("file");
     expect(mergeEnvLayers([{ HERDR_WEB_TOKEN: "parent" }, { OVIS_TOKEN: "file" }])["OVIS_TOKEN"]).toBe("file");
   });
+});
+
+describe("a supervisor started by the launcher of an install from before the rename", () => {
+  const roots: string[] = [];
+  afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
+  const git = (cwd: string, ...args: string[]): string => {
+    const run = spawnSync("git", ["-c", "user.email=test@example.invalid", "-c", "user.name=Ovis test", ...args], { cwd, encoding: "utf8" });
+    if (run.status !== 0) throw new Error(`git ${args.join(" ")}: ${run.stderr}`);
+    return run.stdout.trim();
+  };
+  const port = 59_997;
+
+  /**
+   * What a v0.4.13 install looks like right after it installed the next release: its source
+   * checkout, and under the old state dir the release the launcher starts the supervisor of.
+   */
+  function installedRelease() {
+    const directory = mkdtempSync(join(tmpdir(), "ovis-legacy-launcher-"));
+    roots.push(directory);
+    const root = join(directory, "checkout"), config = join(directory, "config");
+    mkdirSync(root);
+    git(root, "init", "-q", "-b", "main");
+    writeFileSync(join(root, "package.json"), JSON.stringify({ name: "legacy-launcher-fixture", version: "0.4.13" }));
+    git(root, "add", ".");
+    git(root, "commit", "-qm", "0.4.13");
+    const updates = updateStateDir(root, port, join(config, "herdr-web-ui"));
+    const release = join(updates, "release-next");
+    mkdirSync(updates, { recursive: true });
+    git(directory, "clone", "-q", root, release);
+    git(release, "commit", "-q", "--allow-empty", "-m", "next");
+    writeFileSync(join(updates, "current.json"), JSON.stringify({ directory: release,
+      revision: git(release, "rev-parse", "HEAD"), source_revision: git(root, "rev-parse", "HEAD") }));
+    return { directory, root, config, release };
+  }
+
+  /** Runs this checkout's supervisor under `launcherEnv` and returns how it started the bridge. */
+  async function startBridge(directory: string, config: string, launcherEnv: Record<string, string>) {
+    const record = join(directory, "bridge.json");
+    const script = join(directory, "supervisor-stand-in.ts");
+    // the bridge without a bridge: its start is recorded and its health check answered; every
+    // other process (the updater's git) runs for real
+    writeFileSync(script, `
+      import { writeFileSync } from "node:fs";
+      const realSpawn = Bun.spawn;
+      let bootId = "";
+      Bun.spawn = ((argv, options) => {
+        if (argv[1] !== "server/index.ts") return realSpawn(argv, options);
+        bootId = options.env.OVIS_BOOT_ID;
+        writeFileSync(${JSON.stringify(record)}, JSON.stringify({ cwd: options.cwd, stateDir: options.env.OVIS_STATE_DIR }));
+        return { exitCode: null, kill() {}, exited: Promise.resolve(0), send() {} };
+      }) as typeof Bun.spawn;
+      globalThis.fetch = (async () => ({ ok: true, json: async () => ({ web_ui: { boot_id: bootId } }) })) as unknown as typeof fetch;
+      const { runSupervisor } = await import(${JSON.stringify(join(import.meta.dir, "supervisor.ts"))});
+      await runSupervisor(process.env.OVIS_SOURCE_ROOT);
+      process.exit(0);
+    `);
+    const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("OVIS_") && !name.startsWith("HERDR_WEB_")));
+    const child = Bun.spawn([process.execPath, script], { env: { ...env, ...launcherEnv, XDG_CONFIG_HOME: config,
+      PORT: String(port), HOST: "127.0.0.1", HERDR_SOCKET: join(directory, "herdr.sock"), OVIS_AUTO_UPDATE: "0" },
+    stdout: "pipe", stderr: "pipe" });
+    const output = Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text()]);
+    const timer = setTimeout(() => child.kill("SIGKILL"), 15_000); // a wedged stand-in must not hang the run
+    try {
+      const code = await child.exited;
+      if (code !== 0 || !existsSync(record)) throw new Error(`the supervisor exited ${code}:\n${(await output).join("\n")}`);
+      return JSON.parse(readFileSync(record, "utf8")) as { cwd: string; stateDir: string };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  it("runs the release it installed and keeps the state where that launcher looks", async () => {
+    // the v0.4.13 launcher names the checkout HERDR_WEB_SOURCE_ROOT, and it finds the active
+    // release, at every start and every handover after the next install, only under the old
+    // state dir: moved away, the update came back as the source checkout's old version
+    const { directory, root, config, release } = installedRelease();
+    const bridge = await startBridge(directory, config, { HERDR_WEB_SOURCE_ROOT: root });
+    expect(bridge.cwd).toBe(release);
+    expect(bridge.stateDir).toBe(join(config, "herdr-web-ui"));
+    expect(lstatSync(join(config, "herdr-web-ui")).isDirectory()).toBe(true);
+  }, 20_000);
+
+  it("moves the state dir once a launcher of this version starts it", async () => {
+    const { directory, root, config } = installedRelease();
+    const bridge = await startBridge(directory, config, { OVIS_SOURCE_ROOT: root, OVIS_LAUNCHER: "1" });
+    expect(bridge.stateDir).toBe(join(config, "ovis"));
+    expect(lstatSync(join(config, "herdr-web-ui")).isSymbolicLink()).toBe(true);
+  }, 20_000);
 });
