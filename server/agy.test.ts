@@ -5,6 +5,26 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { agyCatalog, agyDatabasePath, parseAgyTranscript } from "./agy.ts";
 
+it("reads a stable rollback-journal catalog without creating side files", () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "agy-rollback-")));
+  try {
+    const transcript = join(dir, "brain", "session", ".system_generated", "logs", "transcript_full.jsonl");
+    const dbPath = agyDatabasePath(transcript);
+    mkdirSync(dirname(dbPath), { recursive: true });
+    const writer = new Database(dbPath);
+    try {
+      writer.exec("CREATE TABLE steps(idx INTEGER PRIMARY KEY); INSERT INTO steps VALUES (0);");
+    } finally { writer.close(); }
+
+    const catalog = agyCatalog(transcript);
+
+    expect([...catalog]).toEqual([0]);
+    expect(existsSync(`${dbPath}-wal`)).toBe(false);
+    expect(existsSync(`${dbPath}-shm`)).toBe(false);
+    expect(existsSync(`${dbPath}-journal`)).toBe(false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 it("reads a checkpointed WAL catalog without recreating missing side files", () => {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "agy-wal-")));
   try {
@@ -54,6 +74,48 @@ it.each(["wal", "shm", null] as const)("reads a WAL catalog with %s missing with
       expect(exitCode).toBe(0);
       // Incomplete pairs read only the checkpointed main file, as session-history does.
       expect(JSON.parse(stdout)).toEqual(missing === null ? [0, 1] : [0]);
+    } finally { writer.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+it("does not recreate a live WAL pair unlinked between its check and open", async () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "agy-wal-unlink-")));
+  try {
+    const transcript = join(dir, "brain", "session", ".system_generated", "logs", "transcript_full.jsonl");
+    const dbPath = agyDatabasePath(transcript);
+    mkdirSync(dirname(dbPath), { recursive: true });
+    const writer = new Database(dbPath);
+    try {
+      writer.exec("PRAGMA journal_mode=WAL; CREATE TABLE steps(idx INTEGER PRIMARY KEY); INSERT INTO steps VALUES (0); PRAGMA wal_checkpoint(TRUNCATE);");
+
+      const reader = Bun.spawn([process.execPath, "-e", `
+        import { agyCatalog, AgyUnavailable } from ${JSON.stringify(new URL("./agy.ts", import.meta.url).href)};
+        import { existsSync, rmSync } from "node:fs";
+        const path = ${JSON.stringify(dbPath)};
+        let removed = false;
+        let rows = null;
+        try {
+          rows = [...agyCatalog(${JSON.stringify(transcript)}, () => {
+            if (!existsSync(path + "-wal") || !existsSync(path + "-shm")) throw new Error("pair missing before hook");
+            rmSync(path + "-wal");
+            rmSync(path + "-shm");
+            removed = true;
+          })];
+        } catch (error) {
+          if (!(error instanceof AgyUnavailable)) throw error;
+        }
+        console.log(JSON.stringify({ removed, rows }));
+      `], { stdout: "pipe", stderr: "pipe" });
+      const [exitCode, stdout, stderr] = await Promise.all([
+        reader.exited, new Response(reader.stdout).text(), new Response(reader.stderr).text(),
+      ]);
+
+      expect([existsSync(`${dbPath}-wal`), existsSync(`${dbPath}-shm`)]).toEqual([false, false]);
+      expect(stderr).toBe("");
+      expect(exitCode).toBe(0);
+      const result = JSON.parse(stdout);
+      expect(result.removed).toBe(true);
+      expect([null, [0]]).toContainEqual(result.rows);
     } finally { writer.close(); }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
