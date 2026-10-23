@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import type { AgentInfo, PaneProcessInfoProcess } from "../shared/herdr-api.generated.ts";
+import type { AgentInfo } from "../shared/herdr-api.generated.ts";
 import { cmdContextWindow, cmdSlug, cmdTranscriptInStore, unwrittenSession } from "./cmd.ts";
 import { transcriptPage } from "./conversation.ts";
 import { parseInteractivePrompt } from "./prompt.ts";
@@ -92,8 +92,7 @@ describe("Command Code session resolution", () => {
     tab_id: "tab", terminal_id: "terminal", workspace_id: "workspace",
   } satisfies AgentInfo;
 
-  const cmdProcess = { pid: 123, name: "cmd", argv: ["/usr/local/bin/cmd"], cwd: agentCwd };
-  const cases: { name: string; changes: Partial<AgentInfo>; processes?: PaneProcessInfoProcess[]; expected: unknown }[] = [
+  const cases: { name: string; changes: Partial<AgentInfo>; expected: unknown }[] = [
     { name: "resolves the process project when the shell is elsewhere", changes: {}, expected: { path } },
     { name: "resolves an unwritten session in the process project", changes: { agent_session: { ...report, value: fresh } }, expected: { unwritten: { id: "fresh", path: fresh } } },
     { name: "falls back when the process cwd is absent", changes: { cwd: agentCwd, foreground_cwd: null }, expected: { path } },
@@ -103,10 +102,6 @@ describe("Command Code session resolution", () => {
     { name: "resolves B when an unrelated foreground helper reports C", changes: { cwd: agentCwd, foreground_cwd: helperCwd }, expected: { path } },
     { name: "rejects a session when neither reported cwd validates", changes: { foreground_cwd: helperCwd }, expected: null },
     { name: "rejects an unwritten session when neither cwd validates", changes: { foreground_cwd: helperCwd, agent_session: { ...report, value: fresh } }, expected: null },
-    { name: "resolves a cmd process cwd before unrelated pane cwds", changes: { foreground_cwd: helperCwd }, processes: [cmdProcess], expected: { path } },
-    { name: "resolves a cmd script process cwd", changes: { foreground_cwd: helperCwd }, processes: [{ ...cmdProcess, argv: ["bun", "/usr/local/bin/cmd.js"] }], expected: { path } },
-    { name: "ignores helper process cwds", changes: { foreground_cwd: helperCwd }, processes: [{ ...cmdProcess, argv: ["node", "helper.js", "cmd"] }], expected: null },
-    { name: "does not mistake Windows cmd.exe for Command Code", changes: { foreground_cwd: helperCwd }, processes: [{ ...cmdProcess, argv: ["C:\\Windows\\System32\\cmd.exe"] }], expected: null },
     { name: "rejects another agent", changes: { agent: "pi" }, expected: null },
     { name: "rejects another session agent", changes: { agent_session: { ...report, agent: "pi" } }, expected: null },
     { name: "rejects an untrusted session source", changes: { agent_session: { ...report, source: "environment" } }, expected: null },
@@ -115,10 +110,10 @@ describe("Command Code session resolution", () => {
     { name: "rejects a missing cwd", changes: { cwd: null, foreground_cwd: null }, expected: null },
   ];
 
-  it.each(cases)("$name", async ({ changes, processes = [], expected }) => {
+  it.each(cases)("$name", async ({ changes, expected }) => {
     // Given an isolated home and herdr report, without a live herdr connection.
     const script = `const { cmdTranscriptPath } = await import(${JSON.stringify(join(import.meta.dir, "cmd.ts"))});
-      console.log(JSON.stringify(await cmdTranscriptPath("cmd-pane", { agent: ${JSON.stringify({ ...agent, ...changes })}, processes: ${JSON.stringify(processes)} })));`;
+      console.log(JSON.stringify(await cmdTranscriptPath("cmd-pane", { agent: ${JSON.stringify({ ...agent, ...changes })} })));`;
     // When resolving the reported session through the real filesystem validation.
     const child = Bun.spawn([process.execPath, "-e", script], {
       env: { ...process.env, HOME: root, USERPROFILE: root },
