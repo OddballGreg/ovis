@@ -1,13 +1,14 @@
 # Push relay
 
 The Cloudflare Worker that carries the PC's alerts to the Ovis phone app, at `push.ovis.sh`.
-A WKWebView app gets no Web Push, so the relay stands in for a browser's push service: to the
+The app's web view gets no Web Push, so the relay stands in for a browser's push service: to the
 PC's `server/push.ts` it is one more Web Push endpoint, and it hands each push to Apple's push
-service (APNs). Why and how it fits the app: [docs/native-app.md](../docs/native-app.md#notifications).
+service (APNs) for the iOS app, or to Firebase Cloud Messaging (FCM) for the Android app. Why and how it fits the app: [docs/native-app.md](../docs/native-app.md#notifications).
 
 Pushes are end-to-end encrypted. The PC encrypts each alert for keys the app made and keeps in
 its keychain (RFC 8291), and the relay forwards the ciphertext as it came; it never holds a key
-that could read it. The app's Notification Service Extension decrypts it on the phone.
+that could read it. The iOS app's Notification Service Extension decrypts it on the phone, and
+the Android app's messaging service does the same.
 
 ## What it answers
 
@@ -20,7 +21,9 @@ that could read it. The app's Notification Service Extension decrypts it on the 
 `vapid_key` is the `public_key` the PC's `GET /api/push` answers (base64url, an uncompressed
 P-256 point), the key a browser would pass to `pushManager.subscribe` as its
 `applicationServerKey`. `environment` is `production` (the default) or `sandbox`, for a token
-from a development build. The answer is `201` with
+from a development build. The Android app registers its FCM registration token instead,
+`{ "service": "fcm", "token": "<FCM registration token>", "vapid_key": "..." }`; a relay without
+FCM credentials (`FCM_SERVICE_ACCOUNT`, below) answers that with `501`. The answer is `201` with
 `{ "endpoint": "https://push.ovis.sh/v1/push/<id>" }`, where `<id>` is random and stands for the
 token: the token itself never leaves the relay.
 
@@ -67,19 +70,26 @@ t=..., k=...` header (RFC 8292) whose token names this relay's origin as its aud
   the phone shows when it cannot. `Urgency: high` becomes APNs priority 10 (any other, 5), `TTL`
   becomes `apns-expiration` (at most 28 days; `0` delivers now or never), and `Topic` becomes
   `apns-collapse-id`, so a newer push with the same topic replaces one still waiting.
-- The answer is `201` once APNs takes the push. APNs saying the token is gone (`410`, or `400`
-  with `BadDeviceToken` or `DeviceTokenNotForTopic`) deletes every endpoint of that token and
-  answers `410`, which the PC takes as an unsubscribe; an unknown endpoint is `404`, which it
+- To an FCM token the push goes as an FCM HTTP v1 data message,
+  `{"message":{"token":"...","data":{"ovis":"<ciphertext, base64>"},"android":{...}}}`, with no
+  notification part: Android hands it to the app, which decrypts it and shows the PC's title and
+  body (or "herdr needs you" when it cannot). `Urgency: high` becomes FCM priority `HIGH` (any
+  other, `NORMAL`), `TTL` becomes `android.ttl`, and `Topic` becomes `android.collapse_key`. The
+  relay signs in with the service account (Google's OAuth JWT flow) and reuses the access token
+  for 50 minutes; FCM refusing it makes the relay get a new one and send the push once more.
+- The answer is `201` once APNs or FCM takes the push. APNs saying the token is gone (`410`, or
+  `400` with `BadDeviceToken` or `DeviceTokenNotForTopic`), or FCM saying so (`UNREGISTERED` or
+  `SENDER_ID_MISMATCH`), deletes every endpoint of that token and answers `410`, which the PC takes as an unsubscribe; an unknown endpoint is `404`, which it
   takes the same way (another PC's next push to the token's endpoints gets it). APNs refusing the
   relay's provider token as expired or invalid makes the relay sign a new one and send the push
   once more. A
   body that no longer fits APNs' 4 KB once base64-encoded is `413`, a content encoding other than
-  `aes128gcm` is `415`, APNs throttling the device is `429`, and any other APNs failure is `502`.
+  `aes128gcm` is `415`, APNs or FCM throttling is `429`, and any other failure is `502`.
 
 ## What it keeps
 
-One D1 table (`schema.sql`), one row per endpoint: the random ID, the device token, its APNs
-environment, the pinned VAPID public key, when it was registered and last pushed to (for the
+One D1 table (`schema.sql`), one row per endpoint: the random ID, the device token, its service
+(APNs or FCM) and, for APNs, its environment, the pinned VAPID public key, when it was registered and last pushed to (for the
 32-endpoint cap and the 60-day expiry), and the start and count of the current rate window.
 Nothing of what a push said, and no address: the Worker reads the sender's address only as the
 key of the registration limiter, which Cloudflare keeps for that minute's count and the Worker
@@ -107,11 +117,13 @@ The APNs credentials are Worker secrets, never files in the repository:
 | `APNS_KEY` | the whole `.p8` file, `-----BEGIN PRIVATE KEY-----` lines included |
 | `APNS_KEY_ID` | the key's ID, as Apple's developer site shows it |
 | `APNS_TEAM_ID` | the ID of the team the key belongs to |
+| `FCM_SERVICE_ACCOUNT` | for Android: the whole JSON key of a service account of the app's Firebase project (Firebase console > Project settings > Service accounts > Generate new private key); without it the relay takes no FCM token |
 
 ```sh
 bunx wrangler secret put APNS_KEY < AuthKey_XXXXXXXXXX.p8
 bunx wrangler secret put APNS_KEY_ID
 bunx wrangler secret put APNS_TEAM_ID
+bunx wrangler secret put FCM_SERVICE_ACCOUNT < service-account.json   # then delete the file
 bunx wrangler deploy
 ```
 
@@ -143,6 +155,6 @@ domain without a code change.
 
 `bun test ./push-relay` from the repository root. The tests sign and encrypt pushes with
 `web-push`, as `server/push.ts` does, and run the Worker over a real SQLite table built from
-`schema.sql`, a fake registration limiter and a fake APNs (`test-push.ts` above is the check
-against the real one). They run in CI in the Push relay workflow
+`schema.sql`, a fake registration limiter, a fake APNs, and a fake FCM with Google's token
+endpoint (`test-push.ts` above is the check against the real APNs). They run in CI in the Push relay workflow
 (`.github/workflows/push-relay.yml`); the typecheck runs in Fast checks.

@@ -18,7 +18,15 @@ const otherPcKey = webpush.generateVAPIDKeys();
 const message = JSON.stringify({ pane_id: "w1-1", title: "secret-project - claude", body: "Needs your input", tag: "pane-w1-1" });
 
 const apnsPair = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
-const apnsPem = `-----BEGIN PRIVATE KEY-----\n${Buffer.from(await crypto.subtle.exportKey("pkcs8", apnsPair.privateKey)).toString("base64").replace(/.{64}/g, "$&\n")}\n-----END PRIVATE KEY-----\n`;
+const pem = async (key: CryptoKey) => `-----BEGIN PRIVATE KEY-----\n${Buffer.from(await crypto.subtle.exportKey("pkcs8", key)).toString("base64").replace(/.{64}/g, "$&\n")}\n-----END PRIVATE KEY-----\n`;
+const apnsPem = await pem(apnsPair.privateKey);
+/** a Google service account's RSA key, as its JSON key file holds it */
+const googlePair = await crypto.subtle.generateKey({ name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" }, true, ["sign", "verify"]);
+const googlePem = await pem(googlePair.privateKey);
+/** an FCM registration token: mixed case and a colon, as Firebase hands them out */
+const FCM_TOKEN = `dGhpcyBpcyBub3Q6${"Ab_-".repeat(36)}`;
+const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
+let accounts = 0;
 
 interface ApnsCall { url: string; headers: Record<string, string>; body: string }
 
@@ -28,8 +36,13 @@ function fakeLimiter(name: string, asked: string[]) {
   return limiter;
 }
 
-/** the relay over a real SQLite table, fake registration limiters, and an APNs that answers `apnsAnswer` and records each call */
-function relay(keyId = "KEY1234567") {
+/**
+ * The relay over a real SQLite table, fake registration limiters, an APNs or FCM that answers
+ * `apnsAnswer` and records each call in `calls`, and Google's token endpoint answering
+ * `tokenAnswer` (its calls in `tokenCalls`). Each relay has a service account of its own, so no
+ * test reuses another's access token.
+ */
+function relay(keyId = "KEY1234567", options: { fcm?: boolean } = {}) {
   const db = new Database(":memory:");
   db.exec(schema);
   const limiterKeys: string[] = [];
@@ -43,16 +56,24 @@ function relay(keyId = "KEY1234567") {
     REGISTER_LIMITER: perAddress,
     REGISTER_GLOBAL_LIMITER: global,
     APNS_KEY: apnsPem, APNS_KEY_ID: keyId, APNS_TEAM_ID: "TEAM123456", APNS_TOPIC: "sh.ovis.app",
+    ...(options.fcm === false ? {} : { FCM_SERVICE_ACCOUNT: JSON.stringify({ type: "service_account", project_id: "ovis-test", client_email: `relay-${++accounts}@ovis-test.iam.gserviceaccount.com`, private_key: googlePem }) }),
   };
   const calls: ApnsCall[] = [];
+  const tokenCalls: { body: string }[] = [];
   let apnsAnswer = (): Response => new Response(null, { status: 200 });
+  let tokenAnswer = (): Response => Response.json({ access_token: `ya29.test-${tokenCalls.length}`, expires_in: 3599, token_type: "Bearer" });
   const send = async (url: string, init: RequestInit) => {
+    if (url === GOOGLE_TOKEN_URL) {
+      tokenCalls.push({ body: init.body as string });
+      return tokenAnswer();
+    }
     calls.push({ url, headers: init.headers as Record<string, string>, body: init.body as string });
     return apnsAnswer();
   };
   return {
-    db, env, calls, limiterKeys, perAddress, global,
+    db, env, calls, tokenCalls, limiterKeys, perAddress, global,
     answer(next: () => Response) { apnsAnswer = next; },
+    answerToken(next: () => Response) { tokenAnswer = next; },
     handle: (request: Request, now = new Date()) => handle(request, env, now, send),
     rows: () => db.query("SELECT * FROM endpoints ORDER BY rowid").all() as Record<string, unknown>[],
   };
@@ -102,7 +123,7 @@ describe("push relay: registration", () => {
     expect(endpoint).toMatch(/^https:\/\/push\.test\/v1\/push\/[A-Za-z0-9_-]{22}$/);
     const seconds = Math.floor(now.getTime() / 1000);
     expect(r.rows()).toEqual([{
-      id: idOf(endpoint), token: TOKEN, environment: "production", vapid_key: pcKey.publicKey,
+      id: idOf(endpoint), token: TOKEN, service: "apns", environment: "production", vapid_key: pcKey.publicKey,
       created_at: seconds, used_at: seconds, window_start: 0, window_count: 0,
     }]);
     // the address only keys its limiter: it is not stored
@@ -129,7 +150,7 @@ describe("push relay: registration", () => {
     expect(r.rows()).toEqual([]);
     // the key is kept in one spelling, so a padded or base64 copy of it pins the same key
     const padded = Buffer.from(pcKey.publicKey, "base64url").toString("base64");
-    expect(readRegistration({ token: TOKEN, environment: "sandbox", vapid_key: padded })).toEqual({ token: TOKEN, environment: "sandbox", vapid_key: pcKey.publicKey });
+    expect(readRegistration({ token: TOKEN, environment: "sandbox", vapid_key: padded })).toEqual({ service: "apns", token: TOKEN, environment: "sandbox", vapid_key: pcKey.publicKey });
   });
 
   test("a registration its address's limiter refuses writes nothing, whatever token it names, and leaves the global cap alone", async () => {
@@ -405,5 +426,136 @@ describe("push relay: pushes", () => {
     const request = new Request(endpoint, { method: "POST", headers, body, duplex: "half" } as RequestInit);
     expect((await r.handle(request)).status).toBe(413);
     expect(r.calls).toEqual([]);
+  });
+});
+
+describe("push relay: Android (FCM)", () => {
+  const fcm = { service: "fcm", token: FCM_TOKEN };
+  const fcmError = (status: number, errorCode: string) => () =>
+    Response.json({ error: { code: status, details: [{ "@type": "type.googleapis.com/google.firebase.fcm.v1.FcmError", errorCode }] } }, { status });
+
+  test("registers an FCM token as it is, case and all, pinned to the PC's key, and keeps it out of the answer", async () => {
+    const r = relay();
+    const response = await r.handle(registration({ ...fcm, vapid_key: pcKey.publicKey }));
+    expect(response.status).toBe(201);
+    const text = await response.text();
+    expect(text).not.toContain(FCM_TOKEN);
+    const { endpoint } = JSON.parse(text) as { endpoint: string };
+    expect(r.rows()).toMatchObject([{ id: idOf(endpoint), token: FCM_TOKEN, service: "fcm", environment: null, vapid_key: pcKey.publicKey }]);
+    expect(readRegistration({ service: "apns", token: TOKEN, vapid_key: pcKey.publicKey })).toEqual({ service: "apns", token: TOKEN, environment: "production", vapid_key: pcKey.publicKey });
+  });
+
+  test("refuses what is not an FCM registration, and every FCM token without FCM credentials", async () => {
+    const r = relay();
+    for (const body of [
+      { service: "fcm", vapid_key: pcKey.publicKey }, { ...fcm }, { ...fcm, token: 42, vapid_key: pcKey.publicKey },
+      { ...fcm, token: "short", vapid_key: pcKey.publicKey }, { ...fcm, token: `${FCM_TOKEN}!`, vapid_key: pcKey.publicKey },
+      { ...fcm, vapid_key: pcKey.publicKey, environment: "production" }, { service: "gcm", token: FCM_TOKEN, vapid_key: pcKey.publicKey },
+      { token: FCM_TOKEN, vapid_key: pcKey.publicKey },
+    ]) expect((await r.handle(registration(body))).status).toBe(400);
+    const without = relay("KEY1234567", { fcm: false });
+    expect((await without.handle(registration({ ...fcm, vapid_key: pcKey.publicKey }))).status).toBe(501);
+    expect([...r.rows(), ...without.rows()]).toEqual([]);
+  });
+
+  test("sends the ciphertext untouched as an FCM data message, signed in with the service account", async () => {
+    const r = relay();
+    const endpoint = await register(r, fcm);
+    const now = new Date();
+    const { request, body } = pushRequest(endpoint, { topic: "pane-w1-1" });
+    const response = await r.handle(request, now);
+    expect(response.status).toBe(201);
+    expect(response.headers.get("ttl")).toBe("43200");
+
+    // Google's service-account flow: an RS256 JWT for the FCM scope, exchanged for an access token
+    expect(r.tokenCalls).toHaveLength(1);
+    const form = new URLSearchParams(r.tokenCalls[0]!.body);
+    expect(form.get("grant_type")).toBe("urn:ietf:params:oauth:grant-type:jwt-bearer");
+    const jwt = decodeJwt(form.get("assertion")!);
+    const nowSeconds = Math.floor(now.getTime() / 1000);
+    expect(jwt.header).toEqual({ alg: "RS256", typ: "JWT" });
+    expect(jwt.claims).toMatchObject({ scope: "https://www.googleapis.com/auth/firebase.messaging", aud: GOOGLE_TOKEN_URL, iat: nowSeconds, exp: nowSeconds + 3600 });
+    expect(jwt.claims["iss"]).toMatch(/@ovis-test\.iam\.gserviceaccount\.com$/);
+    expect(await crypto.subtle.verify("RSASSA-PKCS1-v1_5", googlePair.publicKey, jwt.signature, new TextEncoder().encode(jwt.signed))).toBe(true);
+
+    expect(r.calls).toHaveLength(1);
+    const call = r.calls[0]!;
+    expect(call.url).toBe("https://fcm.googleapis.com/v1/projects/ovis-test/messages:send");
+    expect(call.headers["authorization"]).toBe("Bearer ya29.test-1");
+    const sent = JSON.parse(call.body) as { message: { token: string; data: Record<string, string>; android: Record<string, string>; notification?: unknown } };
+    expect(sent.message.token).toBe(FCM_TOKEN);
+    expect(Object.keys(sent.message.data)).toEqual(["ovis"]);
+    expect(new Uint8Array(Buffer.from(sent.message.data["ovis"]!, "base64"))).toEqual(body);
+    expect(sent.message.android).toEqual({ priority: "HIGH", ttl: "43200s", collapse_key: "pane-w1-1" });
+    // a data message only: a notification part would be shown by Android without the app decrypting it
+    expect(sent.message.notification).toBeUndefined();
+    // the Topic header is the push service's to read anyway; nothing of the message itself is
+    expect(call.body).not.toMatch(/secret-project|Needs your input|pane_id/);
+  });
+
+  test("refuses a push signed by another key than the one pinned at registration, before FCM", async () => {
+    const r = relay();
+    const endpoint = await register(r, fcm);
+    expect((await r.handle(pushRequest(endpoint, { key: otherPcKey }).request)).status).toBe(403);
+    expect(r.calls).toEqual([]);
+    expect(r.tokenCalls).toEqual([]);
+  });
+
+  test("maps urgency to FCM priority and TTL 0 to deliver-now-or-never, and reuses the access token", async () => {
+    const r = relay();
+    const endpoint = await register(r, fcm);
+    const start = new Date();
+    expect((await r.handle(pushRequest(endpoint, { urgency: "normal", TTL: 0 }).request, start)).status).toBe(201);
+    expect(JSON.parse(r.calls[0]!.body).message.android).toEqual({ priority: "NORMAL", ttl: "0s" });
+    expect((await r.handle(pushRequest(endpoint).request, new Date(start.getTime() + 49 * 60_000))).status).toBe(201);
+    expect(r.tokenCalls).toHaveLength(1);
+    expect((await r.handle(pushRequest(endpoint).request, new Date(start.getTime() + 51 * 60_000))).status).toBe(201);
+    expect(r.tokenCalls).toHaveLength(2);
+    expect(r.calls[2]!.headers["authorization"]).toBe("Bearer ya29.test-2");
+  });
+
+  test("a token FCM calls gone deletes its FCM endpoints and answers 410, leaving any APNs ones", async () => {
+    for (const [status, errorCode] of [[404, "UNREGISTERED"], [403, "SENDER_ID_MISMATCH"]] as const) {
+      const r = relay();
+      const endpoint = await register(r, fcm);
+      const second = await register(r, { ...fcm, vapid_key: otherPcKey.publicKey });
+      await register(r);
+      r.answer(fcmError(status, errorCode));
+      expect((await r.handle(pushRequest(endpoint).request)).status).toBe(410);
+      expect(r.rows().map((row) => row["service"])).toEqual(["apns"]);
+      expect((await r.handle(pushRequest(endpoint).request)).status).toBe(404);
+      expect((await r.handle(pushRequest(second, { key: otherPcKey }).request)).status).toBe(404);
+    }
+  });
+
+  test("a refused access token is fetched again once; other FCM or sign-in failures keep the endpoint", async () => {
+    const r = relay();
+    const endpoint = await register(r, fcm);
+    let first = true;
+    r.answer(() => {
+      if (first) { first = false; return fcmError(401, "THIRD_PARTY_AUTH_ERROR")(); }
+      return new Response("{}", { status: 200 });
+    });
+    expect((await r.handle(pushRequest(endpoint).request)).status).toBe(201);
+    expect(r.tokenCalls).toHaveLength(2);
+    expect(r.calls.map((call) => call.headers["authorization"])).toEqual(["Bearer ya29.test-1", "Bearer ya29.test-2"]);
+
+    for (const [answer, expected] of [
+      [fcmError(429, "QUOTA_EXCEEDED"), 429],
+      [fcmError(400, "INVALID_ARGUMENT"), 502],
+      [fcmError(503, "UNAVAILABLE"), 502],
+      [() => new Response("not json", { status: 500 }), 502],
+      [() => { throw new Error("network down"); }, 502],
+    ] as const) {
+      r.answer(answer);
+      expect((await r.handle(pushRequest(endpoint).request)).status).toBe(expected);
+    }
+
+    const refused = relay();
+    const other = await register(refused, fcm);
+    refused.answerToken(() => Response.json({ error: "invalid_grant" }, { status: 400 }));
+    expect((await refused.handle(pushRequest(other).request)).status).toBe(502);
+    expect(refused.calls).toEqual([]);
+    expect([...r.rows(), ...refused.rows()]).toHaveLength(2);
   });
 });

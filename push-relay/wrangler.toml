@@ -13,7 +13,8 @@ enabled = false
 [triggers]
 crons = ["17 3 * * *"]
 
-# APNS_KEY, APNS_KEY_ID and APNS_TEAM_ID are secrets (`wrangler secret put`, README.md), never here.
+# APNS_KEY, APNS_KEY_ID, APNS_TEAM_ID and FCM_SERVICE_ACCOUNT are secrets (`wrangler secret put`,
+# README.md), never here.
 [vars]
 APNS_TOPIC = "sh.ovis.app"
 

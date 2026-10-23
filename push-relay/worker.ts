@@ -1,9 +1,11 @@
 /**
- * The push relay of the Ovis phone app (docs/native-app.md, "Notifications"). A WKWebView app
+ * The push relay of the Ovis phone app (docs/native-app.md, "Notifications"). The app's web view
  * gets no Web Push, so this Cloudflare Worker looks to the PC's server/push.ts like one more Web
- * Push service and hands each push to Apple's push service (APNs):
+ * Push service and hands each push to Apple's push service (APNs) or, for Android, to Firebase
+ * Cloud Messaging (FCM):
  *
- * - POST /v1/register { token, environment?, vapid_key }: the app hands over its APNs device
+ * - POST /v1/register { token, environment?, vapid_key } (an APNs device token) or
+ *   { service: "fcm", token, vapid_key } (an FCM registration token): the app hands over its
  *   token and the VAPID public key of the PC it registers for (the PC's GET /api/push), and gets
  *   back an endpoint URL holding a random ID for them. The token never leaves the relay. The key
  *   is pinned to the endpoint from the start, as a browser binds a subscription to its
@@ -11,12 +13,12 @@
  * - POST /v1/push/<id>: a Web Push request (RFC 8030), its body encrypted for keys only the app
  *   holds (RFC 8291, aes128gcm) and signed with the PC's VAPID key (RFC 8292). A push signed by
  *   any other key is refused. Each endpoint, and each phone across its endpoints, is
- *   rate-limited. The ciphertext goes to APNs as it came, in a mutable-content push that the
- *   app's Notification Service Extension decrypts: the relay never holds a key that could read
- *   it. APNs saying a token is gone deletes its endpoints and answers 410, which the PC takes as
- *   an unsubscribe.
+ *   rate-limited. The ciphertext goes on as it came: to APNs in a mutable-content push that the
+ *   iOS app's Notification Service Extension decrypts, to FCM in a data message that the Android
+ *   app decrypts. The relay never holds a key that could read it. APNs or FCM saying a token is
+ *   gone deletes its endpoints and answers 410, which the PC takes as an unsubscribe.
  *
- * Per endpoint it keeps the token, the APNs environment, the pinned key, when the endpoint was
+ * Per endpoint it keeps the token, its service and (for APNs) its environment, the pinned key, when the endpoint was
  * registered and last used, and the current rate window (schema.sql), and nothing else. An
  * endpoint unused for ENDPOINT_TTL_SECONDS is deleted by the daily cron. The sender's address is
  * read only as the key of Cloudflare's rate limiter for registrations, never stored, and nothing
@@ -39,6 +41,11 @@ export interface Env {
   APNS_TEAM_ID: string;
   /** var (wrangler.toml): the app's bundle ID */
   APNS_TOPIC: string;
+  /**
+   * secret, for Android: the JSON key of a Google service account allowed to send FCM messages
+   * for the app's Firebase project. Without it the relay registers no FCM token.
+   */
+  FCM_SERVICE_ACCOUNT?: string;
 }
 interface RateLimiter { limit(options: { key: string }): Promise<{ success: boolean }> }
 type Environment = "production" | "sandbox";
@@ -58,7 +65,10 @@ export const FALLBACK_BODY = "herdr needs you";
 const MAX_REGISTER_BYTES = 1024;
 /** RFC 8030 section 7.2: the payload size every push service takes */
 const MAX_PUSH_BYTES = 4096;
-/** what APNs takes for a push's JSON; base64 makes the ciphertext a third larger */
+/**
+ * what APNs takes for a push's JSON; base64 makes the ciphertext a third larger. FCM takes 4096
+ * bytes of data too, which the same ciphertext always fits once it fits APNs' wrapper.
+ */
 const MAX_APNS_BYTES = 4096;
 /** the longest a push waits at APNs for a phone that is offline */
 const MAX_TTL_SECONDS = 28 * 24 * 60 * 60;
@@ -67,6 +77,13 @@ const VAPID_MAX_SECONDS = 24 * 60 * 60;
 /** APNs takes a provider token for an hour and refuses a new one more often than every 20 minutes */
 const PROVIDER_TOKEN_SECONDS = 50 * 60;
 const APNS_TIMEOUT_MS = 10_000;
+const FCM_TIMEOUT_MS = 10_000;
+const FCM_SCOPE = "https://www.googleapis.com/auth/firebase.messaging";
+const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
+/** Google's access tokens last an hour; a new one is fetched a little before */
+const ACCESS_TOKEN_SECONDS = 50 * 60;
+/** FCM error codes (google.firebase.fcm.v1.FcmError) that mean the token will never take a message again */
+const FCM_GONE = new Set(["UNREGISTERED", "SENDER_ID_MISMATCH"]);
 const APNS_HOSTS: Record<Environment, string> = { production: "https://api.push.apple.com", sandbox: "https://api.sandbox.push.apple.com" };
 /** APNs reasons (with a 400) that mean the token will never take a push again */
 const GONE_REASONS = new Set(["BadDeviceToken", "DeviceTokenNotForTopic"]);
@@ -75,6 +92,8 @@ const PROVIDER_TOKEN_REASONS = new Set(["ExpiredProviderToken", "InvalidProvider
 const ID = /^[A-Za-z0-9_-]{22}$/;
 /** an APNs device token as hex; Apple asks not to rely on its length (32 bytes today) */
 const TOKEN = /^(?:[0-9a-f]{2}){32,256}$/;
+/** an FCM registration token: Google documents no format, only these characters so far (about 160 of them) */
+const FCM_TOKEN = /^[A-Za-z0-9_:-]{32,900}$/;
 /** RFC 8030 section 5.4 */
 const TOPIC = /^[A-Za-z0-9_-]{1,32}$/;
 
@@ -187,19 +206,30 @@ async function readBody(request: Request, limit: number): Promise<Uint8Array | n
   return bytes;
 }
 
-export interface Registration { token: string; environment: Environment; vapid_key: string }
+export type Registration =
+  | { service: "apns"; token: string; environment: Environment; vapid_key: string }
+  | { service: "fcm"; token: string; vapid_key: string };
 
-/** the device token, its APNs environment and the PC's VAPID public key from a registration body, or null when it is not one */
+/**
+ * The token, its service, its APNs environment (APNs only) and the PC's VAPID public key from a
+ * registration body, or null when it is not one. `service` is "apns" when absent.
+ */
 export function readRegistration(body: unknown): Registration | null {
   if (typeof body !== "object" || body === null || Array.isArray(body)) return null;
   const value = body as Record<string, unknown>;
-  if (Object.keys(value).some((key) => key !== "token" && key !== "environment" && key !== "vapid_key")) return null;
-  const { token, environment = "production", vapid_key } = value;
-  if (typeof token !== "string" || !TOKEN.test(token.toLowerCase())) return null;
-  if (environment !== "production" && environment !== "sandbox") return null;
+  const { service = "apns", token, vapid_key } = value;
   const key = typeof vapid_key === "string" ? publicKey(vapid_key) : null;
-  if (!key) return null;
-  return { token: token.toLowerCase(), environment, vapid_key: key };
+  if (!key || typeof token !== "string") return null;
+  if (service === "fcm") {
+    if (Object.keys(value).some((name) => name !== "service" && name !== "token" && name !== "vapid_key")) return null;
+    // FCM tokens are case-sensitive, unlike APNs' hex
+    return FCM_TOKEN.test(token) ? { service, token, vapid_key: key } : null;
+  }
+  if (service !== "apns" || Object.keys(value).some((name) => name !== "service" && name !== "token" && name !== "environment" && name !== "vapid_key")) return null;
+  const { environment = "production" } = value;
+  if (!TOKEN.test(token.toLowerCase())) return null;
+  if (environment !== "production" && environment !== "sandbox") return null;
+  return { service, token: token.toLowerCase(), environment, vapid_key: key };
 }
 
 async function register(request: Request, env: Env, nowSeconds: number): Promise<Response> {
@@ -217,9 +247,11 @@ async function register(request: Request, env: Env, nowSeconds: number): Promise
   let registration: Registration | null;
   try { registration = readRegistration(JSON.parse(new TextDecoder().decode(bytes))); } catch { registration = null; }
   if (!registration) return status(400);
+  // a relay without FCM credentials could never deliver to this token
+  if (registration.service === "fcm" && !env.FCM_SERVICE_ACCOUNT) return status(501);
   const id = encodeBase64Url(crypto.getRandomValues(new Uint8Array(16)));
-  await env.DB.prepare("INSERT INTO endpoints (id, token, environment, vapid_key, created_at, used_at) VALUES (?, ?, ?, ?, ?, ?)")
-    .bind(id, registration.token, registration.environment, registration.vapid_key, nowSeconds, nowSeconds).run();
+  await env.DB.prepare("INSERT INTO endpoints (id, token, service, environment, vapid_key, created_at, used_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+    .bind(id, registration.token, registration.service, registration.service === "apns" ? registration.environment : null, registration.vapid_key, nowSeconds, nowSeconds).run();
   await env.DB.prepare("DELETE FROM endpoints WHERE token = ? AND id NOT IN (SELECT id FROM endpoints WHERE token = ? ORDER BY created_at DESC, rowid DESC LIMIT ?)")
     .bind(registration.token, registration.token, ENDPOINTS_PER_TOKEN).run();
   return Response.json({ endpoint: `${new URL(request.url).origin}/v1/push/${id}` }, { status: 201, headers: { "cache-control": "no-store" } });
@@ -249,7 +281,8 @@ async function push(request: Request, env: Env, id: string, nowSeconds: number, 
   const body = await readBody(request, MAX_PUSH_BYTES);
   if (body === null) return status(413);
   if (body.byteLength === 0) return status(400);
-  const payload = JSON.stringify({ aps: { alert: { body: FALLBACK_BODY }, "mutable-content": 1 }, ovis: encodeBase64(body) });
+  const ciphertext = encodeBase64(body);
+  const payload = JSON.stringify({ aps: { alert: { body: FALLBACK_BODY }, "mutable-content": 1 }, ovis: ciphertext });
   if (new TextEncoder().encode(payload).byteLength > MAX_APNS_BYTES) return status(413);
 
   const endpoint = await env.DB.prepare("SELECT token, vapid_key FROM endpoints WHERE id = ?").bind(id).first<{ token: string; vapid_key: string }>();
@@ -263,12 +296,14 @@ async function push(request: Request, env: Env, id: string, nowSeconds: number, 
     return status(429, { "retry-after": String(Math.max(1, (device.oldest ?? nowSeconds) + RATE_WINDOW_SECONDS - nowSeconds)) });
   }
   const allowed = await env.DB.prepare(
-    "UPDATE endpoints SET window_start = CASE WHEN window_start <= ? THEN ? ELSE window_start END, window_count = CASE WHEN window_start <= ? THEN 1 ELSE window_count + 1 END, used_at = ? WHERE id = ? AND (window_start <= ? OR window_count < ?) RETURNING token, environment",
-  ).bind(windowStart, nowSeconds, windowStart, nowSeconds, id, windowStart, RATE_LIMIT).first<{ token: string; environment: Environment }>();
+    "UPDATE endpoints SET window_start = CASE WHEN window_start <= ? THEN ? ELSE window_start END, window_count = CASE WHEN window_start <= ? THEN 1 ELSE window_count + 1 END, used_at = ? WHERE id = ? AND (window_start <= ? OR window_count < ?) RETURNING token, service, environment",
+  ).bind(windowStart, nowSeconds, windowStart, nowSeconds, id, windowStart, RATE_LIMIT).first<{ token: string; service: "apns" | "fcm"; environment: Environment | null }>();
   if (!allowed) {
     const window = await env.DB.prepare("SELECT window_start FROM endpoints WHERE id = ?").bind(id).first<{ window_start: number }>();
     return status(429, { "retry-after": String(Math.max(1, (window?.window_start ?? nowSeconds) + RATE_WINDOW_SECONDS - nowSeconds)) });
   }
+
+  if (allowed.service === "fcm") return sendFcm(env, allowed.token, ciphertext, { urgent: request.headers.get("urgency") === "high", ttl, topic }, nowSeconds, send);
 
   const deliver = async (): Promise<Response> => {
     const headers: Record<string, string> = {
@@ -281,7 +316,7 @@ async function push(request: Request, env: Env, id: string, nowSeconds: number, 
       "content-type": "application/json",
     };
     if (topic !== null) headers["apns-collapse-id"] = topic;
-    return send(`${APNS_HOSTS[allowed.environment]}/3/device/${allowed.token}`, { method: "POST", headers, body: payload, signal: AbortSignal.timeout(APNS_TIMEOUT_MS) });
+    return send(`${APNS_HOSTS[allowed.environment ?? "production"]}/3/device/${allowed.token}`, { method: "POST", headers, body: payload, signal: AbortSignal.timeout(APNS_TIMEOUT_MS) });
   };
   let apns: Response;
   let reason = "";
@@ -304,6 +339,87 @@ async function push(request: Request, env: Env, id: string, nowSeconds: number, 
     return status(410);
   }
   if (apns.status === 429) return status(429);
+  return status(502);
+}
+
+/** the Google access token this isolate got last, reused while it lasts */
+let accessToken: { account: string; issuedAt: number; token: string; projectId: string } | null = null;
+
+/**
+ * An OAuth access token for FCM (Google's service-account flow: an RS256 JWT exchanged at its
+ * token endpoint), and the Firebase project it sends for.
+ */
+async function fcmAccessToken(env: Env, nowSeconds: number, send: Send): Promise<{ token: string; projectId: string }> {
+  const account = env.FCM_SERVICE_ACCOUNT ?? "";
+  const cached = accessToken;
+  if (cached && cached.account === account && nowSeconds >= cached.issuedAt && nowSeconds - cached.issuedAt < ACCESS_TOKEN_SECONDS) return cached;
+  const key = JSON.parse(account) as { project_id?: unknown; client_email?: unknown; private_key?: unknown };
+  if (typeof key.project_id !== "string" || typeof key.client_email !== "string" || typeof key.private_key !== "string") throw new Error("FCM_SERVICE_ACCOUNT is not a service account key");
+  const der = decodeBase64(key.private_key.replace(/-----(BEGIN|END) PRIVATE KEY-----/g, "").replace(/\s+/g, ""));
+  if (!der) throw new Error("FCM_SERVICE_ACCOUNT has no PEM private key");
+  const signingKey = await crypto.subtle.importKey("pkcs8", der, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["sign"]);
+  const part = (value: object) => encodeBase64Url(new TextEncoder().encode(JSON.stringify(value)));
+  const unsigned = `${part({ alg: "RS256", typ: "JWT" })}.${part({ iss: key.client_email, scope: FCM_SCOPE, aud: GOOGLE_TOKEN_URL, iat: nowSeconds, exp: nowSeconds + 3600 })}`;
+  const signature = new Uint8Array(await crypto.subtle.sign("RSASSA-PKCS1-v1_5", signingKey, new TextEncoder().encode(unsigned)));
+  const response = await send(GOOGLE_TOKEN_URL, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion: `${unsigned}.${encodeBase64Url(signature)}` }).toString(),
+    signal: AbortSignal.timeout(FCM_TIMEOUT_MS),
+  });
+  const answer = (response.ok ? await response.json() : null) as { access_token?: unknown } | null;
+  if (typeof answer?.access_token !== "string") throw new Error(`Google's token endpoint answered ${response.status}`);
+  accessToken = { account, issuedAt: nowSeconds, token: answer.access_token, projectId: key.project_id };
+  return accessToken;
+}
+
+/** the FcmError code of an FCM v1 error answer, or "" */
+async function fcmErrorCode(response: Response): Promise<string> {
+  try {
+    const body = (await response.json()) as { error?: { details?: { "@type"?: unknown; errorCode?: unknown }[] } } | null;
+    const detail = body?.error?.details?.find((item) => item["@type"] === "type.googleapis.com/google.firebase.fcm.v1.FcmError");
+    return typeof detail?.errorCode === "string" ? detail.errorCode : "";
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Sends a push to an FCM token as a data message (FCM HTTP v1) whose "ovis" field is the
+ * ciphertext, standard base64: no notification part, so Android hands it to the app, which
+ * decrypts it and shows it. Urgency high is FCM's high priority (it may wake the phone), else
+ * normal. A refused access token is fetched again once, as APNs' provider token is signed again.
+ */
+async function sendFcm(env: Env, token: string, ciphertext: string, delivery: { urgent: boolean; ttl: number; topic: string | null }, nowSeconds: number, send: Send): Promise<Response> {
+  const android: Record<string, string> = { priority: delivery.urgent ? "HIGH" : "NORMAL", ttl: `${delivery.ttl}s` };
+  if (delivery.topic !== null) android["collapse_key"] = delivery.topic;
+  const deliver = async (): Promise<Response> => {
+    const access = await fcmAccessToken(env, nowSeconds, send);
+    return send(`https://fcm.googleapis.com/v1/projects/${encodeURIComponent(access.projectId)}/messages:send`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${access.token}`, "content-type": "application/json" },
+      body: JSON.stringify({ message: { token, data: { ovis: ciphertext }, android } }),
+      signal: AbortSignal.timeout(FCM_TIMEOUT_MS),
+    });
+  };
+  let fcm: Response;
+  try {
+    fcm = await deliver();
+    if (fcm.status === 401) {
+      accessToken = null;
+      fcm = await deliver();
+    }
+  } catch {
+    return status(502);
+  }
+  if (fcm.ok) return status(201, { ttl: String(delivery.ttl) });
+  if (FCM_GONE.has(await fcmErrorCode(fcm))) {
+    // the token is gone for every PC: all its endpoints go, and their next push is a 404
+    await env.DB.prepare("DELETE FROM endpoints WHERE token = ? AND service = 'fcm'").bind(token).run();
+    return status(410);
+  }
+  if (fcm.status === 401) accessToken = null;
+  if (fcm.status === 429) return status(429);
   return status(502);
 }
 
