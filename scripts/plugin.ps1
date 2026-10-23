@@ -19,7 +19,7 @@ if ($Command -eq 'start') {
     $arguments = '"{0}" start' -f (Join-Path $PSScriptRoot 'plugin.ts')
     if ($batchShim) {
         # Batch shims need a command interpreter, not ShellExecute's document association.
-        $arguments = '/d /s /c ""%OVIS_BUN%" "%OVIS_PLUGIN_SCRIPT%" start"'
+        $arguments = '/d /v:off /s /c ""%OVIS_BUN%" "%OVIS_PLUGIN_SCRIPT%" start"'
         $executable = $env:ComSpec
     }
     $child = Start-Process -FilePath $executable -ArgumentList $arguments -WindowStyle Hidden -PassThru
@@ -35,7 +35,7 @@ if ($Command -eq 'start') {
     exit 0
 }
 if ($batchShim) {
-    & $env:ComSpec /d /s /c '""%OVIS_BUN%" "%OVIS_PLUGIN_SCRIPT%" "%OVIS_PLUGIN_COMMAND%""'
+    & $env:ComSpec /d /v:off /s /c '""%OVIS_BUN%" "%OVIS_PLUGIN_SCRIPT%" "%OVIS_PLUGIN_COMMAND%""'
 } else {
     & $bun.Source (Join-Path $PSScriptRoot 'plugin.ts') $Command
 }

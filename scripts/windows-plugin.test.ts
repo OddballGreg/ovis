@@ -9,7 +9,7 @@ import { updateStateDir } from "../server/update-state.ts";
 
 it.skipIf(process.platform !== "win32")("runs the Windows launcher with executable and npm shim installations in literal percent paths", async () => {
   const scratch = mkdtempSync(join(tmpdir(), "ovis bun shim "));
-  const prefix = join(scratch, "npm %OS% prefix");
+  const prefix = join(scratch, "npm %OS% !OS! ^x prefix");
   const bin = join(prefix, ".bun", "bin");
   mkdirSync(bin, { recursive: true });
   const launcher = join(prefix, "plugin.ps1");
