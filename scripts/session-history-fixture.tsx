@@ -4,7 +4,7 @@ import { createRoot } from "react-dom/client";
 import type { HerdrPane, SessionSnapshot, TabCreated } from "../shared/protocol.ts";
 import type { AppActions } from "../src/lib/actions.ts";
 import { MachineContext } from "../src/lib/machineContext.tsx";
-import { sessionHistoryAgent } from "../src/lib/sessionHistory.ts";
+import { sessionHistoryAgent, sessionHistorySourcePane } from "../src/lib/sessionHistory.ts";
 import { useRecentResumes } from "../src/lib/useRecentResumes.ts";
 import { SettingsProvider } from "../src/lib/settings.ts";
 import { Sidebar } from "../src/components/Sidebar.tsx";
@@ -17,6 +17,7 @@ declare global { interface Window { qa: {
   reportSession: (paneId: string, id: string, agent?: string) => void;
   /** the pane closed (its tab with it) */
   closePane: (paneId: string) => void;
+  openHistory: (workspaceId: string, agent: string, paneId: string) => void;
   /** true: a resumed tab's pane stays out of the roster until rosterCatchUp, as before load() answers */
   holdRoster: boolean;
   rosterCatchUp: () => void;
@@ -49,16 +50,17 @@ const SNAPSHOT: SessionSnapshot = {
     pane("p2", "w2", { agent_session: { agent: "codex", kind: "id", source: "herdr:codex", value: SHOWN_SESSION } }),
     pane("p3", "w3", { agent: "claude", title: "claude" }),
     pane("p4", "w3", { tab_id: "w3:t2", agent: "claude", title: "claude", agent_session: { agent: "claude", kind: "id", source: "herdr:claude", value: CLAUDE_SHARED } }),
+    pane("p-shell", "w3", { agent: null, title: "shell" }),
     pane("p5", "w4", { agent: "claude", title: "claude" }),
   ],
 };
 const noop = () => {};
-window.qa = { machine: () => {}, selected: null, resumed: [], historyOpen: false, reportSession: () => {}, closePane: () => {}, holdRoster: false, rosterCatchUp: () => {}, watch: () => {} };
+window.qa = { machine: () => {}, selected: null, resumed: [], historyOpen: false, reportSession: () => {}, closePane: () => {}, openHistory: () => {}, holdRoster: false, rosterCatchUp: () => {}, watch: () => {} };
 function Root() {
   const [machine, setMachine] = useState("local");
   const [watching, setWatching] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
-  const [history, setHistory] = useState<{ workspaceId: string; agent: string | null; paneId: string | null } | null>(null);
+  const [history, setHistory] = useState<{ workspaceId: string; agent: string | null; paneId: string | null; askingPaneId: string | null } | null>(null);
   // the PC's roster as App holds it: a resumed tab's pane joins it (as load() brings it), reporting no session until told
   const [snapshot, setSnapshot] = useState<SessionSnapshot>(SNAPSHOT);
   const machines = useMemo(() => [{ id: machine, snapshot }], [machine, snapshot]);
@@ -75,12 +77,13 @@ function Root() {
   const actions: AppActions = {
     selectPane: setSelected, selectAdjacentPane: noop, setView: noop, toggleView: noop, focusInput: noop, scrollPage: noop, openNewSession: noop, openNewTab: noop,
     openTerminalTab: async () => {}, openSessionHistory: (target) => {
-      // as App does: the pane asking, else the workspace's first pane in tab order (the fixture selects none in it)
-      if (target) setHistory({ workspaceId: target.workspaceId, agent: target.agent ?? null, paneId: target.paneId ?? snapshot.panes.filter((candidate) => candidate.workspace_id === target.workspaceId).sort((one, other) => one.tab_id.localeCompare(other.tab_id))[0]?.pane_id ?? null });
+      // as App does: prefer Claude for its store, keeping the original request for picker changes
+      if (target) setHistory({ workspaceId: target.workspaceId, agent: target.agent ?? null, askingPaneId: target.paneId ?? null, paneId: sessionHistorySourcePane(sessionHistoryAgent(target.agent) ?? "codex", snapshot.panes, { workspaceId: target.workspaceId, askingPaneId: target.paneId, selectedPaneId: selected }) });
     },
     openPalette: noop, agentStarted: noop, openFind: noop, openSettings: noop, openAddPc: noop, toggleSidebar: noop, toggleTheme: noop, lock: null, enableNotifications: null,
     refresh: noop, openFiles: null, splitPane: null, zoomPane: null,
   };
+  window.qa.openHistory = (workspaceId, agent, paneId) => actions.openSessionHistory({ machineId: machine, workspaceId, agent, paneId, scope: "pane" });
   const workspace = history ? snapshot.workspaces.find((candidate) => candidate.workspace_id === history.workspaceId) : undefined;
   return <SettingsProvider><MachineContext.Provider value={machine}>
     <div className="sidebar-shell" style={{ width: 320, height: 600 }}>
@@ -91,6 +94,8 @@ function Root() {
       panes={snapshot.panes}
       agent={sessionHistoryAgent(history.agent) ?? "codex"}
       sourcePaneId={history.paneId}
+      askingPaneId={history.askingPaneId}
+      selectedPaneId={selected}
       recent={recentResumes}
       onClose={() => setHistory(null)}
       onSelectPane={(paneId) => { setHistory(null); setSelected(paneId); }}

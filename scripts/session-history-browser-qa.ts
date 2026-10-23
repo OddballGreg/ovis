@@ -13,6 +13,7 @@
  * stays on this loopback server.
  */
 import assert from "node:assert/strict";
+import { EventEmitter, once } from "node:events";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -36,11 +37,13 @@ const probes: string[] = [];
 /** every Claude list's query and every POST sessions/resume body, in order */
 const claudeLists: string[] = [];
 const resumes: Array<Record<string, unknown>> = [];
+const resumeRequests = new EventEmitter();
 let holdResume = false;
 /** true: the next Claude lists wait for a release, as a list read again after a changed store does */
 let holdList = false;
 /** how the bridge answers the next resumes: start it, name a pane already showing it, refuse a changed store or one a new tab would not keep, or have no route */
-let resumeAnswer: "created" | "opened" | "stale" | "unsupported" | "missing" = "created";
+let resumeAnswer: "created" | "opened" | "stale" | "unsupported" | "changed" | "missing" = "created";
+const closedSources = new Set<string>();
 const json = (body: unknown, status = 200) => Response.json(body, { status, headers: { "cache-control": "no-store" } });
 const refusal = (code: string, message: string, status: number) => json({ error: { code, message } }, status);
 /** every bounded animation (the sheet's rise) over, then two frames; a looping one (a breathing status dot) never finishes and is not waited for */
@@ -66,6 +69,7 @@ try {
         claudeLists.push(url.search);
         if (holdList) await new Promise<void>((resolve) => releases.push(resolve));
         const paneId = url.searchParams.get("pane_id");
+        if (paneId && closedSources.has(paneId)) return refusal("stale_source", "source pane no longer exists", 409);
         // w4's bridge is from before store-bound Resume: it ignores pane_id and gives no source
         const sessions = CLAUDE_ROWS.map((row) => workspaceId === "w3" && paneId !== null && row.resume ? { ...row, resume: { ...row.resume, source: { pane_id: paneId, store_key: CLAUDE_STORE_KEY } } } : row);
         return json({ workspace_id: workspaceId, agent: "claude", cwd: `/fixture/${workspaceId}`, sessions } satisfies SessionHistoryResponse);
@@ -76,11 +80,13 @@ try {
     if (path === "/api/sessions/resume") {
       const body = await request.json() as Record<string, unknown>;
       resumes.push(body);
+      resumeRequests.emit("received");
       if (holdResume) await new Promise<void>((resolve) => releases.push(resolve));
       if (resumeAnswer === "missing") return refusal("not_found", `unknown endpoint ${path}`, 404);
       if (resumeAnswer === "unsupported") return refusal("launch_unsupported", "a new tab here would not start Claude in the same store", 409);
+      if (resumeAnswer === "changed") return refusal("launch_store_changed", "qa-launch-store-changed", 409);
       if (resumeAnswer === "stale") return refusal("stale_source", "the pane's Claude store changed since the list: list the sessions again", 409);
-      if (resumeAnswer === "opened") return json({ action: "opened", workspace_id: String(body["workspace_id"]), pane_id: "p3" } satisfies SessionResumeResponse);
+      if (resumeAnswer === "opened") return json({ action: "opened", workspace_id: String(body["workspace_id"]), pane_id: "p4" } satisfies SessionResumeResponse);
       return json({ action: "created", workspace_id: String(body["workspace_id"]), pane_id: `p-claude-${resumes.length}`, agent_started: true } satisfies SessionResumeResponse);
     }
     if (path === "/api/agents") return json({ agents: [{ kind: "codex", label: "Codex", installed: true }, { kind: "claude", label: "Claude Code", installed: true }] });
@@ -261,7 +267,9 @@ try {
   // one store-bound request per double click, never the argv-only tab/create
   const tabsBefore = tabCreates.length;
   holdResume = true;
+  const receivedResume = once(resumeRequests, "received", { signal: AbortSignal.timeout(10_000) });
   await shared.getByRole("button", { name: /^Resume / }).dblclick();
+  await receivedResume;
   await page.waitForFunction(() => document.querySelector(".session-row.is-pending") !== null);
   await page.getByRole("status").filter({ hasText: "Resuming…" }).waitFor();
   assert.equal(resumes.length, 1, `a double click sends one sessions/resume, not ${resumes.length}`);
@@ -272,6 +280,19 @@ try {
   await page.waitForFunction(() => window.qa.resumed.some((opened) => opened.pane_id === "p-claude-1"));
   assert.equal(tabCreates.length, tabsBefore, "Claude's Resume sends no tab/create");
   console.log("PASS a Claude list names its source pane; one store-bound resume per double click, no tab/create, and a pane on another store is not Open");
+  // switching a shell/Codex request to Claude re-picks the pane running Claude
+  await page.evaluate(() => window.qa.openHistory("w3", "codex", "p-shell"));
+  await dialog.locator(".session-row").first().waitFor();
+  await settled(page);
+  await picker.click();
+  const pickedList = page.waitForResponse((response) => response.url().includes("/sessions/history?") && new URL(response.url()).searchParams.get("agent") === "claude");
+  await agentList.getByRole("option").filter({ hasText: "Claude Code" }).click();
+  await pickedList;
+  await picker.locator(".agent-mark.claude").waitFor();
+  await shared.waitFor();
+  assert.equal(new URLSearchParams(claudeLists.at(-1)).get("pane_id"), "p3");
+  await page.keyboard.press("Escape");
+  await dialog.waitFor({ state: "detached" });
   // a store that changed since the list: read again and said so, nothing started elsewhere
   resumeAnswer = "stale";
   await openHistory("w3");
@@ -301,7 +322,7 @@ try {
   resumeAnswer = "opened";
   await dialog.getByRole("button", { name: /^Resume / }).last().click();
   await dialog.waitFor({ state: "detached" });
-  await page.waitForFunction(() => window.qa.selected === "p3");
+  await page.waitForFunction(() => window.qa.selected === "p4");
   // a bridge with source rows but no resume route: said so, and never an unbound tab/create instead
   resumeAnswer = "missing";
   await openHistory("w3");
@@ -313,6 +334,38 @@ try {
   await dialog.getByRole("button", { name: /^Resume / }).last().click();
   await dialog.locator(".session-error").filter({ hasText: "This PC can't start this session in the store it was listed from" }).waitFor();
   assert.equal(tabCreates.length, tabsBefore, "an unsupported launch falls back to no tab/create");
+  const unsupportedMessage = await dialog.locator(".session-error").textContent();
+  resumeAnswer = "changed";
+  await dialog.getByRole("button", { name: /^Resume / }).last().click();
+  await page.waitForFunction((previous) => {
+    const alert = document.querySelector(".session-error");
+    return alert !== null && alert.textContent !== previous;
+  }, unsupportedMessage);
+  assert.ok(!(await dialog.locator(".session-error").textContent())?.includes("qa-launch-store-changed"));
+  assert.equal(tabCreates.length, tabsBefore, "a changed launch store starts no fallback tab");
+  // a closed source: stale Resume re-lists from the current roster, never the departed pane
+  resumeAnswer = "stale";
+  holdResume = true;
+  const closingResume = once(resumeRequests, "received", { signal: AbortSignal.timeout(10_000) });
+  await dialog.getByRole("button", { name: /^Resume / }).last().click();
+  await closingResume;
+  await dialog.locator(".session-row.is-pending").waitFor();
+  closedSources.add("p3");
+  closedSources.add("p4");
+  await page.evaluate(() => { window.qa.closePane("p3"); window.qa.closePane("p4"); });
+  holdResume = false;
+  releases.splice(0).forEach((release) => release());
+  await page.getByRole("status").filter({ hasText: "Claude's store changed; the list was read again." }).waitFor();
+  assert.equal(new URLSearchParams(claudeLists.at(-1)).get("pane_id"), "p-claude-1");
+  assert.equal(await dialog.locator(".session-error").count(), 0);
+  // a stale GET arriving before the roster catches up is translated, then recovers on the roster
+  closedSources.add("p-claude-1");
+  await dialog.getByRole("button", { name: /^Resume / }).last().click();
+  await dialog.locator(".session-error").waitFor();
+  await page.evaluate(() => window.qa.closePane("p-claude-1"));
+  await dialog.locator(".session-error").waitFor({ state: "detached" });
+  await dialog.locator(".session-row").first().waitFor();
+  assert.equal(new URLSearchParams(claudeLists.at(-1)).get("pane_id"), "p-shell");
   await page.keyboard.press("Escape");
   await dialog.waitFor({ state: "detached" });
   resumeAnswer = "created";

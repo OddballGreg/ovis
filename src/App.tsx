@@ -16,7 +16,7 @@ import { AccessGate } from "./components/AccessGate.tsx";
 import { AgentMark } from "./components/AgentMark.tsx";
 import { NewSessionDialog, type NewTabTarget } from "./components/NewSessionDialog.tsx";
 import { SessionHistory } from "./components/SessionHistory.tsx";
-import { sessionHistoryAgent, sessionHistoryListAgent } from "./lib/sessionHistory.ts";
+import { sessionHistoryAgent, sessionHistoryListAgent, sessionHistorySourcePane } from "./lib/sessionHistory.ts";
 import { useRecentResumes } from "./lib/useRecentResumes.ts";
 import { forgetSessionHistoryProbesOfPcsAway } from "./lib/useSessionHistoryOffered.ts";
 import { passingFolder, recentDirectories } from "./lib/recent-directories.ts";
@@ -545,7 +545,7 @@ export function App() {
   // the dialog makes a tab in this workspace instead of a workspace, while set
   const [newTab, setNewTab] = useState<NewTabTarget | null>(null);
   // the earlier sessions of a workspace's folder (components/SessionHistory.tsx), while open
-  const [sessionHistory, setSessionHistory] = useState<{ machineId: string; workspaceId: string; agent: SessionHistoryAgent; paneId: string | null } | null>(null);
+  const [sessionHistory, setSessionHistory] = useState<{ machineId: string; workspaceId: string; agent: SessionHistoryAgent; paneId: string | null; askingPaneId: string | null; selectedPaneId: string | null } | null>(null);
   const [connected, setConnected] = useState(false);
   /** the active terminal's socket has been connected on this page before (PaneTerminal reports it): not
    *  connected, the chip says reconnecting; before this page's first connection to the PC, connecting */
@@ -1482,15 +1482,14 @@ export function App() {
         // a pane's own agent, or nothing; for a workspace, the agent named, else the pane in front's, else any of it
         const agent = sessionHistoryListAgent(target, found.agent, found.panes.map((pane) => pane.agent));
         if (agent === null) return;
-        // the pane the list is for (a Claude list is its store's): the pane asking, else the one selected
-        // in the workspace, else the workspace's first in tab order
+        // Claude's list prefers a pane running Claude, so a selected shell never hides its store.
         const selected = selectionRef.current.machineId === found.machineId ? selectionRef.current.paneId : null;
         const tabs = machinesRef.current.find((m) => m.id === found.machineId)?.snapshot?.tabs ?? [];
         const tabNumber = (tabId: string) => tabs.find((tab) => tab.tab_id === tabId)?.number ?? Number.MAX_SAFE_INTEGER;
-        const paneId = target?.paneId ?? found.panes.find((pane) => pane.pane_id === selected)?.pane_id
-          ?? [...found.panes].sort((one, other) => tabNumber(one.tab_id) - tabNumber(other.tab_id))[0]?.pane_id ?? null;
+        const askingPaneId = target?.paneId ?? null;
+        const paneId = sessionHistorySourcePane(agent, [...found.panes].sort((one, other) => tabNumber(one.tab_id) - tabNumber(other.tab_id)), { workspaceId: found.workspace.workspace_id, askingPaneId, selectedPaneId: selected });
         setDrawerOpen(false);
-        setSessionHistory({ machineId: found.machineId, workspaceId: found.workspace.workspace_id, agent, paneId });
+        setSessionHistory({ machineId: found.machineId, workspaceId: found.workspace.workspace_id, agent, paneId, askingPaneId, selectedPaneId: selected });
       },
       openPalette,
       agentStarted: (machineId, paneId) => lenses.startedAgent(paneStorageId(machineId, paneId), window.matchMedia?.("(pointer: coarse)").matches === true),
@@ -1600,7 +1599,8 @@ export function App() {
     if (sessionHistory === null) return null;
     const roster = machines.find((m) => m.id === sessionHistory.machineId)?.snapshot;
     const workspace = roster?.workspaces.find((candidate) => candidate.workspace_id === sessionHistory.workspaceId);
-    return roster && workspace ? { workspace, panes: roster.panes } : null;
+    const tabNumber = (tabId: string) => roster?.tabs.find((tab) => tab.tab_id === tabId)?.number ?? Number.MAX_SAFE_INTEGER;
+    return roster && workspace ? { workspace, panes: [...roster.panes].sort((one, other) => tabNumber(one.tab_id) - tabNumber(other.tab_id)) } : null;
   }, [machines, sessionHistory]);
   useEffect(() => { if (sessionHistory !== null && sessionHistoryWorkspace === null) setSessionHistory(null); }, [sessionHistory, sessionHistoryWorkspace]);
 
@@ -1979,6 +1979,8 @@ export function App() {
         panes={sessionHistoryWorkspace.panes}
         agent={sessionHistory.agent}
         sourcePaneId={sessionHistory.paneId}
+        askingPaneId={sessionHistory.askingPaneId}
+        selectedPaneId={sessionHistory.selectedPaneId}
         recent={recentResumes}
         onClose={closeSessionHistory}
         onSelectPane={(paneId) => { closeSessionHistory(); selectTarget(sessionHistory.machineId, paneId); }}

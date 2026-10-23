@@ -20,7 +20,7 @@
  * row anatomy, with the agent above the rows in the New workspace dialog's picker (each agent with
  * its mark, no Shell entry), whose open list takes its own Escape.
  */
-import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent } from "react";
 import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 import "./SessionHistory.css";
@@ -29,18 +29,21 @@ import type { AgentKind, HerdrPane, SessionHistoryAgent, SessionHistoryResponse,
 import { ApiError, routeMissing } from "../lib/api.ts";
 import { useLocale, useT } from "../lib/i18n.ts";
 import { useMachineApi, useMachineId } from "../lib/machineContext.tsx";
-import { claudeResumeRequest, inFlightGuard, paneShowingRow, resumeTabRequest, rowKey, rowStore, sessionHistoryAgent, sessionRowTime, standingResume, type RecentResume } from "../lib/sessionHistory.ts";
+import { claudeResumeRequest, inFlightGuard, paneShowingRow, resumeTabRequest, rowKey, rowStore, sessionHistoryAgent, sessionHistorySourcePane, sessionRowTime, standingResume, type RecentResume } from "../lib/sessionHistory.ts";
 import { useSheetSwipe } from "../lib/sheets.ts";
 import { usePhoneSheetBack } from "../lib/sheetHistory.ts";
 
 interface Props {
   workspace: WorkspaceInfo;
-  /** the PC's panes: the one already showing a listed session is selected instead of a new tab */
+  /** the PC's panes in tab order: the one already showing a listed session is selected instead of a new tab */
   panes: readonly HerdrPane[];
   /** the agent listed first: the pane's, or the workspace row's */
   agent: SessionHistoryAgent;
   /** the pane the list is asked for from: Claude's sessions are that pane's store's */
   sourcePaneId?: string | null;
+  /** the original request and selection, kept when the Agent picker changes the list's source */
+  askingPaneId?: string | null;
+  selectedPaneId?: string | null;
   /** the Resumes of a moment ago whose panes have not reported their session yet (lib/useRecentResumes.ts) */
   recent?: readonly RecentResume[];
   onClose: () => void;
@@ -54,13 +57,15 @@ const said = (reason: unknown): string => reason instanceof ApiError ? reason.de
 
 const NO_RECENT: readonly RecentResume[] = [];
 
-export function SessionHistory({ workspace, panes, agent: firstAgent, sourcePaneId = null, recent = NO_RECENT, onClose, onSelectPane, onResumed }: Props) {
+export function SessionHistory({ workspace, panes, agent: firstAgent, sourcePaneId: firstSourcePaneId = null, askingPaneId = firstSourcePaneId, selectedPaneId = null, recent = NO_RECENT, onClose, onSelectPane, onResumed }: Props) {
   const t = useT();
   const locale = useLocale();
   const id = useId();
   const machineId = useMachineId();
   const { createTab, fetchAgentKinds, fetchSessionHistory, resumeSession } = useMachineApi();
   const [agent, setAgent] = useState<SessionHistoryAgent>(firstAgent);
+  // Re-pick on an Agent change or a closed source, using the current roster rather than a stale pane.
+  const sourcePaneId = sessionHistorySourcePane(agent, panes, { workspaceId: workspace.workspace_id, askingPaneId, selectedPaneId });
   const [kinds, setKinds] = useState<AgentKind[]>([]);
   const [answer, setAnswer] = useState<SessionHistoryResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -75,13 +80,16 @@ export function SessionHistory({ workspace, panes, agent: firstAgent, sourcePane
   /** the session whose Resume found the store changed: its row takes the focus back once the list is read again */
   const refocus = useRef<string | null>(null);
   const guard = useRef(inFlightGuard());
-  /** a refusal in the user's words: a bridge without the route, and the two a Claude store gives, are said here; the rest as the bridge says them */
-  const refusal = (reason: unknown): string => {
+  /** known refusals in the user's words; other errors as the bridge says them */
+  const refusal = useCallback((reason: unknown): string => {
     if (routeMissing(reason)) return t("This PC's bridge does not offer this yet");
     if (reason instanceof ApiError && reason.code === "claude_store_unknown") return t("Which Claude store this pane uses can't be told, so its sessions aren't listed. Check that one Claude runs in this pane and its store folder exists, then open the list again.");
     if (reason instanceof ApiError && reason.code === "launch_unsupported") return t("This PC can't start this session in the store it was listed from");
+    if (reason instanceof ApiError && reason.code === "stale_source") return t("The source pane or its Claude store changed. Open the list again.");
+    if (reason instanceof ApiError && reason.code === "launch_store_changed") return t("A shell startup file set another Claude store, so the new tab was closed.");
+    if (reason instanceof ApiError && reason.code === "launch_store_unknown") return t("The new tab's Claude store couldn't be confirmed, so the tab was closed.");
     return said(reason);
-  };
+  }, [t]);
   const surface = useRef<HTMLDivElement>(null);
   const list = useRef<HTMLUListElement>(null);
   const picker = useRef<HTMLButtonElement>(null);
@@ -145,7 +153,7 @@ export function SessionHistory({ workspace, panes, agent: firstAgent, sourcePane
       (reason: unknown) => { if (!cancelled) { setAnswer(null); setError(refusal(reason)); setRelisting(false); } },
     );
     return () => { cancelled = true; };
-  }, [agent, fetchSessionHistory, reload, sourcePaneId, t, workspace.workspace_id]);
+  }, [agent, fetchSessionHistory, reload, sourcePaneId, refusal, workspace.workspace_id]);
   useEffect(() => { setRelisted(false); }, [agent]);
   const options = useMemo(() => {
     const listed = kinds.flatMap((kind) => { const named = sessionHistoryAgent(kind.kind); return named === null ? [] : [{ kind: named, label: kind.label }]; });

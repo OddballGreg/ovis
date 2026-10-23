@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import type { HerdrPane, SessionHistoryRow } from "../../shared/protocol.ts";
 import { formatChatTimestamp } from "./chatTimestamp.ts";
 import type { Translate } from "./i18n.ts";
-import { claudeResumeRequest, inFlightGuard, observeRecentResume, paneShowingRow, paneShowingSession, RECENT_RESUME_MS, recentlyResumedPane, recentResumeEnded, resumeTabRequest, rowKey, sessionHistoryAgent, sessionHistoryListAgent, sessionRowTime, standingResume, type RecentResume } from "./sessionHistory.ts";
+import { claudeResumeRequest, inFlightGuard, observeRecentResume, paneShowingRow, paneShowingSession, RECENT_RESUME_MS, recentlyResumedPane, recentResumeEnded, resumeTabRequest, rowKey, sessionHistoryAgent, sessionHistoryListAgent, sessionHistorySourcePane, sessionRowTime, standingResume, type RecentResume } from "./sessionHistory.ts";
 
 const pane = (overrides: Partial<HerdrPane>): HerdrPane => ({
   pane_id: "p1", tab_id: "t1", terminal_id: "term1", workspace_id: "w1", agent: "codex", agent_status: "idle", focused: false, revision: 1, ...overrides,
@@ -24,6 +24,41 @@ describe("sessionHistoryListAgent", () => {
     expect(sessionHistoryListAgent({ agent: "copilot" }, "codex", ["claude"])).toBe("codex");
     expect(sessionHistoryListAgent({ agent: null }, null, ["copilot", null, "pi"])).toBe("pi");
     expect(sessionHistoryListAgent(undefined, undefined, [])).toBe("claude");
+  });
+});
+
+describe("sessionHistorySourcePane", () => {
+  const shell = pane({ pane_id: "shell", agent: null });
+  const codex = pane({ pane_id: "codex" });
+  const claude = pane({ pane_id: "claude", agent: "claude" });
+  const another = pane({ pane_id: "another", agent: "claude" });
+  const panes = [shell, codex, claude, another];
+
+  it.each(["shell", "codex"])("prefers a Claude pane when the selected pane is %s", (selectedPaneId) => {
+    expect(sessionHistorySourcePane("claude", panes, { workspaceId: "w1", selectedPaneId })).toBe("claude");
+  });
+  it("prefers Claude when a Codex pane asks with the picker on Claude", () => {
+    expect(sessionHistorySourcePane("claude", panes, { workspaceId: "w1", askingPaneId: "codex", selectedPaneId: "shell" })).toBe("claude");
+  });
+  it.each([
+    { askingPaneId: "another", selectedPaneId: "claude", expected: "another" },
+    { askingPaneId: "codex", selectedPaneId: "another", expected: "another" },
+  ])("prefers the asking Claude, then the selected Claude: $expected", ({ expected, ...request }) => {
+    expect(sessionHistorySourcePane("claude", panes, { workspaceId: "w1", ...request })).toBe(expected);
+  });
+  it.each([
+    { askingPaneId: "codex", selectedPaneId: "shell", expected: "codex" },
+    { askingPaneId: "closed", selectedPaneId: "codex", expected: "codex" },
+    { askingPaneId: "closed", selectedPaneId: "elsewhere", expected: "shell" },
+  ])("falls back within the workspace when no Claude runs: $expected", ({ expected, ...request }) => {
+    const roster = [pane({ pane_id: "elsewhere", workspace_id: "w2", agent: "claude" }), shell, codex];
+    expect(sessionHistorySourcePane("claude", roster, { workspaceId: "w1", ...request })).toBe(expected);
+  });
+  it("has no source when the workspace has no panes", () => {
+    expect(sessionHistorySourcePane("claude", panes, { workspaceId: "empty", askingPaneId: "claude" })).toBeNull();
+  });
+  it("keeps the asking pane for other agents even when Claude runs", () => {
+    expect(sessionHistorySourcePane("codex", panes, { workspaceId: "w1", askingPaneId: "shell", selectedPaneId: "claude" })).toBe("shell");
   });
 });
 

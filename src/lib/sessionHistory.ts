@@ -38,6 +38,16 @@ export function sessionHistoryAgent(agent: string | null | undefined): SessionHi
   return agent && (SESSION_HISTORY_AGENTS as readonly string[]).includes(agent) ? (agent as SessionHistoryAgent) : null;
 }
 
+/** The list's source, with panes in tab order: prefer a running Claude before using a default store. */
+export function sessionHistorySourcePane(agent: SessionHistoryAgent, panes: readonly HerdrPane[], request: { readonly workspaceId: string; readonly askingPaneId?: string | null; readonly selectedPaneId?: string | null }): string | null {
+  const workspacePanes = panes.filter((pane) => pane.workspace_id === request.workspaceId);
+  const asking = workspacePanes.find((pane) => pane.pane_id === request.askingPaneId);
+  const selected = workspacePanes.find((pane) => pane.pane_id === request.selectedPaneId);
+  const candidates = [asking, selected, ...workspacePanes];
+  const claude = agent === "claude" ? candidates.find((pane) => pane !== undefined && sessionHistoryAgent(pane.agent) === "claude") : undefined;
+  return (claude ?? asking ?? selected ?? workspacePanes[0])?.pane_id ?? null;
+}
+
 /**
  * A session file's name says the session: Claude names the file by the id, Codex ends the rollout
  * name with it, pi's family puts it after the start time and an underscore.
