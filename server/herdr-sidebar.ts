@@ -1,10 +1,12 @@
-import { readFileSync, statSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { PANE_TOKEN_NAME, type AgentRowTokens, type PaneTokenRule, type PaneTokenSpec } from "../shared/pane-tokens.ts";
 
 /** how often a watched config.toml is looked at again while a browser listens */
 const POLL_MS = 5_000;
+/** A config is a short TOML document, not an unbounded log. */
+const MAX_CONFIG_BYTES = 1024 * 1024;
 /** herdr's canonical agent ids (`rows_by_agent` keys): `claude`, `codex`, `pi` */
 const AGENT_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const TEXT_CONDITIONS = ["equals", "contains", "starts_with"] as const;
@@ -130,13 +132,29 @@ export class HerdrSidebarConfig {
     let stamp: string | null;
     try {
       const stat = statSync(this.path);
-      stamp = `${stat.mtimeMs}:${stat.size}`;
+      stamp = stat.isFile() && stat.size <= MAX_CONFIG_BYTES ? `${stat.mtimeMs}:${stat.size}` : null;
     } catch { stamp = null; }
     if (stamp === this.stamp) return false;
     this.stamp = stamp;
     let next: AgentRowTokens | null = null;
     if (stamp !== null) {
-      try { next = agentRowTokens(Bun.TOML.parse(readFileSync(this.path, "utf8"))); } catch { next = null; }
+      let fd: number | undefined;
+      try {
+        // Check the opened file too: a FIFO swapped in after stat must not block the server.
+        fd = openSync(this.path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
+        const stat = fstatSync(fd);
+        if (stat.isFile() && stat.size <= MAX_CONFIG_BYTES) {
+          const buffer = Buffer.alloc(stat.size + 1);
+          let length = 0;
+          for (let count = 1; count > 0 && length < buffer.length; length += count) count = readSync(fd, buffer, length, buffer.length - length, null);
+          // A file that grew while being read is retried once its stamp changes.
+          if (length <= stat.size) {
+            const text = buffer.subarray(0, length).toString("utf8").replace(/^\uFEFF/gm, "");
+            next = agentRowTokens(Bun.TOML.parse(text));
+          }
+        }
+      } catch { next = null; }
+      finally { if (fd !== undefined) closeSync(fd); }
     }
     const changed = JSON.stringify(next) !== JSON.stringify(this.layout);
     this.layout = next;
