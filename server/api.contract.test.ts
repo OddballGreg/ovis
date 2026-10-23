@@ -4234,7 +4234,7 @@ describe("POST /api/sessions/resume", () => {
   let alternate = "";
   let project = "";
   let socket = "";
-  const herdr = process.env["HERDR_WEB_HERDR_BIN"] || Bun.which("herdr") || "herdr";
+  const herdr = process.env["OVIS_HERDR_BIN"] || Bun.which("herdr") || "herdr";
   const ID = "00000000-0000-4000-8000-0000000000c1";
   const OTHER = "00000000-0000-4000-8000-0000000000c2";
   const WATCH_TOKEN = "f".repeat(64);
@@ -4337,7 +4337,7 @@ describe("POST /api/sessions/resume", () => {
   beforeAll(async () => {
     if (!NATIVE) return;
     config = mkdtempSync("/tmp/hwr-");
-    root = mkdtempSync(join(tmpdir(), "herdr-web-ui-claude-resume-"));
+    root = mkdtempSync(join(tmpdir(), "ovis-claude-resume-"));
     home = join(root, "home");
     alternate = join(root, "alternate-store");
     project = join(root, "project");
@@ -4385,8 +4385,8 @@ setInterval(() => {}, 1 << 30);
     mkdirSync(appState);
     writeFileSync(join(appState, "devices.json"), JSON.stringify({ gate_closed_at: new Date().toISOString(), devices: [{ id: "0123456789abcdef", label: "Watch fixture", role: "watch", token_hash: createHash("sha256").update(WATCH_TOKEN).digest("hex"), created_at: new Date().toISOString(), last_seen_at: null }] }), { mode: 0o600 });
     app = createServer({ port: 0, hostname: "127.0.0.1", stateDir: appState });
-    workspaceId = (await rpc<Awaited<ReturnType<typeof workspaceCreate>>>("workspace.create", { cwd, label: "herdr-web-ui-test-claude-resume", focus: false })).workspace.workspace_id;
-    foreignWorkspace = (await rpc<Awaited<ReturnType<typeof workspaceCreate>>>("workspace.create", { cwd, label: "herdr-web-ui-test-claude-resume-other", focus: false })).workspace.workspace_id;
+    workspaceId = (await rpc<Awaited<ReturnType<typeof workspaceCreate>>>("workspace.create", { cwd, label: "ovis-test-claude-resume", focus: false })).workspace.workspace_id;
+    foreignWorkspace = (await rpc<Awaited<ReturnType<typeof workspaceCreate>>>("workspace.create", { cwd, label: "ovis-test-claude-resume-other", focus: false })).workspace.workspace_id;
   }, 30_000);
 
   afterAll(async () => {
@@ -4470,7 +4470,7 @@ setInterval(() => {}, 1 << 30);
       expect([status, answer.error?.code]).toEqual(expected);
       expect(await tabsOf(workspaceId)).toBe(tabs);
     };
-    await refused(valid, [403, "read_only"], { "x-forwarded-for": "100.64.0.9", cookie: `herdr_web_device=${WATCH_TOKEN}` });
+    await refused(valid, [403, "read_only"], { "x-forwarded-for": "100.64.0.9", cookie: `ovis_device=${WATCH_TOKEN}` });
     await refused({ ...valid, pane_id: foreignPane }, [400, "pane_not_in_workspace"]);
     await refused({ ...valid, session_id: "../../outside" }, [400, "invalid_session_id"]);
     await refused({ ...valid, store_key: alternate }, [400, "invalid_store_key"]);
@@ -4520,7 +4520,7 @@ setInterval(() => {}, 1 << 30);
       // a herdr whose own environment exports the alternate store: every new tab of it inherits that
       exported = await startHerdr(exportedSession, exportedConfig, exportedSocket, { CLAUDE_CONFIG_DIR: alternate });
       process.env["HERDR_SOCKET"] = exportedSocket;
-      const workspace = (await exportedRpc<Awaited<ReturnType<typeof workspaceCreate>>>("workspace.create", { cwd, label: "herdr-web-ui-test-claude-resume-exported", focus: false })).workspace.workspace_id;
+      const workspace = (await exportedRpc<Awaited<ReturnType<typeof workspaceCreate>>>("workspace.create", { cwd, label: "ovis-test-claude-resume-exported", focus: false })).workspace.workspace_id;
       const pane = (await exportedRpc<{ root_pane: { pane_id: string } }>("tab.create", { workspace_id: workspace, cwd, focus: false })).root_pane.pane_id;
       // the pane's shell drops it before Claude starts: the pane alone says none exported
       await exportedRpc("pane.send_text", { pane_id: pane, text: "exec env -u CLAUDE_CONFIG_DIR /bin/sh -c 'claude; exec /bin/sh'\n" });
@@ -4547,7 +4547,7 @@ setInterval(() => {}, 1 << 30);
     const REMOTE = "00000000-0000-4000-8000-0000000000c3";
     writeSession(alternate, REMOTE, "remote store prompt");
     const source = await sourcePane(alternate);
-    const bridgeState = mkdtempSync(join(tmpdir(), "herdr-web-ui-claude-resume-bridge-"));
+    const bridgeState = mkdtempSync(join(tmpdir(), "ovis-claude-resume-bridge-"));
     const bridge = createServer({ port: 0, hostname: "127.0.0.1", token: "test-browser-token", machines: false, registerBridge: true, stateDir: bridgeState, tailscaleOwner: null });
     try {
       const registered = JSON.parse(readFileSync(descriptorPath(), "utf8")) as BridgeDescriptor;
