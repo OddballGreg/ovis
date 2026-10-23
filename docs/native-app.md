@@ -44,14 +44,18 @@ whole alert policy (the wait before an alert, no alert while a window is in use,
 choices) and changes little:
 
 1. The app registers with APNs and gets a device token.
-2. The app sends the token to the relay, which returns an endpoint URL holding an opaque ID for
-   that token (`https://<relay>/v1/push/<id>`). The token itself never leaves the relay.
+2. For each PC, the app sends the token and that PC's VAPID public key (`GET /api/push`, the key
+   a browser passes to `pushManager.subscribe`) to the relay, which returns an endpoint URL
+   holding an opaque ID for them (`https://push.ovis.sh/v1/push/<id>`). The token itself never
+   leaves the relay. The app keeps that endpoint for the PC rather than registering again at
+   every launch.
 3. The app makes a P-256 key pair and an auth secret, keeps the private half in the keychain
    shared with its Notification Service Extension, and hands `{ endpoint, keys }` to the web
    client, which subscribes with it in place of `pushManager.subscribe`.
 4. The PC encrypts each alert for those keys (RFC 8291, as today) and signs it with its VAPID key
-   (RFC 8292). The relay pins the first VAPID key that pushes to an endpoint and refuses others,
-   so knowing an endpoint is not enough to send to a phone. It also rate-limits per endpoint.
+   (RFC 8292). The relay pins the key given at registration to the endpoint and refuses any
+   other, so knowing an endpoint is not enough to send to a phone. It also rate-limits per
+   endpoint and per phone, and limits registrations.
 5. The relay wraps the ciphertext in a `mutable-content` APNs push. The Notification Service
    Extension (a small Swift target) decrypts it and shows the title and body. A push it cannot
    decrypt shows a generic "herdr needs you" line.
@@ -74,7 +78,7 @@ later.
    has no camera).
 3. Relay Worker with tests (VAPID pinning, rate limit, gone tokens). Built 2026-10-23 in
    [`push-relay/`](../push-relay/README.md), at `push.ovis.sh`; deploying it needs the D1
-   database and the APNs secrets its README lists.
+   database and the APNs secrets its README lists, then one real push (`push-relay/test-push.ts`).
 4. `src/lib/push.ts`: subscribe through the native bridge inside the app.
 5. Notification Service Extension that decrypts.
 6. App Store listing, privacy answers, review notes pointing at the demo mode.

@@ -9,9 +9,23 @@ routes = [{ pattern = "push.ovis.sh", custom_domain = true }]
 [observability]
 enabled = false
 
+# Once a day, delete endpoints unused for ENDPOINT_TTL_SECONDS (worker.ts `expire`).
+[triggers]
+crons = ["17 3 * * *"]
+
 # APNS_KEY, APNS_KEY_ID and APNS_TEAM_ID are secrets (`wrangler secret put`, README.md), never here.
 [vars]
 APNS_TOPIC = "sh.ovis.app"
+
+# Registrations per address and minute, per Cloudflare location, before any database write
+# (README.md). namespace_id is any integer unique to the account.
+[[ratelimits]]
+name = "REGISTER_LIMITER"
+namespace_id = "1695"
+
+  [ratelimits.simple]
+  limit = 10
+  period = 60
 
 [[d1_databases]]
 binding = "DB"

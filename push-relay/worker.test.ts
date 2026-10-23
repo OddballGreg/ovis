@@ -3,7 +3,10 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import webpush from "web-push";
-import { ENDPOINTS_PER_TOKEN, FALLBACK_BODY, RATE_LIMIT, RATE_WINDOW_SECONDS, handle, readRegistration, verifyVapid, type Env } from "./worker.ts";
+import {
+  DEVICE_RATE_LIMIT, ENDPOINTS_PER_TOKEN, ENDPOINT_TTL_SECONDS, FALLBACK_BODY, RATE_LIMIT, RATE_WINDOW_SECONDS,
+  expire, handle, readRegistration, verifyVapid, type Env,
+} from "./worker.ts";
 
 const schema = readFileSync(join(import.meta.dir, "schema.sql"), "utf8");
 const RELAY = "https://push.test";
@@ -19,15 +22,18 @@ const apnsPem = `-----BEGIN PRIVATE KEY-----\n${Buffer.from(await crypto.subtle.
 
 interface ApnsCall { url: string; headers: Record<string, string>; body: string }
 
-/** the relay over a real SQLite table, and an APNs that answers `apnsAnswer` and records each call */
+/** the relay over a real SQLite table, a registration limiter that lets through `allow`, and an APNs that answers `apnsAnswer` and records each call */
 function relay(keyId = "KEY1234567") {
   const db = new Database(":memory:");
   db.exec(schema);
+  const limiterKeys: string[] = [];
+  let allow = true;
   const env: Env = {
     DB: { prepare: (query) => ({ bind: (...values) => ({
       first: async <T>() => (db.query(query).get(...(values as (string | number | null)[])) ?? null) as T | null,
       run: async () => db.query(query).run(...(values as (string | number | null)[])),
     }) }) },
+    REGISTER_LIMITER: { limit: async ({ key }) => { limiterKeys.push(key); return { success: allow }; } },
     APNS_KEY: apnsPem, APNS_KEY_ID: keyId, APNS_TEAM_ID: "TEAM123456", APNS_TOPIC: "sh.ovis.app",
   };
   const calls: ApnsCall[] = [];
@@ -37,22 +43,24 @@ function relay(keyId = "KEY1234567") {
     return apnsAnswer();
   };
   return {
-    db, env, calls,
+    db, env, calls, limiterKeys,
     answer(next: () => Response) { apnsAnswer = next; },
+    limit(next: boolean) { allow = next; },
     handle: (request: Request, now = new Date()) => handle(request, env, now, send),
-    rows: () => db.query("SELECT * FROM endpoints").all() as Record<string, unknown>[],
+    rows: () => db.query("SELECT * FROM endpoints ORDER BY rowid").all() as Record<string, unknown>[],
   };
 }
 type Relay = ReturnType<typeof relay>;
 
 const registration = (body: unknown, type = "application/json") =>
-  new Request(`${RELAY}/v1/register`, { method: "POST", headers: { "content-type": type }, body: typeof body === "string" ? body : JSON.stringify(body) });
+  new Request(`${RELAY}/v1/register`, { method: "POST", headers: { "content-type": type, "cf-connecting-ip": "203.0.113.9" }, body: typeof body === "string" ? body : JSON.stringify(body) });
 
-async function register(r: Relay, body: unknown = { token: TOKEN }): Promise<string> {
-  const response = await r.handle(registration(body));
+async function register(r: Relay, body: Record<string, unknown> = {}, now = new Date()): Promise<string> {
+  const response = await r.handle(registration({ token: TOKEN, vapid_key: pcKey.publicKey, ...body }), now);
   expect(response.status).toBe(201);
   return ((await response.json()) as { endpoint: string }).endpoint;
 }
+const idOf = (endpoint: string) => endpoint.split("/").at(-1)!;
 
 /** a push exactly as server/push.ts builds it: web-push's aes128gcm body and VAPID header */
 function pushRequest(endpoint: string, options: { key?: { publicKey: string; privateKey: string }; payload?: string; urgency?: "normal" | "high"; TTL?: number; topic?: string; to?: string } = {}) {
@@ -75,42 +83,94 @@ function decodeJwt(token: string) {
 }
 
 describe("push relay: registration", () => {
-  test("hands back an endpoint on this relay holding a random ID, never the token", async () => {
+  test("hands back an endpoint on this relay holding a random ID, pinned to the PC's key, never the token", async () => {
     const r = relay();
-    const response = await r.handle(registration({ token: TOKEN.toUpperCase() }));
+    const now = new Date();
+    const response = await r.handle(registration({ token: TOKEN.toUpperCase(), vapid_key: pcKey.publicKey }), now);
     expect(response.status).toBe(201);
     expect(response.headers.get("cache-control")).toBe("no-store");
     const text = await response.text();
     expect(text.toLowerCase()).not.toContain(TOKEN);
     const { endpoint } = JSON.parse(text) as { endpoint: string };
     expect(endpoint).toMatch(/^https:\/\/push\.test\/v1\/push\/[A-Za-z0-9_-]{22}$/);
-    expect(r.rows()).toEqual([{ id: endpoint.split("/").at(-1), token: TOKEN, environment: "production", vapid_key: null, window_start: 0, window_count: 0 }]);
-    // each registration is an endpoint of its own: one per PC, each pinning its own key
-    expect(await register(r)).not.toBe(endpoint);
+    const seconds = Math.floor(now.getTime() / 1000);
+    expect(r.rows()).toEqual([{
+      id: idOf(endpoint), token: TOKEN, environment: "production", vapid_key: pcKey.publicKey,
+      created_at: seconds, used_at: seconds, window_start: 0, window_count: 0,
+    }]);
+    // the address only keys the limiter: it is not stored
+    expect(r.limiterKeys).toEqual(["203.0.113.9"]);
+    expect(JSON.stringify(r.rows())).not.toContain("203.0.113.9");
+    // each registration is an endpoint of its own: one per PC, each pinned to its PC's key
+    expect(await register(r, { vapid_key: otherPcKey.publicKey })).not.toBe(endpoint);
   });
 
   test("refuses what is not one registration", async () => {
     const r = relay();
+    const valid = { token: TOKEN, vapid_key: pcKey.publicKey };
+    const shortKey = Buffer.from(new Uint8Array(32).fill(4)).toString("base64url");
+    const compressed = Buffer.from([2, ...new Uint8Array(64).fill(7)]).toString("base64url");
     for (const body of [
-      "not json", "[]", {}, { token: 42 }, { token: "a1".repeat(31) }, { token: "zz".repeat(32) }, { token: `${"a1".repeat(32)}0` },
-      { token: TOKEN, environment: "development" }, { token: TOKEN, email: "person@example.com" },
+      "not json", "[]", {}, { token: TOKEN }, { vapid_key: pcKey.publicKey },
+      { ...valid, token: 42 }, { ...valid, token: "a1".repeat(31) }, { ...valid, token: "zz".repeat(32) }, { ...valid, token: `${TOKEN}0` },
+      { ...valid, environment: "development" }, { ...valid, email: "person@example.com" },
+      { ...valid, vapid_key: shortKey }, { ...valid, vapid_key: compressed }, { ...valid, vapid_key: "not base64!" }, { ...valid, vapid_key: 7 },
     ]) expect((await r.handle(registration(body))).status).toBe(400);
-    expect((await r.handle(registration({ token: TOKEN }, "text/plain"))).status).toBe(415);
-    expect((await r.handle(registration({ token: TOKEN, pad: "x".repeat(1100) }))).status).toBe(413);
+    expect((await r.handle(registration(valid, "text/plain"))).status).toBe(415);
+    expect((await r.handle(registration({ ...valid, pad: "x".repeat(1100) }))).status).toBe(413);
     expect((await r.handle(new Request(`${RELAY}/v1/register`))).status).toBe(405);
     expect(r.rows()).toEqual([]);
-    expect(readRegistration({ token: TOKEN, environment: "sandbox" })).toEqual({ token: TOKEN, environment: "sandbox" });
+    // the key is kept in one spelling, so a padded or base64 copy of it pins the same key
+    const padded = Buffer.from(pcKey.publicKey, "base64url").toString("base64");
+    expect(readRegistration({ token: TOKEN, environment: "sandbox", vapid_key: padded })).toEqual({ token: TOKEN, environment: "sandbox", vapid_key: pcKey.publicKey });
   });
 
-  test(`keeps the newest ${ENDPOINTS_PER_TOKEN} endpoints of one token`, async () => {
+  test("a registration the limiter refuses writes nothing, whatever token it names", async () => {
     const r = relay();
+    r.limit(false);
+    for (const token of [TOKEN, "b2".repeat(32), "c3".repeat(32)]) {
+      const refused = await r.handle(registration({ token, vapid_key: pcKey.publicKey }));
+      expect(refused.status).toBe(429);
+      expect(refused.headers.get("retry-after")).toBe("60");
+    }
+    // a refused request is refused before its body is read
+    expect((await r.handle(registration("not json"))).status).toBe(429);
+    expect(r.rows()).toEqual([]);
+    expect(r.limiterKeys).toEqual(Array(4).fill("203.0.113.9"));
+    r.limit(true);
+    await register(r);
+    expect(r.rows()).toHaveLength(1);
+  });
+
+  test(`keeps the ${ENDPOINTS_PER_TOKEN} most recently registered endpoints of one token`, async () => {
+    const r = relay();
+    const start = Date.now();
     const endpoints: string[] = [];
-    for (let i = 0; i <= ENDPOINTS_PER_TOKEN; i++) endpoints.push(await register(r));
+    for (let i = 0; i < ENDPOINTS_PER_TOKEN - 1; i++) endpoints.push(await register(r, {}, new Date(start + i * 1000)));
+    // registered earliest but stored last: the registration time decides, not the row's place
+    r.db.query("INSERT INTO endpoints (id, token, environment, vapid_key, created_at, used_at) VALUES (?, ?, 'production', ?, ?, ?)")
+      .run("old_endpoint_000000000", TOKEN, pcKey.publicKey, Math.floor(start / 1000) - 3600, Math.floor(start / 1000));
+    const newest = await register(r, {}, new Date(start + 60_000));
     await register(r, { token: "b2".repeat(32) });
     const ids = new Set(r.rows().map((row) => row["id"]));
     expect(ids.size).toBe(ENDPOINTS_PER_TOKEN + 1);
-    expect(ids.has(endpoints[0]!.split("/").at(-1))).toBe(false);
-    expect(ids.has(endpoints.at(-1)!.split("/").at(-1))).toBe(true);
+    expect(ids.has("old_endpoint_000000000")).toBe(false);
+    expect(ids.has(idOf(endpoints[0]!))).toBe(true);
+    expect(ids.has(idOf(newest))).toBe(true);
+  });
+
+  test(`deletes endpoints unused for ${ENDPOINT_TTL_SECONDS / 86_400} days, and only those`, async () => {
+    const r = relay();
+    const start = Date.now();
+    const pushed = await register(r, {}, new Date(start));
+    const idle = await register(r, {}, new Date(start));
+    // pushed to 30 days later (a push sets used_at: "forwards the ciphertext..." checks it)
+    r.db.query("UPDATE endpoints SET used_at = ? WHERE id = ?").run(Math.floor(start / 1000) + 30 * 86_400, idOf(pushed));
+    await expire(r.env, new Date(start + ENDPOINT_TTL_SECONDS * 1000 - 1000));
+    expect(r.rows()).toHaveLength(2);
+    await expire(r.env, new Date(start + ENDPOINT_TTL_SECONDS * 1000 + 1000));
+    expect(r.rows().map((row) => row["id"])).toEqual([idOf(pushed)]);
+    expect((await r.handle(pushRequest(idle).request)).status).toBe(404);
   });
 });
 
@@ -142,10 +202,11 @@ describe("push relay: pushes", () => {
     expect(jwt.header).toEqual({ alg: "ES256", kid: "KEY1234567" });
     expect(jwt.claims).toEqual({ iss: "TEAM123456", iat: nowSeconds });
     expect(await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, apnsPair.publicKey, jwt.signature, new TextEncoder().encode(jwt.signed))).toBe(true);
+    expect(r.rows()[0]!["used_at"]).toBe(nowSeconds);
   });
 
   test("maps urgency to APNs priority, a sandbox token to Apple's sandbox, and TTL 0 to deliver-now-or-never", async () => {
-    const endpoint = await register(r, { token: TOKEN, environment: "sandbox" });
+    const endpoint = await register(r, { environment: "sandbox" });
     expect((await r.handle(pushRequest(endpoint, { urgency: "normal", TTL: 0 }).request)).status).toBe(201);
     expect(r.calls[0]!.url).toBe(`https://api.sandbox.push.apple.com/3/device/${TOKEN}`);
     expect(r.calls[0]!.headers).toMatchObject({ "apns-priority": "5", "apns-expiration": "0" });
@@ -164,19 +225,41 @@ describe("push relay: pushes", () => {
     expect(tokens[2]).not.toBe(tokens[0]);
   });
 
-  test("pins the first VAPID key that pushes and refuses every other", async () => {
+  test("a provider token APNs calls expired is signed again and the push sent once more", async () => {
+    const own = relay("KEYRETRY01");
+    const endpoint = await register(own);
+    expect((await own.handle(pushRequest(endpoint).request)).status).toBe(201);
+    let answers = [Response.json({ reason: "ExpiredProviderToken" }, { status: 403 }), new Response(null, { status: 200 })];
+    own.answer(() => answers.shift()!);
+    expect((await own.handle(pushRequest(endpoint).request)).status).toBe(201);
+    const [first, stale, fresh] = own.calls.map((call) => call.headers["authorization"]);
+    expect(stale).toBe(first);
+    expect(fresh).not.toBe(stale);
+    // the new token is the one kept
+    own.answer(() => new Response(null, { status: 200 }));
+    expect((await own.handle(pushRequest(endpoint).request)).status).toBe(201);
+    expect(own.calls.at(-1)!.headers["authorization"]).toBe(fresh);
+    // once more only: a key APNs keeps refusing is a relay failure, and the endpoint stays
+    answers = [];
+    own.answer(() => Response.json({ reason: "InvalidProviderToken" }, { status: 403 }));
+    const before = own.calls.length;
+    expect((await own.handle(pushRequest(endpoint).request)).status).toBe(502);
+    expect(own.calls.length - before).toBe(2);
+    expect(own.rows()).toHaveLength(1);
+  });
+
+  test("refuses every key but the one pinned at registration, the first push included", async () => {
     const endpoint = await register(r);
-    expect((await r.handle(pushRequest(endpoint).request)).status).toBe(201);
+    expect((await r.handle(pushRequest(endpoint, { key: otherPcKey }).request)).status).toBe(403);
+    expect(r.calls).toEqual([]);
     expect(r.rows()[0]!["vapid_key"]).toBe(pcKey.publicKey);
+    expect((await r.handle(pushRequest(endpoint).request)).status).toBe(201);
     expect((await r.handle(pushRequest(endpoint, { key: otherPcKey }).request)).status).toBe(403);
     expect(r.calls).toHaveLength(1);
-    expect((await r.handle(pushRequest(endpoint).request)).status).toBe(201);
-    expect(r.calls).toHaveLength(2);
   });
 
   test("refuses a push without a valid VAPID token for this relay", async () => {
     const endpoint = await register(r);
-    const id = endpoint.split("/").at(-1)!;
     const bare = pushRequest(endpoint);
     const send = (headers: Record<string, string>) => r.handle(new Request(endpoint, { method: "POST", headers, body: bare.body }));
     const { Authorization: authorization, ...unsigned } = bare.headers as Record<string, string>;
@@ -189,9 +272,8 @@ describe("push relay: pushes", () => {
     const otherK = authorization!.replace(/k=.+$/, `k=${otherPcKey.publicKey}`);
     expect((await send({ ...unsigned, Authorization: otherK })).status).toBe(401);
     // signed for another push service's audience
-    expect((await r.handle(pushRequest(`https://elsewhere.test/v1/push/${id}`, { to: endpoint }).request)).status).toBe(401);
+    expect((await r.handle(pushRequest(`https://elsewhere.test/v1/push/${idOf(endpoint)}`, { to: endpoint }).request)).status).toBe(401);
     expect(r.calls).toEqual([]);
-    expect(r.rows()[0]!["vapid_key"]).toBeNull();
 
     const header = pushRequest(endpoint).headers["Authorization"]!;
     const { claims } = decodeJwt(/t=([^,]+)/.exec(header)![1]!);
@@ -213,20 +295,36 @@ describe("push relay: pushes", () => {
     expect(r.calls).toHaveLength(RATE_LIMIT);
     expect((await r.handle(pushRequest(endpoint).request, new Date(start.getTime() + RATE_WINDOW_SECONDS * 1000))).status).toBe(201);
     expect(r.rows()[0]!["window_count"]).toBe(1);
-
-    // another endpoint of the same phone has a window of its own
-    const second = await register(r);
-    expect((await r.handle(pushRequest(second).request, start)).status).toBe(201);
   });
 
-  test("a token APNs calls gone deletes the endpoint and answers 410, which the PC takes as an unsubscribe", async () => {
+  test(`rate-limits a phone to ${DEVICE_RATE_LIMIT} pushes per window across its endpoints`, async () => {
+    const start = new Date();
+    const endpoints = [await register(r, {}, start), await register(r, {}, start), await register(r, {}, start)];
+    const other = await register(r, { token: "b2".repeat(32) }, start);
+    for (const endpoint of endpoints.slice(0, 2)) {
+      for (let i = 0; i < DEVICE_RATE_LIMIT / 2; i++) expect((await r.handle(pushRequest(endpoint).request, start)).status).toBe(201);
+    }
+    // a fresh endpoint of the same phone buys no more pushes
+    const limited = await r.handle(pushRequest(endpoints[2]!).request, new Date(start.getTime() + 60_000));
+    expect(limited.status).toBe(429);
+    expect(limited.headers.get("retry-after")).toBe(String(RATE_WINDOW_SECONDS - 60));
+    expect(r.rows().find((row) => row["id"] === idOf(endpoints[2]!))!["window_count"]).toBe(0);
+    // another phone is not held back
+    expect((await r.handle(pushRequest(other).request, start)).status).toBe(201);
+    expect((await r.handle(pushRequest(endpoints[2]!).request, new Date(start.getTime() + RATE_WINDOW_SECONDS * 1000))).status).toBe(201);
+  });
+
+  test("a token APNs calls gone deletes all its endpoints and answers 410, which the PC takes as an unsubscribe", async () => {
     for (const [status, reason] of [[410, "Unregistered"], [410, "ExpiredToken"], [400, "BadDeviceToken"], [400, "DeviceTokenNotForTopic"]] as const) {
       const own = relay();
       const endpoint = await register(own);
+      const sibling = await register(own, { vapid_key: otherPcKey.publicKey });
+      const other = await register(own, { token: "b2".repeat(32) });
       own.answer(() => Response.json({ reason }, { status }));
       expect((await own.handle(pushRequest(endpoint).request)).status).toBe(410);
-      expect(own.rows()).toEqual([]);
+      expect(own.rows().map((row) => row["id"])).toEqual([idOf(other)]);
       expect((await own.handle(pushRequest(endpoint).request)).status).toBe(404);
+      expect((await own.handle(pushRequest(sibling, { key: otherPcKey }).request)).status).toBe(404);
       expect(own.calls).toHaveLength(1);
     }
   });
@@ -246,7 +344,7 @@ describe("push relay: pushes", () => {
     expect(r.rows()).toHaveLength(1);
   });
 
-  test("refuses what is not one push before it reaches APNs or pins a key", async () => {
+  test("refuses what is not one push before it reaches APNs or counts against the limit", async () => {
     const endpoint = await register(r);
     const { request, headers, body } = pushRequest(endpoint);
     const resend = (changed: Record<string, string | null>, content: BodyInit = body) => {
@@ -264,7 +362,7 @@ describe("push relay: pushes", () => {
     expect((await r.handle(pushRequest(endpoint, { payload: "x".repeat(3200) }).request)).status).toBe(413);
     expect((await r.handle(new Request(endpoint))).status).toBe(405);
     expect(r.calls).toEqual([]);
-    expect(r.rows()[0]!["vapid_key"]).toBeNull();
+    expect(r.rows()[0]!["window_count"]).toBe(0);
     expect((await r.handle(request)).status).toBe(201);
   });
 
