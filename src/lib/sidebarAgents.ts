@@ -93,6 +93,16 @@ export function agentTabName(tab: TabInfo | null | undefined, workspaceTabs: rea
   return workspaceTabs.length > 1 || customTabLabel(tab, place) ? tabLabel(tab, t, place) : null;
 }
 
+/**
+ * The name a pane goes by under Settings → Agent row title → Tab name: its tab's, once the tab was
+ * renamed. Null for a tab herdr still names by its place, and the pane keeps its agent's title.
+ */
+export function renamedTabTitle(tab: TabInfo | null | undefined, workspaceTabs: readonly TabInfo[]): string | null {
+  if (!tab) return null;
+  const place = workspaceTabs.findIndex((candidate) => candidate.tab_id === tab.tab_id) + 1 || tab.number;
+  return customTabLabel(tab, place);
+}
+
 export interface AgentContextParts {
   agentLabel: string | null;
   /** the row's first line; an agent named like it is not said twice */
@@ -115,4 +125,23 @@ export function agentContext({ agentLabel, title, markAgent, machineName, worksp
     workspaceLabel,
     tab && tab !== workspaceLabel ? tab : null,
   ].filter((part): part is string => Boolean(part));
+}
+
+export interface AgentRowLinesInput extends Omit<AgentContextParts, "title"> {
+  /** what the agent says it is doing: the row's title unless a tab name leads */
+  agentTitle: string;
+  /** the renamed tab's name (renamedTabTitle) when Settings asks for it, else null */
+  tabTitle: string | null;
+}
+
+/**
+ * An agent row's title and second line. With a tab name to lead, the tab's name is the title, the
+ * agent's title opens the second line and the tab is not named again in it.
+ */
+export function agentRowLines({ agentTitle, tabTitle, ...parts }: AgentRowLinesInput): { title: string; context: string[] } {
+  const tab = nonblank(tabTitle);
+  if (tab === null) return { title: agentTitle, context: agentContext({ ...parts, title: agentTitle }) };
+  const context = agentContext({ ...parts, title: tab, tabName: null });
+  const shown = nonblank(agentTitle);
+  return { title: tab, context: shown && shown !== tab && !context.includes(shown) ? [shown, ...context] : context };
 }

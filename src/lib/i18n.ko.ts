@@ -313,6 +313,8 @@ export const KO: Record<string, string> = {
   "Activity keeps a waiting agent on top, then the one that changed last; herdr's own order is not changed": "활동순은 응답을 기다리는 에이전트를 맨 위에 두고, 그다음 가장 최근에 바뀐 순서로 놓습니다. herdr 자체의 순서는 바뀌지 않습니다",
   "Workspaces": "워크스페이스순",
   "Activity": "활동순",
+  "Agent row title": "에이전트 행 제목",
+  "Name an agent row by its agent's title, or by its tab's name once the tab is renamed, with the agent's title under it": "에이전트 행을 에이전트의 제목으로 부르거나, 탭 이름을 바꾼 뒤에는 그 탭 이름으로 부르고 에이전트의 제목은 그 아래에 둡니다",
   "Agent logos": "에이전트 로고",
   "Draw each agent's logo in its brand colors, or without color": "각 에이전트의 로고를 브랜드 색상 또는 색 없이 표시합니다",
   "Color": "색상",

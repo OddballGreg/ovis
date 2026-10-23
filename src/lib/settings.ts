@@ -25,6 +25,8 @@ export type Density = "compact" | "comfortable";
 export type SidebarRows = "one" | "two";
 /** the Agents list's order: herdr's workspace order, or a waiting agent first and then the latest change */
 export type AgentOrder = "workspace" | "activity";
+/** what an agent row is named by: its agent's title, or its tab's name when the tab was renamed (the title then goes under it) */
+export type AgentRowTitle = "agent" | "tab";
 /** how agent logos are drawn: in their brand colors, or without color: Claude's in the text color, the others in grey (data-marks on <html>) */
 export type AgentMarks = "color" | "mono";
 /** what the plan meters count: the share of a limit used, or what is left of it */
@@ -75,6 +77,8 @@ export interface Settings {
   sidebarRows: SidebarRows;
   /** The Agents list's order. Activity is display-only: herdr's own order never changes. */
   agentOrder: AgentOrder;
+  /** What an agent row and the header name a pane by: Tab name puts a renamed tab's name first, the agent's title under it */
+  agentRowTitle: AgentRowTitle;
   /** Agent logos: brand colors, or without color, so a list of one agent is not a stripe of tiles */
   agentMarks: AgentMarks;
   /** the sidebar's state marks: this app's own, or herdr's dots or symbols, as its `[ui] status_indicators` (lib/status.ts) */
@@ -183,12 +187,12 @@ export type DiffStyle = (typeof DIFF_STYLES)[number];
 
 /** Raw custom text, key combinations and account keys are never copied. Requiring every other
  * Settings field in the projection makes a new field require an explicit collection decision.
- * fileOpen, webLinks, the launch modes, followHerdrFocus and composerNewTabButton are not collected: the
- * telemetry schema (shared/telemetry.ts) does not carry them. */
+ * fileOpen, webLinks, the launch modes, followHerdrFocus, composerNewTabButton and agentRowTitle are not
+ * collected: the telemetry schema (shared/telemetry.ts) does not carry them. */
 type TelemetrySourceSettings = Omit<Settings,
   "keyBarExtras" | "keyBarItems" | "shortcutOverrides" | "terminalFontFamily" | "chatFontFamily"
   | "quickReplies" | "usageOrder" | "usageHidden" | "fileOpen" | "webLinks" | "claudeLaunchMode" | "codexLaunchMode"
-  | "followHerdrFocus" | "composerNewTabButton">;
+  | "followHerdrFocus" | "composerNewTabButton" | "agentRowTitle">;
 
 /** Compare structured custom settings by content against this app's built-in defaults. */
 function differsFromDefault(value: unknown, defaultValue: unknown): boolean {
@@ -259,7 +263,7 @@ export function telemetrySettingsSnapshot(settings: Settings): TelemetrySettings
  */
 export const SETTING_SCOPE = {
   theme: "shared", palette: "shared", darkTheme: "shared", lightTheme: "shared", language: "shared", sidebarRows: "shared", agentOrder: "shared",
-  agentMarks: "shared", autoSendQueued: "shared", showThinking: "shared", quickReplies: "shared",
+  agentRowTitle: "shared", agentMarks: "shared", autoSendQueued: "shared", showThinking: "shared", quickReplies: "shared",
   showQuickReplies: "shared", showUsage: "shared", usageCount: "shared",
   usageGlance: "shared", usageOrder: "shared", usageHidden: "shared", defaultView: "device", suggestionChip: "device",
   terminalInputMode: "device", keyBarExtras: "device", keyBarItems: "device", shortcutOverrides: "device", density: "device",
@@ -293,6 +297,7 @@ export const DEFAULT_SETTINGS: Settings = {
   density: "comfortable",
   sidebarRows: "one",
   agentOrder: "workspace",
+  agentRowTitle: "agent",
   agentMarks: "color",
   statusIndicators: "classic",
   palette: DEFAULT_THEME,
@@ -464,6 +469,7 @@ export function sanitizeSettings(raw: unknown): Settings {
     density: density === "compact" || density === "comfortable" ? density : DEFAULT_SETTINGS.density,
     sidebarRows: record["sidebarRows"] === "one" || record["sidebarRows"] === "two" ? record["sidebarRows"] : DEFAULT_SETTINGS.sidebarRows,
     agentOrder: record["agentOrder"] === "workspace" || record["agentOrder"] === "activity" ? record["agentOrder"] : DEFAULT_SETTINGS.agentOrder,
+    agentRowTitle: record["agentRowTitle"] === "agent" || record["agentRowTitle"] === "tab" ? record["agentRowTitle"] : DEFAULT_SETTINGS.agentRowTitle,
     agentMarks: record["agentMarks"] === "color" || record["agentMarks"] === "mono" ? record["agentMarks"] : DEFAULT_SETTINGS.agentMarks,
     statusIndicators: record["statusIndicators"] === "classic" || record["statusIndicators"] === "dots" || record["statusIndicators"] === "symbols" ? record["statusIndicators"] : DEFAULT_SETTINGS.statusIndicators,
     darkTheme,

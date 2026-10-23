@@ -1018,6 +1018,11 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
   It changes only the Agents list; herdr's order and the workspace rows stay as they are.
   A raw counter rollback clears synthetic recency even on older bridges without an epoch.
   This ordering correction never changes finish identities or read records.
+- Appearance's **Agent row title** is **Agent** by default: an agent row's title is what its agent
+  says it is doing. **Tab name** names the row, and the header, by its herdr tab once the tab was
+  renamed (a tab herdr still names by its place keeps the agent's title), and the agent's title
+  opens the second line, where the tab is then not named again. It builds on herdr's own agents
+  panel, which already names a renamed tab beside the agent.
 - A DONE opened here draws as ready in the Agents list and its workspace roll-up, as herdr's
   own client does. This follows the Codex app's [unread completion dot](https://github.com/openai/codex/issues/50856).
   A finish read in one browser is read in every browser of the server (a phone and

@@ -315,6 +315,8 @@ export const JA: Record<string, string> = {
   "Activity keeps a waiting agent on top, then the one that changed last; herdr's own order is not changed": "アクティビティ順では、応答待ちのエージェントを一番上に、その後は最近変化した順に並べます。herdr 自体の順序は変わりません",
   "Workspaces": "ワークスペース順",
   "Activity": "アクティビティ順",
+  "Agent row title": "エージェント行のタイトル",
+  "Name an agent row by its agent's title, or by its tab's name once the tab is renamed, with the agent's title under it": "エージェント行をエージェントのタイトルで表示するか、タブの名前を変えた後はそのタブ名で表示し、エージェントのタイトルをその下に置きます",
   "Agent logos": "エージェントのロゴ",
   "Draw each agent's logo in its brand colors, or without color": "各エージェントのロゴをブランドの色、または色なしで表示します",
   "Color": "カラー",

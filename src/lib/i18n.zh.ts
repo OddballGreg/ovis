@@ -317,6 +317,8 @@ export const ZH: Record<string, string> = {
   "Activity keeps a waiting agent on top, then the one that changed last; herdr's own order is not changed": "按活动排序会把等待回应的代理放在最上面，其余按最近变化排序；herdr 自身的顺序不会改变",
   "Workspaces": "工作区顺序",
   "Activity": "按活动",
+  "Agent row title": "代理行标题",
+  "Name an agent row by its agent's title, or by its tab's name once the tab is renamed, with the agent's title under it": "用代理的标题命名代理行；标签页重命名后改用标签页名称，代理的标题显示在其下方",
   "Agent logos": "代理标志",
   "Draw each agent's logo in its brand colors, or without color": "用品牌颜色或无色显示每个代理的标志",
   "Color": "彩色",
