@@ -1,9 +1,10 @@
-import { expect, it } from "bun:test";
+import { expect, it, spyOn } from "bun:test";
 import { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import * as fs from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, truncateSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { agyCatalog, agyDatabasePath, parseAgyTranscript } from "./agy.ts";
+import { AgyUnavailable, agyCatalog, agyDatabasePath, parseAgyTranscript } from "./agy.ts";
 
 it("reads a stable rollback-journal catalog without creating side files", () => {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "agy-rollback-")));
@@ -44,6 +45,34 @@ it("reads a checkpointed WAL catalog without recreating missing side files", () 
     expect([...catalog]).toEqual([0]);
     expect(existsSync(`${dbPath}-wal`)).toBe(false);
     expect(existsSync(`${dbPath}-shm`)).toBe(false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+it.each([
+  ["database", 32 * 1024 * 1024 + 1, 0],
+  ["WAL", 8192, 32 * 1024 * 1024 + 1],
+  ["combined", 16 * 1024 * 1024, 16 * 1024 * 1024 + 1],
+] as const)("rejects an oversized %s before copying the catalog", (_name, dbBytes, walBytes) => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "agy-catalog-limit-")));
+  try {
+    const transcript = join(dir, "brain", "session", ".system_generated", "logs", "transcript_full.jsonl");
+    const dbPath = agyDatabasePath(transcript);
+    mkdirSync(dirname(dbPath), { recursive: true });
+    const writer = new Database(dbPath);
+    try {
+      writer.exec("PRAGMA journal_mode=WAL; CREATE TABLE steps(idx INTEGER PRIMARY KEY); INSERT INTO steps VALUES (0); PRAGMA wal_checkpoint(TRUNCATE);");
+      truncateSync(dbPath, dbBytes);
+      truncateSync(`${dbPath}-wal`, walBytes);
+      const reads = spyOn(fs, "readSync");
+      // A regression fails on its first write instead of materializing the sparse files.
+      const writes = spyOn(fs, "writeFileSync").mockImplementation(() => { throw new Error("unexpected snapshot write"); });
+      try {
+        expect(() => agyCatalog(transcript)).toThrow(AgyUnavailable);
+        expect(reads).toHaveBeenCalledTimes(1);
+        expect(reads.mock.calls[0]?.[1].byteLength).toBe(20);
+        expect(writes).not.toHaveBeenCalled();
+      } finally { writes.mockRestore(); reads.mockRestore(); }
+    } finally { writer.close(); }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

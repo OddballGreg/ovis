@@ -46,6 +46,7 @@ export function agyCatalog(path: string, beforeOpen?: () => void): Set<number> {
     beforeOpen?.();
     // Every source open is immutable, even if a writer switches journal modes
     // after the header read. Only the private snapshot may create side files.
+    // An incomplete WAL pair therefore exposes checkpointed rows only.
     let immutable = true;
     const descriptor = process.platform === "linux" || (process.platform === "darwin" && immutable) ? `/dev/fd/${fd}` : null;
     let name = descriptor ?? dbPath;
@@ -60,9 +61,13 @@ export function agyCatalog(path: string, beforeOpen?: () => void): Set<number> {
         if (!stat.isFile()) throw new AgyUnavailable();
         files.push({ path, fd: sideFd, stat });
       }
+      const snapshotFiles = files.slice(0, 2);
+      // Match the ledger's 32 MiB byte budget: 100,000 integer indices need
+      // under 1 MiB; larger payload-heavy stores should fall back, not be copied per poll.
+      if (snapshotFiles.reduce((bytes, file) => bytes + file.stat.size, 0n) > BigInt(SCAN_BYTES)) throw new AgyUnavailable();
       snapshot = mkdtempSync(join(tmpdir(), "ovis-agy-catalog-"));
       name = join(snapshot, "catalog.db");
-      for (const [index, file] of files.slice(0, 2).entries()) {
+      for (const [index, file] of snapshotFiles.entries()) {
         const target = openSync(index === 0 ? name : `${name}-wal`, "wx", 0o600);
         try {
           const bytes = Buffer.alloc(64 * 1024);
