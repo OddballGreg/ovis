@@ -1,6 +1,6 @@
 import "./test-herdr.ts";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, rmSync, readFileSync, renameSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, rmSync, readFileSync, realpathSync, renameSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium, type Browser, type Page } from "playwright-core";
@@ -14,7 +14,7 @@ import type { ServerMessage, SessionSnapshot } from "../shared/protocol.ts";
 
 type Status = "idle" | "working" | "done" | "blocked";
 type NativeRecord = Readonly<Record<string, unknown>>;
-const root = mkdtempSync(join(tmpdir(), "herdr-gjc-status-browser-"));
+const root = realpathSync(mkdtempSync(join(tmpdir(), "herdr-gjc-status-browser-")));
 const store = join(root, ".gjc", "agent", "sessions", "v2-fixture");
 const script = join(root, "gjc");
 const bindingsDirectory = join(root, ".gjc", "agent", GJC_NATIVE_DIRECTORY);

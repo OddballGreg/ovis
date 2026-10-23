@@ -43,6 +43,22 @@ export function recentProcessTable(read: () => Promise<ProcessRow[]> = windowsPr
   return entry.rows;
 }
 
+let freshReads = 0;
+let freshTable: { read: () => Promise<ProcessRow[]>; started: number; rows: Promise<ProcessRow[]> } | null = null;
+
+/**
+ * A fresh Windows process table for the final PID-reuse check. Concurrent lookups share a read only
+ * when it started after their own initial check (`after`), so N GJC panes start one PowerShell, not N.
+ */
+function freshProcessTable(read: () => Promise<ProcessRow[]>, after: number): Promise<ProcessRow[]> {
+  if (freshTable && freshTable.read === read && freshTable.started > after) return freshTable.rows;
+  const entry = { read, started: ++freshReads, rows: Promise.resolve().then(read) };
+  freshTable = entry;
+  const clear = () => { if (freshTable === entry) freshTable = null; };
+  void entry.rows.then(clear, clear);
+  return entry.rows;
+}
+
 /** A gjc process by its number and when it started: a number alone comes back for another process. */
 export type GjcProcess = { pid: number; started: number | null };
 
@@ -84,6 +100,7 @@ export function forgetGjcState(): void {
   for (const lookups of lookupsInFlight.values()) for (const lookup of lookups) lookup.cancelled = true;
   lookupsInFlight.clear();
   processTable = null;
+  freshTable = null;
 }
 
 /** Cancel a pane's in-flight native identity checks when its pane ends. */
@@ -257,12 +274,15 @@ async function foregroundProcesses(
   platform: string,
   options: GjcTranscriptOptions,
   fresh: boolean,
+  freshAfter = -1,
 ): Promise<GjcProcessIdentity[] | null> {
   const processInfo = info?.process_info;
   if (!processInfo) return null;
   if (platform === "win32") {
     const readTable = options.readProcessTable ?? windowsProcessTable;
-    const table = fresh ? readTable : () => recentProcessTable(readTable, (options.now ?? Date.now)());
+    const table = fresh
+      ? () => freshProcessTable(readTable, freshAfter)
+      : () => recentProcessTable(readTable, (options.now ?? Date.now)());
     const process = await gjcPidUnderShell(processInfo.shell_pid, platform, table);
     if (process === undefined) return null;
     if (process === null) return [];
@@ -332,6 +352,7 @@ async function lookupNativeTranscript(
     if (!initialInfo || token.cancelled) return null;
     const initial = await foregroundProcesses(initialInfo, platform, options, false);
     if (!initial || initial.length !== 1 || token.cancelled) return null;
+    const freshAfter = freshReads;
     const owner = initial[0]!;
 
     const binding = readGjcNativeBinding(home, owner.pid, options.now?.());
@@ -341,7 +362,7 @@ async function lookupNativeTranscript(
 
     const finalInfo = await readProcessInfo(paneId);
     if (!finalInfo || token.cancelled) return null;
-    const final = await foregroundProcesses(finalInfo, platform, options, true);
+    const final = await foregroundProcesses(finalInfo, platform, options, true, freshAfter);
     if (!final || final.length !== 1 || !sameProcess(owner, final[0]!, platform) || token.cancelled) return null;
 
     const current = readGjcNativeBinding(home, owner.pid, options.now?.());

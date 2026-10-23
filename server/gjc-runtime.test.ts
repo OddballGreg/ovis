@@ -287,6 +287,44 @@ it("uses a fresh Windows process tree for the final birth-identity check", async
   } finally { forgetGjcState(); f.done(); }
 });
 
+it("shares one fresh Windows process-table read between concurrent final checks", async () => {
+  forgetGjcState();
+  const f = nativeFixture();
+  try {
+    const path = f.sessionFile("session-a");
+    f.publish(f.record(200, "session-a", path));
+    const executable = "C:\\Users\\u\\AppData\\Local\\gjc\\gjc.exe";
+    const rows = [{ pid: 200, parent: 100, path: executable, commandLine: `"${executable}" --resume`, started: 1_000 }];
+    let tableReads = 0;
+    let infoReads = 0;
+    let release!: () => void;
+    let bothFinal!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const arrived = new Promise<void>((resolve) => { bothFinal = resolve; });
+    const options = {
+      platform: "win32",
+      now: f.options.now,
+      // Hold both lookups' final process_info reads until both arrive, so their final checks overlap.
+      processInfo: async () => {
+        if (++infoReads > 2) {
+          if (infoReads === 4) bothFinal();
+          await gate;
+        }
+        return { process_info: { shell_pid: 100, foreground_processes: [] } };
+      },
+      readProcessTable: async () => { tableReads += 1; return rows; },
+    };
+    const lookups = Promise.all([
+      gjcTranscriptForPane("pane-a", f.cwd, f.home, options),
+      gjcTranscriptForPane("pane-b", f.cwd, f.home, options),
+    ]);
+    await arrived;
+    release();
+    expect(await lookups).toEqual([realpathSync(path), realpathSync(path)]);
+    expect(tableReads).toBe(2);
+  } finally { forgetGjcState(); f.done(); }
+});
+
 it("cancels a running identity read when its pane ends", async () => {
   const f = nativeFixture();
   try {

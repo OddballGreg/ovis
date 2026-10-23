@@ -72,20 +72,31 @@ function nativeProcessStartedAt(pid: number): Promise<number | null> {
   return windowsProcessTable().then((rows) => rows.find((row) => row.pid === pid)?.started ?? null);
 }
 
+const recordKeys = ["version", "pid", "processStartedAt", "instanceId", "sequence", "updatedAt", "session"] as const;
+const sessionKeys = ["id", "path", "cwd"] as const;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  return Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+}
+
+// Accept only the record shape server/gjc-native.ts parseBinding accepts, so a record the server rejects is never taken as a live lease.
 function validBinding(value: unknown): value is GjcNativeBinding {
-  if (value === null || typeof value !== "object") return false;
-  const record = value as Partial<GjcNativeBinding>;
-  if (record.version !== 1 || !Number.isSafeInteger(record.pid) || (record.pid ?? 0) <= 0
-    || typeof record.processStartedAt !== "number" || !Number.isFinite(record.processStartedAt)
-    || typeof record.instanceId !== "string" || record.instanceId.length === 0
-    || !Number.isSafeInteger(record.sequence) || (record.sequence ?? 0) < 1
-    || typeof record.updatedAt !== "number" || !Number.isFinite(record.updatedAt)) return false;
-  if (record.session === null) return true;
-  const session = record.session;
-  return typeof session === "object" && session !== null
-    && typeof session.id === "string" && session.id.length > 0
-    && typeof session.path === "string" && session.path.length > 0
-    && typeof session.cwd === "string" && session.cwd.length > 0;
+  if (!isRecord(value) || !hasExactKeys(value, recordKeys)) return false;
+  if (value.version !== 1 || typeof value.pid !== "number" || !Number.isSafeInteger(value.pid) || value.pid <= 0
+    || typeof value.processStartedAt !== "number" || !Number.isSafeInteger(value.processStartedAt) || value.processStartedAt <= 0
+    || typeof value.instanceId !== "string" || value.instanceId.length === 0 || value.instanceId.length > 256 || /[\u0000-\u001f\u007f]/u.test(value.instanceId)
+    || typeof value.sequence !== "number" || !Number.isSafeInteger(value.sequence) || value.sequence < 1
+    || typeof value.updatedAt !== "number" || !Number.isSafeInteger(value.updatedAt) || value.updatedAt < value.processStartedAt) return false;
+  if (value.session === null) return true;
+  const session = value.session;
+  return isRecord(session) && hasExactKeys(session, sessionKeys)
+    && typeof session.id === "string" && session.id !== ""
+    && typeof session.path === "string" && isAbsolute(session.path)
+    && typeof session.cwd === "string" && isAbsolute(session.cwd);
 }
 
 const MAX_RECORD_BYTES = 16 * 1024;
