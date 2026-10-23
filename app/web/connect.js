@@ -18,7 +18,7 @@ let warned = "";
 async function open(text) {
   const url = parseAddress(text);
   if (url === null) { error.textContent = t("That is not an http or https address.", "http 또는 https 주소가 아닙니다."); input.focus(); return; }
-  if (publicHttp(url) && !savedOrigins.includes(url.origin) && warned !== url.href) {
+  if (publicHttp(url) && !savedOrigins.some((saved) => new URL(saved).origin === url.origin) && warned !== url.href) {
     warned = url.href;
     error.textContent = t(
       `${url.host} is not on a tailnet or a home network, so plain http would send the pairing code and everything you type across the internet unencrypted. Use its https address, or open it again to go ahead.`,

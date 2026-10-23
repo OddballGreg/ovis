@@ -9,8 +9,9 @@
   answers with an HTTP error (such as a 502 while Ovis is stopped there) instead of keeping that
   page and saving the PC. Its buttons also work on older Android WebViews.
 - The Android app leaves its data out of backups and moves to a new phone, so a paired PC's
-  sign-in cannot be restored elsewhere. Neither app writes pairing links to the device log any
-  more.
+  sign-in cannot be restored elsewhere.
+- Debug builds of both apps no longer write pairing links to the device log. Release builds
+  already had this logging turned off.
 
 ### Changed
 - The connect screen warns before opening a plain http address outside a tailnet or home

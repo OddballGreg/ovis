@@ -142,7 +142,7 @@ final class NavigationFailureProxy: NSObject, WKNavigationDelegate {
         }
         // the cancelled load ends in WebKit's "frame load interrupted", which is not reported
         decisionHandler(.cancel)
-        onFailure(webView, "HTTP \(response.statusCode) \(HTTPURLResponse.localizedString(forStatusCode: response.statusCode))")
+        onFailure(webView, "HTTP \(response.statusCode) \(HTTPURLResponse.localizedString(forStatusCode: response.statusCode).capitalized)")
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {

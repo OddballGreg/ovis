@@ -38,13 +38,18 @@ public class MainActivity extends BridgeActivity {
      * at theirs) to OvisBars, now and whenever it changes, so the system bars match the page.
      */
     private static final String BAR_COLOR_SCRIPT =
-        "if (window === window.top) addEventListener('DOMContentLoaded', () => {" +
+        "(() => {" +
+        "  if (window !== window.top) return;" +
+        "  const apply = () => {" +
         "  const meta = document.querySelector('meta[name=\"theme-color\"]');" +
         "  if (!meta) return;" +
-        "  const send = () => { if (meta.content) OvisBars.postMessage(meta.content); };" +
+        "  const send = () => { if (meta.content && window.OvisBars) OvisBars.postMessage(meta.content); };" +
         "  new MutationObserver(send).observe(meta, { attributes: true, attributeFilter: ['content'] });" +
         "  send();" +
-        "}, { once: true });";
+        "  };" +
+        "  if (document.readyState === 'loading') addEventListener('DOMContentLoaded', apply, { once: true });" +
+        "  else apply();" +
+        "})();";
 
     /** Whether the page itself (not a picture or a frame in it) failed since it started. */
     private boolean pageFailed;
@@ -80,6 +85,7 @@ public class MainActivity extends BridgeActivity {
                 .create();
         }
         super.onCreate(savedInstanceState);
+        paintBars(Color.rgb(18, 16, 14));
         String appOrigin = bridge.getScheme() + "://" + bridge.getHost();
         followThemeColor(host == null ? Collections.singleton(appOrigin) : new HashSet<>(Arrays.asList(appOrigin, origin)));
         if (host != null) {
@@ -115,7 +121,11 @@ public class MainActivity extends BridgeActivity {
                         // error.html on a WebView without HerdrErrorPage (no WEB_MESSAGE_LISTENER)
                         // asks by navigating to one of these app addresses instead
                         Uri url = request.getUrl();
-                        if (request.isForMainFrame() && appOrigin.equals(url.getScheme() + "://" + url.getHost())) {
+                        if (
+                            request.isForMainFrame() &&
+                            (appOrigin + "/error.html").equals(view.getUrl()) &&
+                            appOrigin.equals(url.getScheme() + "://" + url.getHost())
+                        ) {
                             if ("/_ovis/retry".equals(url.getPath())) {
                                 retry();
                                 return true;
@@ -179,29 +189,30 @@ public class MainActivity extends BridgeActivity {
 
     /**
      * Lets the pages of `origins` color the status and navigation bars with their theme-color.
-     * Without it the bars keep the theme's dark background (styles.xml) and the system's icons.
+     * Without it the bars keep the app's dark background and light icons.
      */
     private void followThemeColor(Set<String> origins) {
         if (
             !WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER) ||
             !WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
         ) return;
-        WebViewCompat.addWebMessageListener(
-            bridge.getWebView(),
-            "OvisBars",
-            origins,
-            (view, message, sourceOrigin, isMainFrame, replyProxy) -> {
-                if (!isMainFrame || message.getData() == null) return;
-                int color;
-                try {
-                    color = Color.parseColor(message.getData().trim());
-                } catch (IllegalArgumentException notAColor) {
-                    return; // a color Android cannot read (not #rrggbb or a name) leaves the bars as they are
+        try {
+            WebViewCompat.addWebMessageListener(
+                bridge.getWebView(),
+                "OvisBars",
+                origins,
+                (view, message, sourceOrigin, isMainFrame, replyProxy) -> {
+                    if (!isMainFrame || message.getData() == null) return;
+                    String color = message.getData().trim();
+                    if (!color.matches("#[0-9a-fA-F]{6}")) return;
+                    paintBars(Color.parseColor(color));
                 }
-                paintBars(color);
-            }
-        );
-        WebViewCompat.addDocumentStartJavaScript(bridge.getWebView(), BAR_COLOR_SCRIPT, origins);
+            );
+            WebViewCompat.addDocumentStartJavaScript(bridge.getWebView(), BAR_COLOR_SCRIPT, origins);
+        } catch (IllegalArgumentException rejectedOrigin) {
+            return; // Keep the default bars when WebView rejects an origin rule.
+        }
+        bridge.getWebView().evaluateJavascript(BAR_COLOR_SCRIPT, null);
     }
 
     /**
@@ -212,7 +223,7 @@ public class MainActivity extends BridgeActivity {
         barColor = color;
         Window window = getWindow();
         window.getDecorView().setBackgroundColor(color);
-        boolean lightBars = ColorUtils.calculateLuminance(color) > 0.5;
+        boolean lightBars = ColorUtils.calculateLuminance(color) > 0.18;
         WindowInsetsControllerCompat bars = WindowCompat.getInsetsController(window, window.getDecorView());
         bars.setAppearanceLightStatusBars(lightBars);
         bars.setAppearanceLightNavigationBars(lightBars);
