@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { paneCommands } from "../commands.ts";
-import { ancestorsToRepoRoot, customCommands, readFrontmatter, walkSkills } from "./walk.ts";
+import { ancestorsToRepoRoot, createWalkBudget, customCommands, readFrontmatter, walkSkills } from "./walk.ts";
 import { source as claude } from "./claude.ts";
 import { source as devin } from "./devin.ts";
 import type { WalkRules } from "./walk.ts";
@@ -48,7 +48,6 @@ describe("shared skill walk", () => {
       if (kind === "one-level") for (let entry = 0; entry < 200; entry++) put(join(root, `plain-${entry}`));
       const budget = { folders: 4096, entries: 128, reads: 1024 };
       const stats = spyOn(fs, "statSync");
-      const opens = spyOn(fs, "openSync");
       try {
         // When discovery visits the same real entries through many paths.
         if (kind === "commands") customCommands(root, "skill", budget);
@@ -56,7 +55,7 @@ describe("shared skill walk", () => {
         // Then the entry allowance bounds stats, including file-open checks.
         expect(stats.mock.calls.length).toBeLessThanOrEqual(128 + 1024 - budget.reads);
         expect(budget.entries).toBeLessThan(128);
-      } finally { stats.mockRestore(); opens.mockRestore(); }
+      } finally { stats.mockRestore(); }
     });
   }
 
@@ -97,9 +96,51 @@ describe("shared skill walk", () => {
         source.discover({ home, cwd: project, repoRoot: project, env: null, roots: {} });
         // Then the roots do not each receive a fresh allowance.
         expect(opens.mock.calls.length).toBeGreaterThan(0);
-        expect(opens.mock.calls.length).toBeLessThanOrEqual(1024);
+        expect(opens.mock.calls.length).toBeLessThanOrEqual(createWalkBudget().reads);
       } finally { opens.mockRestore(); }
     });
+  }
+
+  for (const count of [300, 1500]) {
+    for (const requireDescription of [true, false]) {
+      it(`lists all ${count} ordinary skills with requireDescription=${requireDescription}`, () => {
+        // Given a large, non-linked tree without optional ignore files.
+        const root = temp();
+        const names = Array.from({ length: count }, (_, index) => `skill-${String(index).padStart(4, "0")}`);
+        for (const name of names) put(join(root, name, "SKILL.md"), `---\nname: ${name}\ndescription: Present\n---\nBody\n`);
+        // When discovery uses its normal shared limits.
+        const rows = walkSkills(root, { ...recursive, requireDescription });
+        // Then absent ignore files do not displace ordinary catalog rows.
+        expect(rows.map(({ name }) => name).sort()).toEqual(names);
+      });
+    }
+  }
+
+  for (const [agent, source] of [["claude", claude], ["devin", devin]] as const) {
+    for (const count of [513, 1024, 4097]) {
+      it(`retains an ordered command prefix for ${agent} with ${count} files`, () => {
+        // Given ordinary commands, including metadata-hidden entries near the start and cap.
+        const home = temp();
+        const project = join(home, "repo");
+        const commands = join(project, ".claude", "commands");
+        put(join(project, ".git"));
+        for (let index = 0; index < count; index++) {
+          const hidden = index === 1 || index === 4095;
+          put(join(commands, `task-${String(index).padStart(4, "0")}.md`),
+            `---\nuser-invocable: ${!hidden}\ntriggers: [${hidden ? "model" : "user"}]\n---\nBody\n`);
+        }
+        const expected = fs.readdirSync(commands).slice(0, createWalkBudget().reads)
+          .filter((name) => name !== "task-0001.md" && name !== "task-4095.md").map((name) => name.slice(0, -3));
+        const opens = spyOn(fs, "openSync");
+        try {
+          // When metadata filtering and discovery reach the shared read limit.
+          const rows = source.discover({ home, cwd: project, repoRoot: project, env: null, roots: {} });
+          // Then the completed visible prefix stays intact, with no second read per command.
+          expect(rows.filter(({ source }) => source !== "builtin").map(({ name }) => name)).toEqual(expected);
+          expect(opens.mock.calls.length).toBeLessThanOrEqual(createWalkBudget().reads);
+        } finally { opens.mockRestore(); }
+      });
+    }
   }
 
   it("keeps one-level names, whole descriptions, and body fallbacks", () => {

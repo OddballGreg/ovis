@@ -2,7 +2,7 @@ import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "n
 import { basename, dirname, join, relative, sep } from "node:path";
 import type { CommandForm, SlashCommand } from "../../shared/protocol.ts";
 import type { AgentCommandSource } from "./index.ts";
-import { createWalkBudget, customCommands, environValue, parseJsonc, plainObject, readFrontmatter, walkSkills } from "./walk.ts";
+import { createWalkBudget, customCommands, environValue, parseJsonc, plainObject, walkSkills } from "./walk.ts";
 
 /**
  * Devin CLI 3000.11.92, cross-checked against https://cli.devin.ai/docs/changelog: imported
@@ -147,10 +147,8 @@ export const source: AgentCommandSource = {
         add(join(base, ".claude", "skills"), "claude", origin, true);
         if (origin === "project") {
           const root = join(base, ".claude", "commands");
-          for (const command of customCommands(root, "skill", budget)) {
-            if (budget.reads <= 0) break;
-            const fields = readFrontmatter(join(root, ...command.name.split(":")) + ".md", budget);
-            if (Array.isArray(fields?.triggers) && !fields.triggers.includes("user")) continue;
+          for (const command of customCommands(root, "skill", budget,
+            (fields) => !Array.isArray(fields.triggers) || fields.triggers.includes("user"))) {
             found.push({ namespace: "claude", command: { ...command, origin } });
           }
         }

@@ -1,7 +1,7 @@
 import { basename, dirname, join, resolve } from "node:path";
 import type { AgentCommandSource } from "./index.ts";
 import { readFileSync, realpathSync } from "node:fs";
-import { ancestorsToRepoRoot, createWalkBudget, customCommands, environValue, plainObject, readFrontmatter, walkSkills } from "./walk.ts";
+import { ancestorsToRepoRoot, createWalkBudget, customCommands, environValue, plainObject, walkSkills } from "./walk.ts";
 import type { WalkBudget } from "./walk.ts";
 import type { CommandForm, SlashCommand } from "../../shared/protocol.ts";
 
@@ -142,10 +142,9 @@ function claudeSkills(root: string, origin: SlashCommand["origin"], budget: Walk
 
 /** A command file's name is its path under the root with `/` as `:`, so the path follows from the name. */
 function claudeCommands(root: string, source: SlashCommand["source"], budget: WalkBudget, prefix?: string): SlashCommand[] {
-  return customCommands(root, source, budget)
+  // Command files take the same visibility metadata as skills, checked from the original read.
+  return customCommands(root, source, budget, (fields) => !isOff(fields["user-invocable"]))
     .map((command) => ({ command, path: join(root, `${command.name.split(":").join("/")}.md`) }))
-    // command files take the same frontmatter as skills, so `user-invocable: false` hides them too
-    .filter(({ path }) => budget.reads > 0 && !isOff(readFrontmatter(path, budget)?.["user-invocable"]))
     .map(({ command, path }) => ({ ...command, id: canonical(path), name: prefix ? `${prefix}:${command.name}` : command.name }));
 }
 

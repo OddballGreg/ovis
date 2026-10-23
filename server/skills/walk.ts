@@ -13,13 +13,14 @@ export interface WalkRules {
   /** Work remaining, shared by every walk given the same object. */
   readonly budget?: WalkBudget;
 }
-/** Mutable allowances for one discovery, including failed file-read attempts. */
+/** Mutable allowances for one discovery; absent optional ignore files are only probes. */
 export interface WalkBudget {
   folders: number;
   entries: number;
   reads: number;
 }
-export const createWalkBudget = (): WalkBudget => ({ folders: MAX_WALK_FOLDERS, entries: 32768, reads: 1024 });
+// Allows thousands of ordinary skills, including loaders that read metadata and body separately.
+export const createWalkBudget = (): WalkBudget => ({ folders: MAX_WALK_FOLDERS, entries: 32768, reads: 4096 });
 export interface WalkedSkill {
   readonly name: string;
   readonly description: string;
@@ -174,7 +175,10 @@ export function walkSkills(root: string, rules: WalkRules): WalkedSkill[] {
       for (const filename of [".gitignore", ".ignore", ".fdignore"]) {
         if (budget.reads <= 0) return result;
         budget.reads -= 1;
-        try { ignore.add(readFileSync(join(root, filename), "utf8")); } catch { /* optional ignore file */ }
+        try { ignore.add(readFileSync(join(root, filename), "utf8")); }
+        catch (error) {
+          if (error instanceof Error && "code" in error && error.code === "ENOENT") budget.reads += 1;
+        }
       }
     }
     const entries = readdirSync(root, { withFileTypes: true }).slice(0, budget.entries);
@@ -204,7 +208,10 @@ export function walkSkills(root: string, rules: WalkRules): WalkedSkill[] {
         if (budget.reads <= 0) return;
         budget.reads -= 1;
         try { ignore.add(readFileSync(join(directory, filename), "utf8"), prefix ? `${prefix}/` : ""); }
-        catch { continue; /* optional ignore file */ }
+        catch (error) {
+          if (error instanceof Error && "code" in error && error.code === "ENOENT") budget.reads += 1;
+          continue;
+        }
       }
       // Reserve entries before the SKILL.md scan and recursion, so every inspected entry counts.
       const entries = readdirSync(directory, { withFileTypes: true }).slice(0, budget.entries);
@@ -264,7 +271,7 @@ export function parseJsonc(text: string): unknown {
 }
 
 /** `budget`: work remaining, shared across skill and command roots in one discovery. */
-export function customCommands(root: string, source: SlashCommand["source"], budget = createWalkBudget()): SlashCommand[] {
+export function customCommands(root: string, source: SlashCommand["source"], budget = createWalkBudget(), include?: (fields: Readonly<Record<string, unknown>>) => boolean): SlashCommand[] {
   if (budget.folders <= 0 || budget.entries <= 0 || budget.reads <= 0 || !existsSync(root)) return [];
   const result: SlashCommand[] = [];
   // Guard only the current ancestry: sibling links can expose different command namespaces.
@@ -287,8 +294,11 @@ export function customCommands(root: string, source: SlashCommand["source"], bud
           const target = statSync(path);
           if (target.isDirectory()) visit(path);
           else if (target.isFile() && entry.name.endsWith(".md")) {
+            const markdown = readSkillText(path, budget);
+            // Finish visibility filtering from this read before spending the next allowance.
+            if (include && !include(parseFrontmatter(markdown) ?? {})) continue;
             const relativeName = relative(root, path).slice(0, -3).split(sep).join(":");
-            result.push({ name: relativeName, description: description(readSkillText(path, budget)), source, id: canonicalFile(path) });
+            result.push({ name: relativeName, description: description(markdown), source, id: canonicalFile(path) });
           }
         } catch { continue; }
       }
