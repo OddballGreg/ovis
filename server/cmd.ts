@@ -85,8 +85,8 @@ export async function cmdTranscriptPath(
   const agent = options.agent === undefined ? await agentGet(paneId).catch(() => null) : options.agent;
   if (agent?.agent !== "cmd") return null;
 
-  const cwd = (typeof agent.cwd === "string" && agent.cwd.length > 0 ? agent.cwd : null)
-    ?? (typeof agent.foreground_cwd === "string" ? agent.foreground_cwd : null);
+  const cwd = (typeof agent.foreground_cwd === "string" && agent.foreground_cwd.length > 0 ? agent.foreground_cwd : null)
+    ?? (typeof agent.cwd === "string" ? agent.cwd : null);
   if (!cwd) return null;
   const projectDir = defaultCmdProjectDir(cwd);
 
