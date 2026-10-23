@@ -7,4 +7,6 @@ if ! command -v bun >/dev/null 2>&1; then
   printf '%s\n' "Ovis: bun not found on PATH or in the usual install places (~/.bun/bin, ~/.local/bin, mise shims, Homebrew, /usr/local/bin); install it: curl -fsSL https://bun.sh/install | bash" >&2
   exit 127
 fi
+pinned=$(sed -n 's/.*"packageManager": *"bun@\([0-9][0-9.]*\)".*/\1/p' "$(dirname "$0")/../package.json")
+if [ -n "$pinned" ] && [ -x "$HOME/.bun/bin/bun-$pinned" ]; then exec "$HOME/.bun/bin/bun-$pinned" "$@"; fi
 exec bun "$@"
