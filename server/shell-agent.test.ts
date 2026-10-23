@@ -311,11 +311,18 @@ it("says why the login shell gave no PATH once each time the reason changes", as
 it("hung or oversized login probe is killed and reaped, and each miss says why", async () => {
   // a profile that hangs, with a child of its own
   const hung = fixture(`sleep 30 & echo $! > "${"$"}HOME/child.tmp"; mv "${"$"}HOME/child.tmp" "${"$"}HOME/child.pid"; echo $$ > "${"$"}HOME/shell.tmp"; mv "${"$"}HOME/shell.tmp" "${"$"}HOME/shell.pid"; wait`);
+  // stopped only once the profile has started both, so a slow start on a busy machine cannot end it first
+  const stop = new AbortController();
+  const stopping = loginPathProbe({ shell: hung.shell, env: hung.env, timeoutMs: 60_000 })(stop.signal);
+  const pids = [await written(join(hung.home, "shell.pid")), await written(join(hung.home, "child.pid"))];
+  stop.abort();
+  expect((await stopping).path).toBeNull();
+  for (const pid of pids) expect(await running(Number(pid))).toBe(false);
+  // the same hang outruns its time
   const started = Date.now();
   const timedOut = await once(loginPathProbe({ shell: hung.shell, env: hung.env, timeoutMs: 300 }));
   expect(timedOut.path).toBeNull();
   expect(Date.now() - started).toBeLessThan(5000);
-  for (const pid of [await written(join(hung.home, "shell.pid")), await written(join(hung.home, "child.pid"))]) expect(await running(Number(pid))).toBe(false);
 
   // a profile that prints more than 64 KiB, and then a PATH
   const noisy = fixture(`echo $$ > "${"$"}HOME/shell.pid"; head -c 200000 /dev/zero | tr '\\\\0' x`);
