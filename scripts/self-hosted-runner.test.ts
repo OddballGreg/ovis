@@ -6,6 +6,24 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const script = fileURLToPath(new URL("./self-hosted-runner/run.sh", import.meta.url));
+const jobStarted = fileURLToPath(new URL("./self-hosted-runner/job-started.sh", import.meta.url));
+
+function runJobStarted(eventName: string, payload: unknown) {
+  const tempDir = mkdtempSync(join(tmpdir(), "herdr-runner-hook-test-"));
+  try {
+    const eventPath = join(tempDir, "event.json");
+    writeFileSync(eventPath, JSON.stringify(payload));
+    const result = spawnSync("bash", [jobStarted], {
+      encoding: "utf8",
+      timeout: 5_000,
+      env: { PATH: process.env.PATH ?? "", GITHUB_EVENT_NAME: eventName, GITHUB_EVENT_PATH: eventPath, GITHUB_REPOSITORY: "devswha/ovis" },
+    });
+    expect(result.error).toBeUndefined();
+    return result;
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+}
 
 function runRunner(options: {
   count?: number;
@@ -130,6 +148,25 @@ describe.skipIf(process.platform === "win32")("self-hosted runner launcher", () 
     }
     const stopped = lines.findIndex((call) => call.startsWith(`docker stop`) && call.endsWith(` ${name}`));
     expect(stopped).toBeGreaterThan(Math.max(...lines.map((call, index) => (call.startsWith("docker stop") && !call.endsWith(` ${name}`) ? index : -1))));
+  });
+
+  it("runs a job from this repository", () => {
+    expect(runJobStarted("push", { ref: "refs/heads/main" }).status).toBe(0);
+    expect(runJobStarted("pull_request", { pull_request: { head: { repo: { full_name: "devswha/ovis" } } } }).status).toBe(0);
+    expect(runJobStarted("workflow_run", { workflow_run: { head_repository: { full_name: "devswha/ovis" } } }).status).toBe(0);
+  });
+
+  it("refuses a job carrying another repository's code before it runs", () => {
+    for (const [event, payload] of [
+      ["pull_request", { pull_request: { head: { repo: { full_name: "someone/ovis" } } } }],
+      ["pull_request_target", { pull_request: { head: { repo: { full_name: "someone/ovis" } } } }],
+      ["pull_request", { pull_request: { head: { repo: null } } }],
+      ["workflow_run", { workflow_run: { head_repository: { full_name: "someone/ovis" } } }],
+    ] as const) {
+      const result = runJobStarted(event, payload);
+      expect(result.status).not.toBe(0);
+      expect(result.stdout).toContain("::error::");
+    }
   });
 
   it("propagates a failed slot's status when multiple one-shot slots run", () => {
