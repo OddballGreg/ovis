@@ -1,6 +1,8 @@
 ### Fixed
 - The iOS app no longer keeps every page it left in memory: each Change PC used to leave the old
   web view behind.
+- The iOS app no longer shows a white screen while a page loads with the phone in light mode,
+  such as the seconds of a first launch.
 - The Android app's launch screen and system bars are dark like the app instead of white, and
   the bars take the color of the page's top bar, with icons that stand out on it.
 - The app's error page says why a PC could not be opened on Android too, and shows up when a PC
