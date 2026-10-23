@@ -28,7 +28,9 @@ interface D1Statement { bind(...values: unknown[]): { first<T>(): Promise<T | nu
 export interface Env {
   DB: { prepare(query: string): D1Statement };
   /** Cloudflare's Rate Limiting binding (wrangler.toml), keyed by the registering address */
-  REGISTER_LIMITER: { limit(options: { key: string }): Promise<{ success: boolean }> };
+  REGISTER_LIMITER: RateLimiter;
+  /** the backstop over all addresses together, asked only for a registration its address may make */
+  REGISTER_GLOBAL_LIMITER: RateLimiter;
   /** secret: the APNs auth key (.p8 file contents, PKCS #8 PEM) */
   APNS_KEY: string;
   /** secret: the ID Apple shows for that key */
@@ -38,6 +40,7 @@ export interface Env {
   /** var (wrangler.toml): the app's bundle ID */
   APNS_TOPIC: string;
 }
+interface RateLimiter { limit(options: { key: string }): Promise<{ success: boolean }> }
 type Environment = "production" | "sandbox";
 type Send = (url: string, init: RequestInit) => Promise<Response>;
 
@@ -202,9 +205,12 @@ export function readRegistration(body: unknown): Registration | null {
 async function register(request: Request, env: Env, nowSeconds: number): Promise<Response> {
   if (request.method !== "POST") return status(405, { allow: "POST" });
   // before any write: a registration proves nothing about the token, so made-up tokens must not
-  // fill the database. The address is the limiter's key only; it is not stored.
-  const { success } = await env.REGISTER_LIMITER.limit({ key: request.headers.get("cf-connecting-ip") ?? "" });
-  if (!success) return status(429, { "retry-after": "60" });
+  // fill the database. The address is the limiter's key only; it is not stored. The global cap is
+  // asked second, so one address over its own limit never uses up the cap every phone shares.
+  const perAddress = await env.REGISTER_LIMITER.limit({ key: request.headers.get("cf-connecting-ip") ?? "" });
+  if (!perAddress.success) return status(429, { "retry-after": "60" });
+  const global = await env.REGISTER_GLOBAL_LIMITER.limit({ key: "all" });
+  if (!global.success) return status(429, { "retry-after": "60" });
   if (!request.headers.get("content-type")?.startsWith("application/json")) return status(415);
   const bytes = await readBody(request, MAX_REGISTER_BYTES);
   if (bytes === null) return status(413);

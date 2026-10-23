@@ -22,18 +22,26 @@ const apnsPem = `-----BEGIN PRIVATE KEY-----\n${Buffer.from(await crypto.subtle.
 
 interface ApnsCall { url: string; headers: Record<string, string>; body: string }
 
-/** the relay over a real SQLite table, a registration limiter that lets through `allow`, and an APNs that answers `apnsAnswer` and records each call */
+/** a Rate Limiting binding that records each key it is asked about and lets through while `allow` */
+function fakeLimiter(name: string, asked: string[]) {
+  const limiter = { allow: true, limit: async ({ key }: { key: string }) => { asked.push(`${name}:${key}`); return { success: limiter.allow }; } };
+  return limiter;
+}
+
+/** the relay over a real SQLite table, fake registration limiters, and an APNs that answers `apnsAnswer` and records each call */
 function relay(keyId = "KEY1234567") {
   const db = new Database(":memory:");
   db.exec(schema);
   const limiterKeys: string[] = [];
-  let allow = true;
+  const perAddress = fakeLimiter("address", limiterKeys);
+  const global = fakeLimiter("global", limiterKeys);
   const env: Env = {
     DB: { prepare: (query) => ({ bind: (...values) => ({
       first: async <T>() => (db.query(query).get(...(values as (string | number | null)[])) ?? null) as T | null,
       run: async () => db.query(query).run(...(values as (string | number | null)[])),
     }) }) },
-    REGISTER_LIMITER: { limit: async ({ key }) => { limiterKeys.push(key); return { success: allow }; } },
+    REGISTER_LIMITER: perAddress,
+    REGISTER_GLOBAL_LIMITER: global,
     APNS_KEY: apnsPem, APNS_KEY_ID: keyId, APNS_TEAM_ID: "TEAM123456", APNS_TOPIC: "sh.ovis.app",
   };
   const calls: ApnsCall[] = [];
@@ -43,9 +51,8 @@ function relay(keyId = "KEY1234567") {
     return apnsAnswer();
   };
   return {
-    db, env, calls, limiterKeys,
+    db, env, calls, limiterKeys, perAddress, global,
     answer(next: () => Response) { apnsAnswer = next; },
-    limit(next: boolean) { allow = next; },
     handle: (request: Request, now = new Date()) => handle(request, env, now, send),
     rows: () => db.query("SELECT * FROM endpoints ORDER BY rowid").all() as Record<string, unknown>[],
   };
@@ -98,8 +105,8 @@ describe("push relay: registration", () => {
       id: idOf(endpoint), token: TOKEN, environment: "production", vapid_key: pcKey.publicKey,
       created_at: seconds, used_at: seconds, window_start: 0, window_count: 0,
     }]);
-    // the address only keys the limiter: it is not stored
-    expect(r.limiterKeys).toEqual(["203.0.113.9"]);
+    // the address only keys its limiter: it is not stored
+    expect(r.limiterKeys).toEqual(["address:203.0.113.9", "global:all"]);
     expect(JSON.stringify(r.rows())).not.toContain("203.0.113.9");
     // each registration is an endpoint of its own: one per PC, each pinned to its PC's key
     expect(await register(r, { vapid_key: otherPcKey.publicKey })).not.toBe(endpoint);
@@ -125,9 +132,9 @@ describe("push relay: registration", () => {
     expect(readRegistration({ token: TOKEN, environment: "sandbox", vapid_key: padded })).toEqual({ token: TOKEN, environment: "sandbox", vapid_key: pcKey.publicKey });
   });
 
-  test("a registration the limiter refuses writes nothing, whatever token it names", async () => {
+  test("a registration its address's limiter refuses writes nothing, whatever token it names, and leaves the global cap alone", async () => {
     const r = relay();
-    r.limit(false);
+    r.perAddress.allow = false;
     for (const token of [TOKEN, "b2".repeat(32), "c3".repeat(32)]) {
       const refused = await r.handle(registration({ token, vapid_key: pcKey.publicKey }));
       expect(refused.status).toBe(429);
@@ -136,8 +143,24 @@ describe("push relay: registration", () => {
     // a refused request is refused before its body is read
     expect((await r.handle(registration("not json"))).status).toBe(429);
     expect(r.rows()).toEqual([]);
-    expect(r.limiterKeys).toEqual(Array(4).fill("203.0.113.9"));
-    r.limit(true);
+    // one address over its limit never counts against the cap every phone shares
+    expect(r.limiterKeys).toEqual(Array(4).fill("address:203.0.113.9"));
+    r.perAddress.allow = true;
+    await register(r);
+    expect(r.rows()).toHaveLength(1);
+  });
+
+  test("the global cap refuses a registration its address may make, before any write", async () => {
+    const r = relay();
+    r.global.allow = false;
+    const refused = await r.handle(registration({ token: TOKEN, vapid_key: pcKey.publicKey }));
+    expect(refused.status).toBe(429);
+    expect(refused.headers.get("retry-after")).toBe("60");
+    // refused before its body is read: a malformed body is not a 400
+    expect((await r.handle(registration("not json"))).status).toBe(429);
+    expect(r.rows()).toEqual([]);
+    expect(r.limiterKeys).toEqual(["address:203.0.113.9", "global:all", "address:203.0.113.9", "global:all"]);
+    r.global.allow = true;
     await register(r);
     expect(r.rows()).toHaveLength(1);
   });

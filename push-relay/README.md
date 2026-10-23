@@ -32,10 +32,16 @@ token: the token itself never leaves the relay.
   keeps the 32 endpoints registered last, and registering a 33rd drops the oldest. An endpoint
   neither registered nor pushed to for 60 days is deleted by a daily cron; the PC's next push
   then gets `404` and drops the subscription, and the app registers again.
-- Registrations are limited per address before anything is written: 10 a minute per Cloudflare
-  location (Cloudflare's Rate Limiting binding, `REGISTER_LIMITER` in `wrangler.toml`); past that
-  the answer is `429` with `Retry-After: 60`. The address is the limiter's key only, and is not
-  stored.
+- Registrations are limited before anything is written, by Cloudflare's Rate Limiting bindings
+  (`wrangler.toml`), whose counts are per Cloudflare location and approximate (a burst can pass a
+  few more). Past either limit the answer is
+  `429` with `Retry-After: 60`.
+  - `REGISTER_LIMITER`: 10 a minute per address (`CF-Connecting-IP`). The address is the
+    limiter's key only, and is not stored.
+  - `REGISTER_GLOBAL_LIMITER`: 60 a minute from all addresses together, a backstop for many
+    addresses at once. It is asked only once an address's own limit lets a registration through,
+    so one address over its limit never uses up the cap every phone shares. One fixed key alone
+    would let a single abuser block every phone's registration.
 
 What registration does not do: it does not prove that the caller holds the token. Anyone who
 knows a phone's device token can register endpoints for it with a key of their own, push to it

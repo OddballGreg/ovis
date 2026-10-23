@@ -27,6 +27,16 @@ namespace_id = "1695"
   limit = 10
   period = 60
 
+# The backstop: registrations per minute from all addresses together, per Cloudflare location,
+# for many addresses at once. Asked only after an address's own limit lets a registration through.
+[[ratelimits]]
+name = "REGISTER_GLOBAL_LIMITER"
+namespace_id = "1696"
+
+  [ratelimits.simple]
+  limit = 60
+  period = 60
+
 [[d1_databases]]
 binding = "DB"
 database_name = "ovis-push-relay"
