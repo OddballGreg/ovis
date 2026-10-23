@@ -66,6 +66,11 @@ import { CLAUDE_LAUNCH_MODES, CODEX_LAUNCH_MODES, type ClaudeLaunchMode, type Co
 
 export interface Settings {
   terminalInputMode: "auto" | "line" | "direct";
+  /** on a phone, the terminal's input line is one short row and the key bar folds away behind a
+   *  button at the end of it (lib/compactInput.ts); off: the line and the bar as they always were */
+  compactTerminalInput: boolean;
+  /** whether the folded key bar is shown, as its button last left it on this device */
+  compactKeyBarShown: boolean;
   /** Kept for migration of the old fixed-order bar. New layouts use keyBarItems. */
   keyBarExtras: KeyBarExtra[];
   /** This device's terminal keys, sticky modifiers and exact chords, in display order. */
@@ -187,12 +192,12 @@ export type DiffStyle = (typeof DIFF_STYLES)[number];
 
 /** Raw custom text, key combinations and account keys are never copied. Requiring every other
  * Settings field in the projection makes a new field require an explicit collection decision.
- * fileOpen, webLinks, the launch modes, followHerdrFocus, composerNewTabButton and agentRowTitle are not
- * collected: the telemetry schema (shared/telemetry.ts) does not carry them. */
+ * fileOpen, webLinks, the launch modes, followHerdrFocus, composerNewTabButton, agentRowTitle and the
+ * compact input line are not collected: the telemetry schema (shared/telemetry.ts) does not carry them. */
 type TelemetrySourceSettings = Omit<Settings,
   "keyBarExtras" | "keyBarItems" | "shortcutOverrides" | "terminalFontFamily" | "chatFontFamily"
   | "quickReplies" | "usageOrder" | "usageHidden" | "fileOpen" | "webLinks" | "claudeLaunchMode" | "codexLaunchMode"
-  | "followHerdrFocus" | "composerNewTabButton" | "agentRowTitle">;
+  | "followHerdrFocus" | "composerNewTabButton" | "agentRowTitle" | "compactTerminalInput" | "compactKeyBarShown">;
 
 /** Compare structured custom settings by content against this app's built-in defaults. */
 function differsFromDefault(value: unknown, defaultValue: unknown): boolean {
@@ -267,7 +272,7 @@ export const SETTING_SCOPE = {
   agentRowTitle: "shared", agentMarks: "shared", autoSendQueued: "shared", showThinking: "shared", quickReplies: "shared",
   showQuickReplies: "shared", showUsage: "shared", usageCount: "shared",
   usageGlance: "shared", usageOrder: "shared", usageHidden: "shared", defaultView: "device", suggestionChip: "device",
-  terminalInputMode: "device", keyBarExtras: "device", keyBarItems: "device", shortcutOverrides: "device", density: "device",
+  terminalInputMode: "device", compactTerminalInput: "device", compactKeyBarShown: "device", keyBarExtras: "device", keyBarItems: "device", shortcutOverrides: "device", density: "device",
   terminalFontSize: "device",
   terminalWheelSpeed: "device", terminalFontFamily: "device", paneClipboard: "device", releasePaneAway: "device",
   // a desk that follows herdr's focus must not move a phone open on another pane
@@ -291,6 +296,8 @@ export function sharedSettings(settings: Settings): Partial<Record<SharedSetting
 
 export const DEFAULT_SETTINGS: Settings = {
   terminalInputMode: "auto",
+  compactTerminalInput: false,
+  compactKeyBarShown: false,
   keyBarExtras: ["alt"],
   keyBarItems: DEFAULT_KEY_BAR_ITEMS,
   shortcutOverrides: {},
@@ -463,6 +470,8 @@ export function sanitizeSettings(raw: unknown): Settings {
     : DEFAULT_KEY_BAR_ITEMS;
   return {
     terminalInputMode: record["terminalInputMode"] === "line" || record["terminalInputMode"] === "direct" ? record["terminalInputMode"] : "auto",
+    compactTerminalInput: typeof record["compactTerminalInput"] === "boolean" ? record["compactTerminalInput"] : DEFAULT_SETTINGS.compactTerminalInput,
+    compactKeyBarShown: typeof record["compactKeyBarShown"] === "boolean" ? record["compactKeyBarShown"] : DEFAULT_SETTINGS.compactKeyBarShown,
     keyBarExtras,
     keyBarItems: sanitizeKeyBarItems(record["keyBarItems"], keyBarFallback),
     shortcutOverrides: sanitizeShortcutOverrides(record["shortcutOverrides"]),

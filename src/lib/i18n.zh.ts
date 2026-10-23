@@ -813,6 +813,8 @@ export const ZH: Record<string, string> = {
   "Turn this on if this PC also shows herdr in a terminal window. A second after you switch to another window, this tab only watches the pane, so herdr's window keeps the pane at its own size instead of this window's. Click the tab to type again. While it watches, the pane is drawn at herdr's size and may not fill this window.": "如果这台电脑的终端窗口里也开着 herdr，请打开此项。切换到其他窗口一秒后，此标签页只查看窗格，herdr 窗口会按自己的尺寸而不是此窗口的尺寸保留窗格。点击标签页即可再次输入。查看期间窗格按 herdr 的尺寸绘制，可能不会填满此窗口。",
   "Follow herdr's focus": "跟随 herdr 的焦点",
   "When herdr moves to another pane, by a click in its window, a herdr command or a script, this device opens that pane too. Only on the PC open here, and only on this device.": "herdr 切换到另一个窗格时（在 herdr 窗口中点击、herdr 命令或脚本），此设备也会打开该窗格。仅适用于这里打开的 PC，且仅适用于此设备。",
+  "Compact input line": "紧凑输入框",
+  "On a phone, the input line is one short row and the key bar folds away behind a button at its end, so the terminal keeps more rows.": "在手机上，输入框缩为一行，按键栏收起到输入框末端的按钮后面，让终端多留几行。",
   "What should {agent} do in {folder}?": "要让 {agent} 在 {folder} 做什么？",
   "No conversation yet — say something below": "暂无对话。在下方说点什么吧",
   "terminal ended": "终端已结束",

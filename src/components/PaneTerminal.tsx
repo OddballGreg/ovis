@@ -14,6 +14,7 @@ import { PaneCachedContext, PanePresentedContext, PaneFollowContext, PaneShownCo
 import { disposeAfterPendingFrame } from "../lib/terminalDispose.ts";
 import { clipboardKey, hasModifiers, physicalKey, terminalChord, navigationSequence, keyFromData, ctrlEnterSequence, mirroredCtrlEnterKey, modifyOtherKeysLevel, NO_STICKY_MODIFIERS, type StickyModifiers } from "../lib/keys.ts";
 import { keyBarInputSequence, type KeyBarKeyItem } from "../lib/keyBar.ts";
+import { keyBarFolded } from "../lib/compactInput.ts";
 import { EMPTY_DRAFT, applyToDraft, draftIsEmpty, restoreDraft, type InputDraft } from "../lib/draft.ts";
 import { messageQueues } from "../lib/messageQueue.ts";
 import { pendingMessages } from "../lib/pendingMessages.ts";
@@ -2886,6 +2887,11 @@ export function PaneTerminal({
     updateSettings({ terminalInputMode: directTyping ? "line" : "direct" });
   }, [directTyping, updateSettings]);
 
+  const keyBarShown = settings.compactKeyBarShown;
+  const toggleKeyBar = useCallback(() => {
+    updateSettings({ compactKeyBarShown: !keyBarShown });
+  }, [keyBarShown, updateSettings]);
+
   // the input line keeps a tapped grid from raising the keyboard; typing straight into it gives it
   // back. Only turning direct typing on raises it: a pane or lens picked with it on does not.
   const directTypingRef = useRef(directTyping);
@@ -3271,6 +3277,13 @@ export function PaneTerminal({
   /> : null;
   // the input line's row, kept while the masked input stands in for it
   const lineSlot = presented && paneId !== null && !observing && !ended && inputLine;
+  // Compact input line: the key bar folds away behind the line's own button, and only while the
+  // line is there to bring it back (lib/compactInput.ts)
+  const compactInput = settings.compactTerminalInput;
+  const foldedKeyBar = keyBarFolded({ compact: compactInput, shown: keyBarShown, inputLine: lineSlot && !chatView && !secretActive });
+  // a held modifier goes with the bar that shows it: kept past the fold, an empty Send would
+  // go out as Ctrl+Enter with nothing on screen saying so
+  useLayoutEffect(() => { if (foldedKeyBar) clearModifiers(); }, [foldedKeyBar, clearModifiers]);
   // What floats from the slot may reach up to the grid's top and no further (TerminalInput.css):
   // in a short pane (a split, a phone in landscape with its keyboard up) a grown line or the masked
   // input would otherwise cover the find bar, or be clipped under the pane's frame
@@ -3646,10 +3659,11 @@ export function PaneTerminal({
           grid, and each change of its height resizes the shared pty. The masked input sits in this
           slot in the chat lens too (a box-less slot there, TerminalInput.css), so switching lenses
           keeps it mounted: a remount would drop what was typed and a send still on its way */}
-      {((!chatView && lineSlot) || secretInput) && <div ref={setInputSlot} className={`terminal-input-slot${!chatView && lineSlot ? "" : " is-empty"}`}>
-        {secretInput ?? (!chatView && lineSlot && !secretActive && <TerminalInput key={paneId} active={active} owner={paneStorageId(machineId, paneId)} onComposing={setLineComposing} connected={connected && !held} onSend={sendTerminalLine} onEnter={pressEnter} onFocus={reassertGrid} />)}
+      {((!chatView && lineSlot) || secretInput) && <div ref={setInputSlot} className={`terminal-input-slot${!chatView && lineSlot ? "" : " is-empty"}${!chatView && lineSlot && compactInput ? " is-compact" : ""}${foldedKeyBar ? " is-folded" : ""}`}>
+        {secretInput ?? (!chatView && lineSlot && !secretActive && <TerminalInput key={paneId} active={active} owner={paneStorageId(machineId, paneId)} onComposing={setLineComposing} connected={connected && !held} onSend={sendTerminalLine} onEnter={pressEnter} onFocus={reassertGrid}
+          compact={compactInput} keyBar={{ shown: !foldedKeyBar, onToggle: toggleKeyBar }} />)}
       </div>}
-      {presented && paneId !== null && !secretActive && !observing && !chatView && <KeyBar disabled={composing || !connected || !inputReady || held || ended} onKey={pressKey}
+      {presented && paneId !== null && !secretActive && !observing && !chatView && !foldedKeyBar && <KeyBar disabled={composing || !connected || !inputReady || held || ended} onKey={pressKey}
         holdScope={`${paneStorageId(machineId, paneId)}:${view}`}
         modifiers={modifiers} onToggleModifier={toggleModifier} items={settings.keyBarItems}
         {...(coarse ? { directTyping, onToggleDirect: toggleDirect, directDisabled: lineComposing } : {})} />}

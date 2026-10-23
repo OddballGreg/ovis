@@ -809,6 +809,8 @@ export const KO: Record<string, string> = {
   "Turn this on if this PC also shows herdr in a terminal window. A second after you switch to another window, this tab only watches the pane, so herdr's window keeps the pane at its own size instead of this window's. Click the tab to type again. While it watches, the pane is drawn at herdr's size and may not fill this window.": "이 PC의 터미널 창에서도 herdr를 띄워 쓴다면 켜세요. 다른 창으로 옮기고 1초가 지나면 이 탭은 패널을 보기만 해서, herdr 창이 패널을 이 창 크기가 아닌 자기 크기로 유지합니다. 다시 입력하려면 탭을 클릭하세요. 보는 동안 패널은 herdr 크기로 그려져 이 창을 다 채우지 않을 수 있습니다.",
   "Follow herdr's focus": "herdr 포커스 따라가기",
   "When herdr moves to another pane, by a click in its window, a herdr command or a script, this device opens that pane too. Only on the PC open here, and only on this device.": "herdr가 다른 패널로 옮겨 가면(herdr 창에서 클릭, herdr 명령, 스크립트) 이 기기도 그 패널을 엽니다. 여기서 연 PC에서만, 이 기기에서만 적용됩니다.",
+  "Compact input line": "간결한 입력창",
+  "On a phone, the input line is one short row and the key bar folds away behind a button at its end, so the terminal keeps more rows.": "휴대폰에서 입력창을 한 줄로 줄이고 키 바는 입력창 끝의 버튼 뒤로 접어, 터미널에 줄을 더 남깁니다.",
   "What should {agent} do in {folder}?": "{folder}에서 {agent}에게 무엇을 맡길까요?",
   "No conversation yet — say something below": "아직 대화가 없습니다. 아래에 말을 걸어 보세요",
   "terminal ended": "터미널 종료됨",
