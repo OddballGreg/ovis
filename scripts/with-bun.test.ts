@@ -152,6 +152,23 @@ describe.skipIf(process.platform === "win32")("Unix Bun discovery", () => {
     expect(result.out).toContain("Update it with: brew upgrade bun");
   });
 
+  it("preflight names Homebrew's update for a link into a Homebrew prefix that has no Cellar on the way", async () => {
+    const prefix = join(home, "opt", "homebrew"), bin = join(prefix, "bin"), outer = join(home, "outer");
+    tool(bin, "bun", "1.3.14");
+    mkdirSync(outer);
+    symlinkSync(join(bin, "bun"), join(outer, "bun"));
+    tool(outer, "node", "v22.0.0");
+    const utils = join(base, "utils");
+    mkdirSync(utils);
+    symlinkSync(Bun.which("readlink")!, join(utils, "readlink"));
+    const env = { PATH: `${tools}:${utils}`, WITH_BUN_EXTRA_DIRS: outer };
+    const brew = await run(["/bin/sh", preflight], { ...env, OVIS_TEST_BREW_PREFIXES: prefix });
+    expect(brew.out).toContain("Update it with: brew upgrade bun");
+    // the same link outside every Homebrew prefix keeps Bun's own update
+    const other = await run(["/bin/sh", preflight], { ...env, OVIS_TEST_BREW_PREFIXES: join(home, "elsewhere") });
+    expect(other.out).toContain("Update it with: bun upgrade");
+  });
+
   it("routes each Unix Bun entry through the launcher without changing its arguments", async () => {
     const manifest: Record<string, { command: string[]; platforms?: string[] }[]> =
       Bun.TOML.parse(readFileSync(join(root, "herdr-plugin.toml"), "utf8"));
