@@ -1,8 +1,9 @@
 /** Agy's append-only step ledger, reduced in physical order before shared paging. */
-import { Database } from "bun:sqlite";
+import { constants as sqliteConstants, Database } from "bun:sqlite";
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, fstatSync, openSync, readSync, realpathSync, statSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, openSync, readSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import type { ConversationPart, ConversationTurn } from "../shared/protocol.ts";
 import { trimOutput } from "./tool-output.ts";
 import { toolSummary } from "./transcript-records.ts";
@@ -28,15 +29,36 @@ export function agyDatabasePath(path: string): string {
 export function agyCatalog(path: string): Set<number> {
   const dbPath = agyDatabasePath(path);
   let db: Database | undefined;
+  let fd: number | undefined;
   try {
     if (realpathSync(dbPath) !== dbPath) throw new AgyUnavailable();
-    db = new Database(dbPath, { readonly: true });
+    fd = openSync(dbPath, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0) | (constants.O_NOFOLLOW ?? 0));
+    const before = fstatSync(fd, { bigint: true });
+    if (!before.isFile()) throw new AgyUnavailable();
+    // Like session-history's openDatabase: a checkpointed WAL store needs immutable=1
+    // when its side files are gone, or SQLite fails to open it or recreates them.
+    const header = Buffer.alloc(20);
+    const immutable = readSync(fd, header, 0, 20, 0) === 20 && header[18] === 2 && header[19] === 2
+      && !existsSync(`${dbPath}-wal`) && !existsSync(`${dbPath}-shm`);
+    const descriptor = process.platform === "linux" || (process.platform === "darwin" && immutable) ? `/dev/fd/${fd}` : null;
+    const flags = sqliteConstants.SQLITE_OPEN_READONLY | sqliteConstants.SQLITE_OPEN_URI;
+    const name = descriptor ?? dbPath;
+    db = new Database(immutable ? `${pathToFileURL(name).href}?immutable=1` : name,
+      descriptor === null ? flags | sqliteConstants.SQLITE_OPEN_NOFOLLOW : flags);
+    const opened = statSync(dbPath, { bigint: true });
+    if (opened.dev !== before.dev || opened.ino !== before.ino || realpathSync(dbPath) !== dbPath) throw new AgyUnavailable();
     db.exec("PRAGMA busy_timeout = 100");
     const rows = db.query<{ idx: number }, []>(`SELECT idx FROM steps ORDER BY idx LIMIT ${MAX_ENTRIES + 1}`).all();
+    if (immutable) {
+      const after = statSync(dbPath, { bigint: true }), pinned = fstatSync(fd, { bigint: true });
+      if (after.dev !== before.dev || after.ino !== before.ino || realpathSync(dbPath) !== dbPath
+        || pinned.size !== before.size || pinned.mtimeNs !== before.mtimeNs || pinned.ctimeNs !== before.ctimeNs
+        || existsSync(`${dbPath}-wal`) || existsSync(`${dbPath}-shm`)) throw new AgyUnavailable();
+    }
     if (rows.length > MAX_ENTRIES || rows.some((row) => !Number.isSafeInteger(row.idx) || row.idx < 0)) throw new AgyUnavailable();
     return new Set(rows.map((row) => row.idx));
   } catch { throw new AgyUnavailable(); }
-  finally { db?.close(); }
+  finally { db?.close(); if (fd !== undefined) closeSync(fd); }
 }
 
 function entry(line: string): Record<string, unknown> {

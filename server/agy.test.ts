@@ -1,6 +1,31 @@
 import { expect, it } from "bun:test";
-import { readFileSync } from "node:fs";
-import { parseAgyTranscript } from "./agy.ts";
+import { Database } from "bun:sqlite";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { agyCatalog, agyDatabasePath, parseAgyTranscript } from "./agy.ts";
+
+it("reads a checkpointed WAL catalog without recreating missing side files", () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "agy-wal-")));
+  try {
+    const transcript = join(dir, "brain", "session", ".system_generated", "logs", "transcript_full.jsonl");
+    const dbPath = agyDatabasePath(transcript);
+    mkdirSync(dirname(dbPath), { recursive: true });
+    const writer = new Database(dbPath);
+    try {
+      writer.exec("PRAGMA journal_mode=WAL; CREATE TABLE steps(idx INTEGER PRIMARY KEY); INSERT INTO steps VALUES (0); PRAGMA wal_checkpoint(TRUNCATE);");
+    } finally { writer.close(); }
+    rmSync(`${dbPath}-wal`, { force: true });
+    rmSync(`${dbPath}-shm`, { force: true });
+    expect([...readFileSync(dbPath).subarray(18, 20)]).toEqual([2, 2]);
+
+    const catalog = agyCatalog(transcript);
+
+    expect([...catalog]).toEqual([0]);
+    expect(existsSync(`${dbPath}-wal`)).toBe(false);
+    expect(existsSync(`${dbPath}-shm`)).toBe(false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
 
 it("keeps the recorded skill invocation without its expanded metadata", () => {
   const fixture = readFileSync(new URL("./fixtures/skill-invocations/agy.jsonl", import.meta.url), "utf8");
