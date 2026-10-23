@@ -387,28 +387,31 @@ describe("a Claude process's store source", () => {
     expect(await processClaudeSource(await standIn({}))).toEqual({ state: "absent" });
   });
 
-  it("ambiguous macOS ps output is no proof of a store", async () => {
+  it("macOS ps output proves an exported store only past herdr's argv, once, naming a directory", async () => {
     const store = tempDir();
     const home = tempDir();
-    // ps prints arguments and environment as one line: a value holding ` OTHER=` and a separate
-    // OTHER read the same, and so do an argument naming the variable and an assignment
-    const lines = [
-      `claude CLAUDE_CONFIG_DIR=${store} OTHER=value HOME=${home} PATH=/usr/bin\n`,
-      `claude --settings CLAUDE_CONFIG_DIR=${store} HOME=${home} PATH=/usr/bin\n`,
-      `claude HOME=${home} PATH=/usr/bin CLAUDE_CONFIG_DIR=${store}\n`,
-      `claude HOME=${home} PATH=/usr/bin\n`,
-    ];
+    // ps prints arguments and environment as one line: herdr's argv says where the arguments end
+    const lines: string[] = [];
     const spawned = spyOn(Bun, "spawn").mockImplementation(((command: string[]) => {
       expect(command[0]).toBe("/bin/ps");
       return { stdout: new Response(lines.shift()).body, exited: Promise.resolve(0), kill: () => {} };
     }) as unknown as typeof Bun.spawn);
     try {
-      const read = async () => { forgetClaudeSessions(); return processClaudeSource(4242, ["claude"], home, "darwin"); };
-      expect(await read()).toEqual({ state: "unreadable" });
-      expect(await read()).toEqual({ state: "unreadable" });
-      expect(await read()).toEqual({ state: "unreadable" });
-      // none named anywhere, beside the rest of an environment: none exported
-      expect(await read()).toEqual({ state: "absent" });
+      const read = async (line: string, argv = ["claude"]) => { forgetClaudeSessions(); lines.push(`${line}\n`); return processClaudeSource(4242, argv, home, "darwin"); };
+      // the usual case, a store exported to plain `claude`: that store
+      expect(await read(`claude CLAUDE_CONFIG_DIR=${store} HOME=${home} PATH=/usr/bin`)).toEqual({ state: "override", dir: store });
+      expect(await read(`claude HOME=${home} PATH=/usr/bin CLAUDE_CONFIG_DIR=${store}`)).toEqual({ state: "override", dir: store });
+      // exported empty: its own override, which Claude reads as its default store
+      expect(await read(`claude CLAUDE_CONFIG_DIR= HOME=${home} PATH=/usr/bin`)).toEqual({ state: "override", dir: "" });
+      // an argument naming the variable is an argument, not an assignment
+      expect(await read(`claude --settings CLAUDE_CONFIG_DIR=${store} HOME=${home} PATH=/usr/bin`, ["claude", "--settings", `CLAUDE_CONFIG_DIR=${store}`])).toEqual({ state: "absent" });
+      // a line that does not start with herdr's argv, two assignments, or a value naming no directory: no proof
+      expect(await read(`node cli.js CLAUDE_CONFIG_DIR=${store} HOME=${home} PATH=/usr/bin`)).toEqual({ state: "unreadable" });
+      expect(await read(`claude CLAUDE_CONFIG_DIR=${store} HOME=${home} CLAUDE_CONFIG_DIR=${home} PATH=/usr/bin`)).toEqual({ state: "unreadable" });
+      expect(await read(`claude CLAUDE_CONFIG_DIR=${join(store, "missing")} HOME=${home} PATH=/usr/bin`)).toEqual({ state: "unreadable" });
+      // none named anywhere, beside the rest of an environment: none exported; with no environment shown, no proof
+      expect(await read(`claude HOME=${home} PATH=/usr/bin`)).toEqual({ state: "absent" });
+      expect(await read("claude --resume")).toEqual({ state: "unreadable" });
     } finally { spawned.mockRestore(); }
   });
 
@@ -426,9 +429,37 @@ describe("a Claude process's store source", () => {
     // the pane's shell may have dropped the variable: herdr's own environment is what a new tab gets
     expect(await herdrLaunchSource(join(root, "exported.sock"))).toEqual({ state: "override", dir: store });
     expect(await herdrLaunchSource(join(root, "none.sock"))).toEqual({ state: "absent" });
-    // no server on the socket, or a platform where it is not read: no proof
+    // no server on the socket: no proof
     expect(await herdrLaunchSource(join(root, "nobody.sock"))).toEqual({ state: "unreadable" });
-    expect(await herdrLaunchSource(join(root, "none.sock"), "darwin")).toEqual({ state: "unreadable" });
+  });
+
+  it("macOS and Windows take the bridge server's own environment for the one a new tab inherits", async () => {
+    // herdr's environment cannot be found there: none exported to the bridge is none for the new tab
+    const store = tempDir();
+    for (const platform of ["darwin", "win32"]) {
+      expect(await herdrLaunchSource("/nowhere.sock", platform, "/proc", {})).toEqual({ state: "absent" });
+      expect(await herdrLaunchSource("/nowhere.sock", platform, "/proc", { CLAUDE_CONFIG_DIR: store })).toEqual({ state: "override", dir: store });
+      expect(await herdrLaunchSource("/nowhere.sock", platform, "/proc", { CLAUDE_CONFIG_DIR: join(store, "missing") })).toEqual({ state: "unreadable" });
+    }
+  });
+
+  it.skipIf(process.platform === "win32")("reads herdr's environment once per listening socket", async () => {
+    // a /proc of its own: herdr (pid 77) holds the listening socket's inode
+    const proc = tempDir();
+    const socket = "/run/herdr.sock";
+    const table = (inode: number) => `Num RefCount Protocol Flags Type St Inode Path\n0000: 00000002 00000000 00010000 0001 01 ${inode} ${socket}\n`;
+    mkdirSync(join(proc, "net"));
+    writeFileSync(join(proc, "net", "unix"), table(4100));
+    mkdirSync(join(proc, "77", "fd"), { recursive: true });
+    symlinkSync("socket:[4100]", join(proc, "77", "fd", "3"));
+    writeFileSync(join(proc, "77", "environ"), "HOME=/home/u\0PATH=/usr/bin\0");
+    expect(await herdrLaunchSource(socket, "linux", proc)).toEqual({ state: "absent" });
+    // the same socket: the answer is kept, with no walk of the processes (herdr's own is gone from this /proc)
+    rmSync(join(proc, "77"), { recursive: true });
+    expect(await herdrLaunchSource(socket, "linux", proc)).toEqual({ state: "absent" });
+    // a restarted herdr listens on a new socket: read again
+    writeFileSync(join(proc, "net", "unix"), table(4200));
+    expect(await herdrLaunchSource(socket, "linux", proc)).toEqual({ state: "unreadable" });
   });
 
   it.skipIf(!NATIVE)("unreadable Claude environment is not a proven absent override", async () => {
@@ -462,6 +493,9 @@ describe("a Claude process's store source", () => {
     expect([implicit?.dir, explicit?.dir, empty?.dir]).toEqual([join(home, ".claude"), join(home, ".claude"), join(home, ".claude")]);
     expect([implicit?.env, explicit?.env, empty?.env]).toEqual([null, { CLAUDE_CONFIG_DIR: join(home, ".claude") }, { CLAUDE_CONFIG_DIR: "" }]);
     expect(new Set([implicit?.key, explicit?.key, empty?.key]).size).toBe(3);
+    // one folder all the same: one place, where both would write one transcript
+    expect(new Set([implicit?.place, explicit?.place, empty?.place]).size).toBe(1);
+    expect(implicit?.place).not.toBe(implicit?.key);
     for (const key of [implicit?.key, explicit?.key, empty?.key]) expect(key).toMatch(/^[0-9a-f]{24}$/);
     // the key names the store, not the path: another spelling of the same directory is the same key
     symlinkSync(join(home, ".claude"), join(home, "link"));
@@ -637,12 +671,14 @@ describe("a Windows Claude's store", () => {
     expect(claudeStoreKey("C:\\a", { dev: 7n, ino: 42n }, win32)).toBe(claudeStoreKey("\\\\?\\D:\\b", { dev: 7n, ino: 42n }, win32));
   });
 
-  it("tells a ~/.claude found by its PID record from an override, which Resume needs and the record cannot say", async () => {
+  it("tells a ~/.claude found by its PID record from an override, and resumes it with none exported", async () => {
     const dir = home();
     record(join(dir, ".claude"));
     expect(await processClaudeSource(PID, [CLAUDE_EXE], dir, "win32", table)).toEqual({ state: "store", dir: join(dir, ".claude") });
+    // how it was chosen cannot be told: none exported reaches ~/.claude again, the default setup's Resume
     const store = await claudeStoreOf({ state: "store", dir: join(dir, ".claude") }, dir, {});
-    expect(store?.env).toBe("unsupported");
+    expect(store?.env).toBeNull();
+    expect(store?.dir).toBe(join(dir, ".claude"));
     forgetClaudeSessions();
     rmSync(join(dir, ".claude"), { recursive: true });
     record(join(dir, ".claude-second"));

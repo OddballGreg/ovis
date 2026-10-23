@@ -10,15 +10,18 @@
  * pane and store: POST /api/sessions/resume finds the store again, refuses one that changed, and
  * starts the session in it. A pane herdr reports processes for and no Claude among them has the
  * server's default store; one whose processes or store cannot be told gets an error, never the
- * default store. A source with no CLAUDE_CONFIG_DIR exported is bound only where herdr's own
- * environment, which a new tab inherits, proves none either (claude-store.ts herdrLaunchSource).
+ * default store. On Windows herdr names only the pane's shell, so its Claude is looked for under
+ * `shell_pid` in the process table. A source with no CLAUDE_CONFIG_DIR exported is bound only where
+ * the environment a new tab inherits exports none either (claude-store.ts herdrLaunchSource).
  */
 import type { SessionHistoryResponse, SessionResumeResponse, SessionSnapshot } from "../shared/protocol.ts";
-import { claudeStoreOf, herdrLaunchSource, paneClaudeSource, type ClaudeSource, type PaneProcess } from "./claude-store.ts";
+import { claudeStoreOf, herdrLaunchSource, isClaudeProcess, paneClaudeSource, type ClaudeSource, type PaneProcess } from "./claude-store.ts";
 import { agentLaunch } from "./agent-launch.ts";
-import { herdrSocketPath, paneProcessInfo, sessionSnapshot, tabCreate } from "./herdr/client.ts";
+import { recentProcessTable } from "./gjc-runtime.ts";
+import { herdrSocketPath, paneProcessInfo, sessionSnapshot, tabClose, tabCreate } from "./herdr/client.ts";
 import { badRequest, errorResponse, jsonResponse, readJsonObject } from "./http.ts";
 import { isSessionHistoryAgent, listSessions, type SessionHistoryOptions } from "./session-history.ts";
+import { descendantProcesses, type ProcessRow } from "./windows-processes.ts";
 
 export const SESSION_HISTORY_PATH = "/api/sessions/history";
 export const SESSION_RESUME_PATH = "/api/sessions/resume";
@@ -34,6 +37,13 @@ interface StoreOptions {
   paneProcesses?: (paneId: string) => Promise<PaneProcesses | undefined>;
   /** the store source a new herdr tab inherits (tests hand in their own) */
   launchSource?: () => Promise<ClaudeSource>;
+  /** the platform and Windows process table a pane's Claude is looked for in (tests hand in their own) */
+  platform?: string;
+  table?: () => Promise<ProcessRow[]>;
+  /** the tab a resume makes, its Claude's start, and the tab's close (tests hand in their own) */
+  tabs?: { create: typeof tabCreate; start: typeof agentLaunch; close: typeof tabClose };
+  /** how long a resumed Claude is waited for to say its store (tests shorten it) */
+  launchCheckMs?: number;
 }
 
 const CLAUDE_SESSION = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -63,17 +73,69 @@ export function workspaceFolder(snapshot: Snapshot, workspaceId: string): string
   return null;
 }
 
-/** The Claude store of a pane (claude-store.ts claudeStoreOf); null when it cannot be told. */
-async function paneStore(paneId: string, options: StoreOptions): Promise<{ store: NonNullable<Awaited<ReturnType<typeof claudeStoreOf>>> } | null> {
+const isClaude = (entry: PaneProcess) => isClaudeProcess({ name: entry.name ?? undefined, argv0: entry.argv0 ?? undefined, argv: entry.argv ?? undefined });
+
+/**
+ * The Claude processes under a Windows pane's shell, from the process table: the nearest one, and
+ * any other not started by it (two of them: which one a session belongs to cannot be told). Null
+ * when the table says nothing, which is no proof that no Claude runs there.
+ */
+async function windowsPaneClaude(shellPid: number, table: () => Promise<ProcessRow[]>): Promise<PaneProcess[] | null> {
+  const rows = await table();
+  if (rows.length === 0) return null;
+  const claude = descendantProcesses(rows, shellPid).filter(isClaude);
+  const first = claude[0];
+  if (first === undefined) return [];
+  const below = new Set(descendantProcesses(rows, first.pid).map((entry) => entry.pid));
+  return claude.filter((entry) => entry === first || !below.has(entry.pid));
+}
+
+/**
+ * The Claude store of a pane (claude-store.ts claudeStoreOf), and whether a Claude was found there
+ * (no Claude: the server's default store); null when it cannot be told.
+ */
+async function paneStore(paneId: string, options: StoreOptions): Promise<{ store: NonNullable<Awaited<ReturnType<typeof claudeStoreOf>>>; claude: boolean } | null> {
   let processes: PaneProcesses | undefined;
   try { processes = await (options.paneProcesses ?? herdrPaneProcesses)(paneId); } catch { return null; }
   // only processes herdr reported say there is no Claude: an answer without them is no answer
-  const foreground = processes?.foreground_processes;
+  let foreground = processes?.foreground_processes;
   if (processes === undefined || !Array.isArray(foreground) || foreground.length === 0) return null;
+  const platform = options.platform ?? process.platform;
+  const table = options.table ?? recentProcessTable;
+  if (platform === "win32" && !foreground.some(isClaude)) {
+    // herdr names only the shell on Windows, even while Claude runs in it
+    if (typeof processes.shell_pid !== "number") return null;
+    let below: PaneProcess[] | null;
+    try { below = await windowsPaneClaude(processes.shell_pid, table); } catch { return null; }
+    if (below === null) return null;
+    foreground = below;
+  }
   const home = options.stores?.home ?? process.env["HOME"] ?? "";
-  const store = await claudeStoreOf(await paneClaudeSource(foreground, home), home, options.stores?.env ?? process.env);
-  return store === null ? null : { store };
+  const source = await paneClaudeSource(foreground, home, platform, table);
+  const store = await claudeStoreOf(source, home, options.stores?.env ?? process.env);
+  return store === null ? null : { store, claude: source !== null };
 }
+
+/**
+ * The store the Claude a resume started in `paneId` came up on, once it says one; null when it
+ * does not within `launchCheckMs`.
+ */
+async function startedStore(paneId: string, options: StoreOptions): Promise<NonNullable<Awaited<ReturnType<typeof paneStore>>>["store"] | null> {
+  const deadline = Date.now() + (options.launchCheckMs ?? 15_000);
+  for (;;) {
+    const found = await paneStore(paneId, options);
+    if (found?.claude) return found.store;
+    if (Date.now() >= deadline) return null;
+    await Bun.sleep(200);
+  }
+}
+
+/**
+ * Whether a started Claude came up on the listed store: the same key, or, where its store was found
+ * by its Windows PID record (which cannot say how the store was chosen), the same folder.
+ */
+const sameStore = (landed: { key: string; place: string; chosen: boolean }, listed: { key: string; place: string }) =>
+  landed.key === listed.key || (!landed.chosen && landed.place === listed.place);
 
 /** The listing options with Claude's store set to `dir`. */
 const inStore = (stores: SessionHistoryOptions | undefined, dir: string): SessionHistoryOptions => ({ ...stores, env: { ...(stores?.env ?? process.env), CLAUDE_CONFIG_DIR: dir } });
@@ -92,9 +154,12 @@ export async function handleSessionHistoryRequest(request: Request, url: URL, op
   if (!snapshot.workspaces.some((entry) => entry.workspace_id === workspaceId)) {
     return jsonResponse({ error: { code: "workspace_not_found", message: "no such workspace" } }, 404);
   }
-  // the pane is checked before any store is read: a pane of another workspace lists nothing
-  if (paneId !== null && !snapshot.panes.some((pane) => pane.pane_id === paneId && pane.workspace_id === workspaceId)) {
-    return badRequest("pane_not_in_workspace", "pane_id must name a pane of the workspace");
+  // the pane is checked before any store is read: a pane of another workspace lists nothing, and a
+  // pane that is gone is a stale source, as the resume route answers it
+  if (paneId !== null) {
+    const pane = snapshot.panes.find((entry) => entry.pane_id === paneId);
+    if (pane === undefined) return refuse(409, "stale_source", "the pane the list was asked for is gone: list the sessions again");
+    if (pane.workspace_id !== workspaceId) return badRequest("pane_not_in_workspace", "pane_id must name a pane of the workspace");
   }
   const cwd = workspaceFolder(snapshot, workspaceId);
   if (cwd === null) return jsonResponse({ error: { code: "no_folder", message: "the workspace has no folder to list sessions for" } }, 409);
@@ -104,7 +169,7 @@ export async function handleSessionHistoryRequest(request: Request, url: URL, op
     if (found === null) return storeUnknown();
     const { store } = found;
     // a store whose choice cannot be repeated in a new tab is listed without a source: its Resume is withheld
-    const repeatable = store.env === "unsupported" ? false : store.env !== null || await launchKeepsAbsence(options);
+    const repeatable = store.env !== null || await launchKeepsAbsence(options);
     const source = repeatable ? { pane_id: paneId, store_key: store.key } : null;
     sessions = listSessions("claude", cwd, inStore(options.stores, store.dir)).map((row) => row.resume === null || source === null ? row : { ...row, resume: { ...row.resume, source } });
   } else {
@@ -127,13 +192,16 @@ function reportsSession(pane: Snapshot["panes"][number], id: string): boolean {
  * POST /api/sessions/resume (SessionResumeRequest): one listed Claude session, started in the store
  * its row was listed from. The store is found again from the pane: a pane gone, moved or now on
  * another store is 409 stale_source, one that cannot be told 409 claude_store_unknown, and nothing
- * is created for either. A pane of the workspace that reports the session and is on the same store
- * is answered `opened` (the client selects it; herdr's focus is not moved). Otherwise a new tab gets
- * the session's `claude --resume`, with only the CLAUDE_CONFIG_DIR the source had exported in its
- * environment. A source with none exported is started with none, and only where herdr's own
- * environment proves it hands none down (herdrLaunchSource); a source whose choice cannot be
- * repeated (that, or a Windows ~/.claude, where an override cannot be told from none) is 409
- * launch_unsupported before any tab is made.
+ * is created for either. A pane of the workspace that reports the session from the same store
+ * folder (however that folder was chosen: both would write one transcript) is answered `opened`
+ * (the client selects it; herdr's focus is not moved). Otherwise a new tab gets the session's
+ * `claude --resume`, with only the CLAUDE_CONFIG_DIR the source had exported in its environment. A
+ * source with none exported is started with none, and only where the environment a new tab
+ * inherits exports none either (herdrLaunchSource); otherwise 409 launch_unsupported before any tab
+ * is made. The tab's shell can still export the variable itself (a startup file): the started
+ * Claude's store is read back, and one on another store has its tab closed and is 409
+ * launch_store_changed; one that does not say its store in time is closed too, 409
+ * launch_store_unknown.
  */
 export async function handleSessionResumeRequest(request: Request, options: { readOnly: boolean; extendTimeout?: () => void } & StoreOptions): Promise<Response> {
   if (request.method !== "POST") return badRequest("method_not_allowed", "use POST");
@@ -164,15 +232,26 @@ export async function handleSessionResumeRequest(request: Request, options: { re
   for (const pane of snapshot.panes) {
     if (pane.workspace_id !== workspaceId || !reportsSession(pane, sessionId)) continue;
     const showing = pane.pane_id === paneId ? found : await paneStore(pane.pane_id, options);
-    if (showing?.store.key === store.key) return jsonResponse({ action: "opened", workspace_id: workspaceId, pane_id: pane.pane_id } satisfies SessionResumeResponse);
+    if (showing?.store.place === store.place) return jsonResponse({ action: "opened", workspace_id: workspaceId, pane_id: pane.pane_id } satisfies SessionResumeResponse);
   }
-  if (store.env === "unsupported") return refuse(409, "launch_unsupported", "this Claude's store cannot be chosen again for a new tab");
-  // none exported: herdr's own environment, which the new tab inherits, must hand none down
+  // none exported: the environment the new tab inherits must hand none down
   if (store.env === null && !await launchKeepsAbsence(options)) return refuse(409, "launch_unsupported", "a new tab here would not start Claude in the same store");
   options.extendTimeout?.();
+  const tabs = options.tabs ?? { create: tabCreate, start: agentLaunch, close: tabClose };
   try {
-    const created = await tabCreate({ workspaceId, cwd, ...(store.env === null ? {} : { env: store.env }) });
-    const launched = await agentLaunch(created.root_pane.pane_id, { kind: "claude", args: ["--resume", sessionId] });
+    const created = await tabs.create({ workspaceId, cwd, ...(store.env === null ? {} : { env: store.env }) });
+    const launched = await tabs.start(created.root_pane.pane_id, { kind: "claude", args: ["--resume", sessionId] });
+    if (launched.agent_started) {
+      const landed = await startedStore(created.root_pane.pane_id, options);
+      if (landed === null) {
+        await tabs.close(created.tab.tab_id);
+        return refuse(409, "launch_store_unknown", "the new tab's Claude did not say its store in time, so its tab was closed");
+      }
+      if (!sameStore(landed, store)) {
+        await tabs.close(created.tab.tab_id);
+        return refuse(409, "launch_store_changed", "the new tab's shell chose another Claude store, so its tab was closed");
+      }
+    }
     return jsonResponse({ action: "created", workspace_id: created.tab.workspace_id, pane_id: created.root_pane.pane_id, ...launched } satisfies SessionResumeResponse);
   } catch (error) {
     return errorResponse(error);

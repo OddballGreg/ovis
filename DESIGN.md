@@ -1431,12 +1431,12 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
   line (`.session-status`) is kept one line high under every non-empty list, empty until it says
   **Resuming…**, **Reading sessions…** or why the list was read again, so no row moves under the
   pointer when it speaks. A pane whose store cannot be told (herdr reports none of its processes,
-  two Claudes in front of it, an unreadable environment, or a macOS `ps` line that cannot bound
-  the exported value) lists nothing and says why in words, with the next step: one Claude in the
-  pane, its store folder there, then open the list again. A row its bridge bound to no store (an
-  older bridge, or a store a new tab would not repeat: none exported by the pane's Claude while
-  herdr's own environment, which a new tab inherits, exports one or cannot be read, as on macOS
-  and Windows) shows a quiet **Resume unavailable** pill
+  two Claudes in front of it, an unreadable environment, or a macOS `ps` line showing the variable
+  more than once or naming no folder) lists nothing and says why in words, with the next step: one
+  Claude in the pane, its store folder there, then open the list again. A row its bridge bound to
+  no store (an older bridge, or a store a new tab would not repeat: none exported by the pane's
+  Claude while the environment a new tab inherits exports one; that is herdr's own on Linux and
+  the bridge's elsewhere) shows a quiet **Resume unavailable** pill
   instead of the button: no store selector is added, and nothing is started in the default store
   in its place. This keeps the Codex CLI and Claude Code pickers' one-session-per-row design;
   Claude Code itself only ever lists the store it runs on, which is what binding to the pane does.

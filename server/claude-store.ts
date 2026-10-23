@@ -75,6 +75,9 @@ export type ClaudeSource =
 /** What readClaudeSource found, by pid and argv, and when: a process's environment does not change. */
 const processDirs = new Map<string, { read: SourceRead; at: number }>();
 const PROCESS_DIR_TTL_MS = 30_000;
+/** A read that told no store is kept only this long: a store folder made a moment later answers on the next try. */
+const PROCESS_MISS_TTL_MS = 2_000;
+const missed = (read: SourceRead) => read.source.state === "unreadable" || read.source.state === "ambiguous";
 
 /**
  * The CLAUDE_CONFIG_DIR in one `ps -E -o command=` line: the last assignment, to the next `NAME=`.
@@ -167,7 +170,29 @@ async function environSource(environ: string): Promise<SourceRead> {
   return { source: named.length === 0 ? { state: "absent" } : await overrideSource(named[0]!), legacy };
 }
 
-async function readClaudeSource(pid: number, home: string, platform: string, table: () => Promise<ProcessRow[]>): Promise<SourceRead> {
+/**
+ * A macOS `ps -E -o command=` line as a source. ps prints the arguments, then the environment, as
+ * one line: herdr's argv for the process says where the arguments end, so an argument naming the
+ * variable is not read as an assignment. A value still cannot be bounded (one holding ` NAME=` is
+ * cut there), so one exported value counts only when it is the only one shown and names a
+ * directory (or is empty). None shown proves none only beside the rest of an environment: a process
+ * that overwrote its environment's memory shows none of it. When the line does not start with the
+ * argv, any assignment shown is no proof.
+ */
+async function psLineSource(text: string, argv: readonly string[]): Promise<ClaudeSource> {
+  const line = text.replace(/\s+$/, "");
+  const command = argv.join(" ");
+  const environment = command !== "" && line.startsWith(command) ? line.slice(command.length) : null;
+  const shown = (part: string) => [...part.matchAll(/(?:^|\s)CLAUDE_CONFIG_DIR=/g)].length;
+  const rest = (part: string): ClaudeSource => /(?:^|\s)(?:HOME|PATH)=/.test(part) ? { state: "absent" } : { state: "unreadable" };
+  if (environment === null) return shown(line) > 0 ? { state: "unreadable" } : rest(line);
+  const count = shown(environment);
+  if (count > 1) return { state: "unreadable" };
+  if (count === 0) return rest(environment);
+  return overrideSource(/(?:^|\s)CLAUDE_CONFIG_DIR=(.*?)(?=\s+[A-Za-z_][A-Za-z0-9_]*=|\s*$)/.exec(environment)?.[1] ?? "");
+}
+
+async function readClaudeSource(pid: number, argv: readonly string[], home: string, platform: string, table: () => Promise<ProcessRow[]>): Promise<SourceRead> {
   const unreadable: SourceRead = { source: { state: "unreadable" }, legacy: null };
   try {
     if (platform === "win32") {
@@ -188,12 +213,7 @@ async function readClaudeSource(pid: number, home: string, platform: string, tab
       } finally { clearTimeout(timer); }
       const legacy = await namedDirectory(configDirInPsLine(text));
       if (code !== 0 || text.trim() === "") return { source: { state: "unreadable" }, legacy };
-      // ps prints the arguments and the environment as one line: a value holding ` NAME=` is cut
-      // there, and an argument naming the variable reads as an assignment, so no value it shows
-      // proves the store. Only none shown at all proves none, and only beside the rest of an
-      // environment: a process that overwrote its environment's memory shows none of it
-      if (/(?:^|\s)CLAUDE_CONFIG_DIR=/.test(text)) return { source: { state: "unreadable" }, legacy };
-      return { source: /(?:^|\s)(?:HOME|PATH)=/.test(text) ? { state: "absent" } : { state: "unreadable" }, legacy };
+      return { source: await psLineSource(text, argv), legacy };
     }
     return unreadable;
   } catch (error) {
@@ -210,12 +230,12 @@ async function readClaudeSource(pid: number, home: string, platform: string, tab
 async function processRead(pid: number, argv: readonly string[], home: string, platform: string, table: () => Promise<ProcessRow[]>): Promise<SourceRead> {
   const key = `${pid}\0${argv.join("\0")}`;
   const known = processDirs.get(key);
-  if (known && Date.now() - known.at < PROCESS_DIR_TTL_MS) return known.read;
-  const read = await readClaudeSource(pid, home, platform, table);
+  if (known && Date.now() - known.at < (missed(known.read) ? PROCESS_MISS_TTL_MS : PROCESS_DIR_TTL_MS)) return known.read;
+  const read = await readClaudeSource(pid, argv, home, platform, table);
   processDirs.delete(key);
   // Claude writes its PID record as it starts: on Windows a miss is asked again on the next read,
   // and two stores holding it are remembered no more than a miss
-  if (platform === "win32" && (read.source.state === "unreadable" || read.source.state === "ambiguous")) return read;
+  if (platform === "win32" && missed(read)) return read;
   processDirs.set(key, { read, at: Date.now() });
   if (processDirs.size > 256) processDirs.delete(processDirs.keys().next().value!);
   return read;
@@ -231,16 +251,23 @@ export async function processClaudeSource(
   return (await processRead(pid, argv, home, platform, table)).source;
 }
 
+/** herdrLaunchSource's answer by proc root and socket, with the listening socket's inodes it was read for. */
+const launchSources = new Map<string, { inodes: string; source: ClaudeSource }>();
+
 /**
  * The store source a new herdr tab inherits: the environment of the herdr server listening on
  * `socket`, which every shell it starts is handed (a tab's own env aside). A pane's shell does not
  * say it: it may have dropped or changed the variable herdr handed down. On Linux, the processes
- * holding that listening socket, each read in full from /proc, all the same source; elsewhere, or
- * when none is found or they differ, unreadable.
+ * holding that listening socket, each read in full from /proc, all the same source (unreadable when
+ * none is found or they differ), kept while the socket's inode stays the same: a process's
+ * environment does not change, and a restarted herdr listens on a new socket. macOS and Windows let
+ * no one find herdr's environment, so the bridge server's own (`env`) stands in: both are
+ * usually started from the same login. The resume route checks the store the new Claude came up
+ * on either way, which also catches a shell startup file that exports the variable.
  */
-export async function herdrLaunchSource(socket: string, platform: string = process.platform, proc = "/proc"): Promise<ClaudeSource> {
+export async function herdrLaunchSource(socket: string, platform: string = process.platform, proc = "/proc", env: Record<string, string | undefined> = process.env): Promise<ClaudeSource> {
   const unreadable: ClaudeSource = { state: "unreadable" };
-  if (platform !== "linux") return unreadable;
+  if (platform !== "linux") return env["CLAUDE_CONFIG_DIR"] === undefined ? { state: "absent" } : overrideSource(env["CLAUDE_CONFIG_DIR"]);
   try {
     // Num RefCount Protocol Flags Type St Inode Path; the listening one has __SO_ACCEPTCON
     const inodes = new Set((await readFile(join(proc, "net", "unix"), "utf8")).split("\n").slice(1)
@@ -248,6 +275,10 @@ export async function herdrLaunchSource(socket: string, platform: string = proce
       .filter((fields) => fields.length >= 8 && fields[3] === "00010000" && fields.slice(7).join(" ") === socket)
       .map((fields) => `socket:[${fields[6]}]`));
     if (inodes.size === 0) return unreadable;
+    const cacheKey = `${proc}\0${socket}`;
+    const inodeKey = [...inodes].sort().join(",");
+    const known = launchSources.get(cacheKey);
+    if (known?.inodes === inodeKey) return known.source;
     const sources: ClaudeSource[] = [];
     for (const entry of await readdir(proc)) {
       if (!/^\d+$/.test(entry)) continue;
@@ -265,6 +296,7 @@ export async function herdrLaunchSource(socket: string, platform: string = proce
     }
     const first = sources[0];
     if (first === undefined || sources.some((source) => JSON.stringify(source) !== JSON.stringify(first))) return unreadable;
+    if (first.state !== "unreadable") launchSources.set(cacheKey, { inodes: inodeKey, source: first });
     return first;
   } catch {
     return unreadable;
@@ -293,31 +325,35 @@ export async function paneClaudeSource(
 
 /**
  * The store a source lists and resumes in: its directory, how a resumed Claude is told it (`env`:
- * the variable to export; null: none, as the source had none; `unsupported`: the source does not say
- * whether one was exported), and its key, a hash of the store's identity (claudeStoreKey) and of
- * that choice, which says nothing of the path. An implicit ~/.claude and one exported by name are
- * two keys. A pane with no Claude (`null`) has the server's default store. Null when the source
- * cannot be told: never the default store in its place.
+ * the variable to export; null: none, as the source had none), its key, a hash of the store's
+ * identity (claudeStoreKey) and of that choice, its place, a hash of the identity alone (neither
+ * says anything of the path), and whether the choice is known (`chosen`). An implicit ~/.claude
+ * and one exported by name are two keys, one place: Claude reads its settings and sign-in by the
+ * choice, and writes its transcripts to the place. A
+ * Windows ~/.claude found by its PID record (`store`: how it was chosen cannot be told there) is
+ * resumed with none exported, which reaches ~/.claude again. A pane with no Claude (`null`) has the
+ * server's default store. Null when the source cannot be told: never the default store in its place.
  */
 export async function claudeStoreOf(
   source: ClaudeSource | null,
   home = process.env["HOME"] ?? "",
   env: Record<string, string | undefined> = process.env,
-): Promise<{ dir: string; env: { CLAUDE_CONFIG_DIR: string } | null | "unsupported"; key: string } | null> {
+): Promise<{ dir: string; env: { CLAUDE_CONFIG_DIR: string } | null; key: string; place: string; chosen: boolean } | null> {
   const chosen = source ?? (env["CLAUDE_CONFIG_DIR"] === undefined ? { state: "absent" as const } : { state: "override" as const, dir: env["CLAUDE_CONFIG_DIR"] });
   let dir: string;
-  let launch: { CLAUDE_CONFIG_DIR: string } | null | "unsupported";
+  let launch: { CLAUDE_CONFIG_DIR: string } | null;
   let how: string;
   switch (chosen.state) {
     case "override": dir = chosen.dir || join(home, ".claude"); launch = { CLAUDE_CONFIG_DIR: chosen.dir }; how = chosen.dir === "" ? "empty" : "explicit"; break;
     case "absent": dir = join(home, ".claude"); launch = null; how = "implicit"; break;
-    case "store": dir = chosen.dir; launch = "unsupported"; how = "unknown"; break;
+    case "store": dir = chosen.dir; launch = null; how = "unknown"; break;
     default: return null;
   }
   let id: { dev: bigint; ino: bigint } | null = null;
   try { id = await stat(dir, { bigint: true }); } catch { /* not there yet: its spelling stands for it */ }
-  const key = createHash("sha256").update(`${how}\0${claudeStoreKey(dir, id)}`).digest("hex").slice(0, 24);
-  return { dir, env: launch, key };
+  const identity = claudeStoreKey(dir, id);
+  const hash = (text: string) => createHash("sha256").update(text).digest("hex").slice(0, 24);
+  return { dir, env: launch, key: hash(`${how}\0${identity}`), place: hash(`place\0${identity}`), chosen: how !== "unknown" };
 }
 
 /**
@@ -435,6 +471,7 @@ async function backgroundJobTranscript(path: string, configDir: string): Promise
 export function forgetClaudeSessions(): void {
   found.clear();
   processDirs.clear();
+  launchSources.clear();
 }
 
 /**

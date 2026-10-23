@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { Database } from "bun:sqlite";
 import { copyFileSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, opendirSync, readdirSync, type BigIntStats, type Dir, type Dirent, type Stats, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -7,7 +7,8 @@ import { pathToFileURL } from "node:url";
 import type { SessionHistoryAgent, SessionSnapshot } from "../shared/protocol.ts";
 import { HEAD_BYTES, listSessions, MAX_ENTRIES, MAX_ROWS, MAX_STATS, MAX_WALK, SESSION_HISTORY_AGENTS } from "./session-history.ts";
 import { handleSessionHistoryRequest, handleSessionResumeRequest, type PaneProcesses, workspaceFolder } from "./session-history-routes.ts";
-import { claudeProjectDir } from "./claude-store.ts";
+import { claudeProjectDir, forgetClaudeSessions } from "./claude-store.ts";
+import type { ProcessRow } from "./windows-processes.ts";
 import { codexRolloutPath } from "./codex.ts";
 import rolloutHeaders from "./fixtures/codex-rollout-headers.json";
 
@@ -1168,6 +1169,158 @@ describe("GET /api/sessions/history", () => {
         expect([status, json]).toEqual([200, { action: "opened", workspace_id: "w1", pane_id: "p1" }]);
       } finally { await stop(child); }
     });
+
+    /** A resume's tab, Claude start and close as herdr would answer them, with each close kept. */
+    const fakeTabs = (closed: string[], started = true) => ({
+      create: async () => ({ tab: { tab_id: "t-new", workspace_id: "w1" }, root_pane: { pane_id: "p-new" } }) as unknown as Awaited<ReturnType<typeof import("./herdr/client.ts").tabCreate>>,
+      start: async () => started ? { agent_started: true as const } : { agent_started: false as const, error: { code: "agent_start_failed", message: "not in this test" } },
+      close: async (tabId: string) => { closed.push(tabId); },
+    });
+
+    it.skipIf(process.platform !== "linux")("closes a resumed Claude's tab when its shell chose another store, and keeps one on the listed store", async () => {
+      const home = newHome();
+      const alternate = join(home, "alternate-store");
+      const rcStore = join(home, "rc-store");
+      mkdirSync(rcStore);
+      claudeStore(alternate, ID(1), "alternate store prompt");
+      const child = await claudeStandIn({ PATH: process.env["PATH"] ?? "", CLAUDE_CONFIG_DIR: alternate });
+      // the new tab's shell exports its own store from a startup file, overriding the tab's env
+      const rcClaude = await claudeStandIn({ PATH: process.env["PATH"] ?? "", CLAUDE_CONFIG_DIR: rcStore });
+      const sameClaude = await claudeStandIn({ PATH: process.env["PATH"] ?? "", CLAUDE_CONFIG_DIR: alternate });
+      try {
+        // the new pane shows its shell first, then the Claude the resume started
+        const panes = (resumed: number) => {
+          let asked = 0;
+          return async (paneId: string): Promise<PaneProcesses> => paneId === "p-new" && asked++ === 0
+            ? { shell_pid: null, foreground_processes: [{ pid: 1, name: "bash", argv: ["bash"] }] }
+            : { shell_pid: null, foreground_processes: [{ pid: paneId === "p-new" ? resumed : child.pid, name: "claude", argv: ["claude"] }] };
+        };
+        const base = { stores: { home, env: {} }, snapshot: async () => twoWorkspaces(), paneProcesses: panes(rcClaude.pid), launchSource: launchAbsent, launchCheckMs: 5_000 };
+        const listed = await (await handleSessionHistoryRequest(...request("workspace_id=w1&agent=claude&pane_id=p1"), { readOnly: false, ...base })).json() as ClaudeListing;
+        const valid = { workspace_id: "w1", pane_id: "p1", agent: "claude", session_id: ID(1), store_key: listed.sessions[0]!.resume!.source!.store_key };
+        const closed: string[] = [];
+        const [status, json] = await answer(await resume(valid, { ...base, tabs: fakeTabs(closed) }));
+        expect([status, json.error?.code, closed]).toEqual([409, "launch_store_changed", ["t-new"]]);
+        const kept: string[] = [];
+        expect(await answer(await resume(valid, { ...base, paneProcesses: panes(sameClaude.pid), tabs: fakeTabs(kept) }))).toEqual([200, { action: "created", workspace_id: "w1", pane_id: "p-new", agent_started: true }] as never);
+        expect(kept).toEqual([]);
+      } finally { await stop(child, rcClaude, sameClaude); }
+    });
+
+    it.skipIf(process.platform !== "linux")("opens a pane showing the session from the same store folder, however that folder was chosen", async () => {
+      const home = newHome();
+      claudeStore(join(home, ".claude"), ID(1), "default store prompt");
+      // the list's pane runs Claude with none exported; another pane runs it on ~/.claude by name
+      const implicit = await claudeStandIn({ PATH: process.env["PATH"] ?? "" });
+      const explicit = await claudeStandIn({ PATH: process.env["PATH"] ?? "", CLAUDE_CONFIG_DIR: join(home, ".claude") });
+      try {
+        const shown = snapshot();
+        const reporting = { ...shown, panes: shown.panes.map((pane) => pane.pane_id === "p2" ? { ...pane, agent_session: { agent: "claude", kind: "id", source: "herdr:claude", value: ID(1) } } : pane) } as typeof shown;
+        const paneProcesses = async (paneId: string): Promise<PaneProcesses> => ({ shell_pid: null, foreground_processes: [{ pid: paneId === "p2" ? explicit.pid : implicit.pid, name: "claude", argv: ["claude"] }] });
+        const base = { stores: { home, env: {} }, snapshot: async () => reporting, paneProcesses, launchSource: launchAbsent };
+        const listed = await (await handleSessionHistoryRequest(...request("workspace_id=w1&agent=claude&pane_id=p1"), { readOnly: false, ...base })).json() as ClaudeListing;
+        const closed: string[] = [];
+        // a second `claude --resume` would write the same transcript: the pane showing it is opened instead
+        expect(await answer(await resume({ workspace_id: "w1", pane_id: "p1", agent: "claude", session_id: ID(1), store_key: listed.sessions[0]!.resume!.source!.store_key }, { ...base, tabs: fakeTabs(closed) })))
+          .toEqual([200, { action: "opened", workspace_id: "w1", pane_id: "p2" }] as never);
+      } finally { await stop(implicit, explicit); }
+    });
+
+    it("closes a resumed Claude's tab that does not say its store in time", async () => {
+      const home = newHome();
+      claudeStore(join(home, ".claude"), ID(1), "default store prompt");
+      // the new pane never shows a Claude whose store can be read: no proof of the store, so nothing is kept
+      const shell = async (): Promise<PaneProcesses> => ({ shell_pid: null, foreground_processes: [{ pid: 1, name: "bash", argv: ["bash"] }] });
+      const base = { stores: { home, env: {} }, snapshot: async () => snapshot(), paneProcesses: shell, launchSource: launchAbsent, launchCheckMs: 0 };
+      const listed = await (await handleSessionHistoryRequest(...request("workspace_id=w1&agent=claude&pane_id=p1"), { readOnly: false, ...base })).json() as ClaudeListing;
+      const closed: string[] = [];
+      const [status, json] = await answer(await resume({ workspace_id: "w1", pane_id: "p1", agent: "claude", session_id: ID(1), store_key: listed.sessions[0]!.resume!.source!.store_key }, { ...base, tabs: fakeTabs(closed) }));
+      expect([status, json.error?.code, closed]).toEqual([409, "launch_store_unknown", ["t-new"]]);
+    });
+  });
+
+  describe("a Windows pane's Claude", () => {
+    // herdr names only the pane's shell on Windows: Claude is found under shell_pid in the process
+    // table, and its store by its live PID record. These run anywhere, with the table handed in.
+    const SHELL = 10;
+    const PID = 4242;
+    const STARTED = 1_791_384_794_216;
+    const PROC_START = String((BigInt(STARTED) + 11_644_473_600_000n) * 10_000n);
+    const CLAUDE_EXE = "C:\\Users\\u\\.local\\bin\\claude.exe";
+    const table = async (): Promise<ProcessRow[]> => [
+      { pid: SHELL, parent: 1, path: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", commandLine: "powershell.exe" },
+      { pid: PID, parent: SHELL, path: CLAUDE_EXE, commandLine: `"${CLAUDE_EXE}"`, started: STARTED },
+    ];
+    const shellOnly = async (): Promise<PaneProcesses> => ({ shell_pid: SHELL, foreground_processes: [{ pid: SHELL, name: "powershell.exe", argv: ["powershell.exe"] }] });
+    const record = (store: string) => {
+      mkdirSync(join(store, "sessions"), { recursive: true });
+      writeFileSync(join(store, "sessions", `${PID}.json`), JSON.stringify({ pid: PID, sessionId: ID(5), procStart: PROC_START, kind: "interactive" }));
+    };
+    let serverConfigDir: string | undefined;
+    beforeEach(() => { serverConfigDir = process.env["CLAUDE_CONFIG_DIR"]; delete process.env["CLAUDE_CONFIG_DIR"]; forgetClaudeSessions(); });
+    afterEach(() => { forgetClaudeSessions(); if (serverConfigDir === undefined) delete process.env["CLAUDE_CONFIG_DIR"]; else process.env["CLAUDE_CONFIG_DIR"] = serverConfigDir; });
+    const list = async (home: string, tableRows = table) => (await (await handleSessionHistoryRequest(...request("workspace_id=w1&agent=claude&pane_id=p1"), {
+      readOnly: false, stores: { home, env: {} }, snapshot: async () => snapshot(), paneProcesses: shellOnly, launchSource: launchAbsent, platform: "win32", table: tableRows,
+    })).json()) as ClaudeListing & { error?: { code: string } };
+
+    it("lists the store of the Claude under the pane's shell, not the default one", async () => {
+      const home = newHome();
+      claudeStore(join(home, ".claude"), ID(1), "default store prompt");
+      claudeStore(join(home, ".claude-second"), ID(1), "second store prompt");
+      record(join(home, ".claude-second"));
+      const listed = await list(home);
+      expect(listed.sessions.map((row) => [row.firstMessage, row.resume?.source?.pane_id])).toEqual([["second store prompt", "p1"]]);
+    });
+
+    it("offers Resume for the default ~/.claude, as before the store was bound", async () => {
+      const home = newHome();
+      claudeStore(join(home, ".claude"), ID(1), "default store prompt");
+      record(join(home, ".claude"));
+      const listed = await list(home);
+      expect(listed.sessions.map((row) => [row.firstMessage, row.resume?.source?.pane_id])).toEqual([["default store prompt", "p1"]]);
+    });
+
+    it("keeps a resume from a shell pane that came up on ~/.claude, and closes one on another store", async () => {
+      // p1 is a shell with no Claude (the default store, chosen by nothing exported); the new pane's
+      // shell runs the resumed Claude, whose PID record cannot say how its store was chosen
+      const NEW_SHELL = 20;
+      const rows = async (): Promise<ProcessRow[]> => [
+        { pid: SHELL, parent: 1, path: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", commandLine: "powershell.exe" },
+        { pid: NEW_SHELL, parent: 1, path: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", commandLine: "powershell.exe" },
+        { pid: PID, parent: NEW_SHELL, path: CLAUDE_EXE, commandLine: `"${CLAUDE_EXE}" --resume ${ID(1)}`, started: STARTED },
+      ];
+      const paneProcesses = async (paneId: string): Promise<PaneProcesses> => {
+        const shell = paneId === "p-new" ? NEW_SHELL : SHELL;
+        return { shell_pid: shell, foreground_processes: [{ pid: shell, name: "powershell.exe", argv: ["powershell.exe"] }] };
+      };
+      const tabs = (closed: string[]) => ({
+        create: async () => ({ tab: { tab_id: "t-new", workspace_id: "w1" }, root_pane: { pane_id: "p-new" } }) as unknown as Awaited<ReturnType<typeof import("./herdr/client.ts").tabCreate>>,
+        start: async () => ({ agent_started: true as const }),
+        close: async (tabId: string) => { closed.push(tabId); },
+      });
+      const outcome = async (recordedIn: string) => {
+        const home = newHome();
+        claudeStore(join(home, ".claude"), ID(1), "default store prompt");
+        claudeStore(join(home, ".claude-second"), ID(1), "second store prompt");
+        const base = { stores: { home, env: {} }, snapshot: async () => snapshot(), paneProcesses, launchSource: launchAbsent, platform: "win32", table: rows, launchCheckMs: 0 };
+        const listed = await (await handleSessionHistoryRequest(...request("workspace_id=w1&agent=claude&pane_id=p1"), { readOnly: false, ...base })).json() as ClaudeListing;
+        expect(listed.sessions.map((row) => row.firstMessage)).toEqual(["default store prompt"]);
+        record(join(home, recordedIn));
+        forgetClaudeSessions();
+        const closed: string[] = [];
+        const response = await handleSessionResumeRequest(new Request("http://localhost/api/sessions/resume", { method: "POST", body: JSON.stringify({ workspace_id: "w1", pane_id: "p1", agent: "claude", session_id: ID(1), store_key: listed.sessions[0]!.resume!.source!.store_key }) }), { readOnly: false, ...base, tabs: tabs(closed) });
+        const body = (await response.json()) as { action?: string; error?: { code: string } };
+        return [response.status, body.action ?? body.error?.code, closed];
+      };
+      expect(await outcome(".claude")).toEqual([200, "created", []]);
+      expect(await outcome(".claude-second")).toEqual([409, "launch_store_changed", ["t-new"]]);
+    });
+
+    it("tells no store when the process table says nothing", async () => {
+      const home = newHome();
+      claudeStore(join(home, ".claude"), ID(1), "default store prompt");
+      expect((await list(home, async () => [])).error?.code).toBe("claude_store_unknown");
+    });
   });
 
   it("lists a pane with no Claude from the server's default store, and refuses a pane of another workspace before reading any", async () => {
@@ -1179,9 +1332,15 @@ describe("GET /api/sessions/history", () => {
     const body = await (await handleSessionHistoryRequest(...request("workspace_id=w1&agent=claude&pane_id=p1"), options)).json() as ClaudeListing;
     expect(body.sessions.map((row) => [row.firstMessage, row.resume?.source?.pane_id])).toEqual([["default store prompt", "p1"]]);
     asked = 0;
-    const foreign = await handleSessionHistoryRequest(...request("workspace_id=w1&agent=claude&pane_id=p-elsewhere"), options);
-    expect(foreign.status).toBe(400);
-    expect(((await foreign.json()) as { error: { code: string } }).error.code).toBe("pane_not_in_workspace");
+    const base = snapshot();
+    const elsewhere = { ...base, workspaces: [...base.workspaces, { workspace_id: "w2" }], panes: [...base.panes, { pane_id: "p-elsewhere", tab_id: "t9", workspace_id: "w2", cwd: CWD }] } as typeof base;
+    const codes = async (paneId: string) => {
+      const response = await handleSessionHistoryRequest(...request(`workspace_id=w1&agent=claude&pane_id=${paneId}`), { ...options, snapshot: async () => elsewhere });
+      return [response.status, ((await response.json()) as { error: { code: string } }).error.code];
+    };
+    expect(await codes("p-elsewhere")).toEqual([400, "pane_not_in_workspace"]);
+    // a pane that is gone is a stale source, as Resume answers it
+    expect(await codes("p-gone")).toEqual([409, "stale_source"]);
     expect(asked).toBe(0);
   });
 
