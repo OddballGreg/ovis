@@ -2,7 +2,9 @@ import { constants, closeSync, fstatSync, lstatSync, openSync, readFileSync, rea
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { homedir } from "node:os";
 
-import { agentGet } from "./herdr/client.ts";
+import type { PaneProcessInfoProcess } from "../shared/herdr-api.generated.ts";
+import { runsAgent } from "./gjc-runtime.ts";
+import { agentGet, paneProcessInfo } from "./herdr/client.ts";
 
 /**
  * Command Code's session store. One directory per project (the cwd), under
@@ -75,6 +77,7 @@ export function unwrittenSession(path: string, sessionDir: string): { id: string
 
 type CmdTranscriptOptions = {
   agent?: Awaited<ReturnType<typeof agentGet>> | null;
+  processes?: readonly PaneProcessInfoProcess[];
   home?: string;
 };
 
@@ -85,11 +88,6 @@ export async function cmdTranscriptPath(
   const agent = options.agent === undefined ? await agentGet(paneId).catch(() => null) : options.agent;
   if (agent?.agent !== "cmd") return null;
 
-  const cwd = (typeof agent.foreground_cwd === "string" && agent.foreground_cwd.length > 0 ? agent.foreground_cwd : null)
-    ?? (typeof agent.cwd === "string" ? agent.cwd : null);
-  if (!cwd) return null;
-  const projectDir = defaultCmdProjectDir(cwd);
-
   // Only herdr's report names the session, as for pi. The process environment's
   // COMMANDCODE_SESSION_ID is set at start-up or inherited, so after /clear, /resume or in a child it
   // names another session: shown as this pane's, another conversation would be read as this one.
@@ -97,10 +95,23 @@ export async function cmdTranscriptPath(
   const candidate = (session?.agent === "cmd" && session.source === "herdr:cmd" && session.kind === "path"
     && typeof session.value === "string") ? session.value : null;
   if (candidate === null) return null;
-  const path = cmdTranscriptInStore(candidate, projectDir);
-  if (path !== null) return { path };
-  const unwritten = unwrittenSession(candidate, projectDir);
-  return unwritten === null ? null : { unwritten };
+  const processes = options.processes
+    ?? (await paneProcessInfo(paneId).catch(() => undefined))?.foreground_processes ?? [];
+  // argv identifies Command Code, not the process name (cmd.exe is the Windows shell).
+  const processCwds = processes
+    .filter((process) => runsAgent(process.argv ?? [], /(^|[\\/])cmd(?:\.[cm]?js)?$/i))
+    .map((process) => process.cwd);
+  // foreground_cwd can belong to a helper when herdr cannot read the group leader's cwd.
+  // Each cwd is only a store candidate; the reported session must validate inside it.
+  for (const cwd of new Set([...processCwds, agent.foreground_cwd, agent.cwd])) {
+    if (typeof cwd !== "string" || cwd.length === 0) continue;
+    const projectDir = defaultCmdProjectDir(cwd);
+    const path = cmdTranscriptInStore(candidate, projectDir);
+    if (path !== null) return { path };
+    const unwritten = unwrittenSession(candidate, projectDir);
+    if (unwritten !== null) return { unwritten };
+  }
+  return null;
 }
 
 /**
