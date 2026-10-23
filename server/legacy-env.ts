@@ -17,6 +17,22 @@ export function ovisName(legacy: string): string | null {
   return RENAMED[legacy] ?? `OVIS_${legacy.slice(LEGACY_PREFIX.length)}`;
 }
 
+/** The old name an OVIS_* setting went by, or null for any other name. */
+export function legacyName(name: string): string | null {
+  if (!name.startsWith("OVIS_")) return null;
+  return Object.keys(RENAMED).find((legacy) => RENAMED[legacy] === name) ?? `${LEGACY_PREFIX}${name.slice("OVIS_".length)}`;
+}
+
+/** `settings` under their old names as well, for a bridge from before the rename to read. */
+export function withLegacyNames(settings: Record<string, string>): Record<string, string> {
+  const both = { ...settings };
+  for (const [name, value] of Object.entries(settings)) {
+    const legacy = legacyName(name);
+    if (legacy !== null) both[legacy] = value;
+  }
+  return both;
+}
+
 /** Fills each unset OVIS_* variable from its old name, in place. */
 export function adoptLegacyEnv(env: Record<string, string | undefined>): void {
   for (const [name, value] of Object.entries(env)) {
