@@ -8,6 +8,50 @@ export function parseElapsed(text: string): number | null {
   return ((Number(days) * 24 + Number(hours)) * 60 + Number(minutes!)) * 60 + Number(seconds!);
 }
 
+type StartReading = { readonly started: number; readonly lower: number; readonly readAt: number };
+type StartSpawn = (argv: string[], options: {
+  readonly stdout: "pipe"; readonly stderr: "ignore"; readonly timeout: number; readonly killSignal: "SIGKILL";
+}) => { readonly exitCode: number; readonly stdout: { toString(): string }; readonly exitedDueToTimeout?: boolean };
+
+/**
+ * Coalesce macOS hot-path reads, not process identities across polls: pending sends compare births,
+ * and signal 0 alone cannot detect PID reuse. A hit expires 100 ms after the original read (never
+ * extended by hits), well below callers' one-second precision. Linux identities stay freshly read.
+ */
+export function createDarwinStartReader(
+  spawn: StartSpawn = (argv, options) => Bun.spawnSync(argv, options),
+  now: () => number = Date.now, alive: (pid: number) => boolean = processAlive,
+): (pid: number) => StartReading | null {
+  const cache = new Map<number, StartReading>();
+  return (pid) => {
+    const before = now();
+    const hit = cache.get(pid);
+    cache.delete(pid);
+    if (hit && before >= hit.readAt && before - hit.readAt < 100 && alive(pid)) {
+      cache.set(pid, hit);
+      return hit;
+    }
+    try {
+      const ps = spawn(["/bin/ps", "-o", "etime=", "-p", String(pid)], {
+        stdout: "pipe", stderr: "ignore", timeout: 1000, killSignal: "SIGKILL",
+      });
+      const elapsed = ps.exitCode === 0 && !ps.exitedDueToTimeout ? parseElapsed(ps.stdout.toString()) : null;
+      if (elapsed === null) return null;
+      const reading = { started: now() - elapsed * 1000, lower: before - (elapsed + 1) * 1000, readAt: before };
+      cache.set(pid, reading);
+      if (cache.size > 128) {
+        const oldest = cache.keys().next().value;
+        if (oldest !== undefined) cache.delete(oldest);
+      }
+      return reading;
+    } catch {
+      return null;
+    }
+  };
+}
+
+const darwinStart = createDarwinStartReader();
+
 /**
  * When a process started, in ms since the epoch: Linux counts it in /proc (USER_HZ
  * ticks after boot); macOS has no /proc, so there `ps` tells how long it has run (to the
@@ -15,13 +59,7 @@ export function parseElapsed(text: string): number | null {
  */
 export function processStartedAt(pid: number): number | null {
   if (process.platform === "darwin") {
-    try {
-      const ps = Bun.spawnSync(["/bin/ps", "-o", "etime=", "-p", String(pid)], { stdout: "pipe", stderr: "ignore" });
-      const elapsed = ps.exitCode === 0 ? parseElapsed(ps.stdout.toString()) : null;
-      return elapsed === null ? null : Date.now() - elapsed * 1000;
-    } catch {
-      return null;
-    }
+    return darwinStart(pid)?.started ?? null;
   }
   return linuxBirth(pid);
 }
@@ -109,13 +147,7 @@ function linuxReadStart(pid: number): number | null {
  */
 export function processStartLowerBound(pid: number): number | null {
   if (process.platform === "darwin") {
-    // the clock read before `ps`, which counts whole seconds: the start is after now - (etime + 1) s
-    const now = Date.now();
-    try {
-      const ps = Bun.spawnSync(["/bin/ps", "-o", "etime=", "-p", String(pid)], { stdout: "pipe", stderr: "ignore" });
-      const elapsed = ps.exitCode === 0 ? parseElapsed(ps.stdout.toString()) : null;
-      return elapsed === null ? null : now - (elapsed + 1) * 1000;
-    } catch { return null; }
+    return darwinStart(pid)?.lower ?? null;
   }
   if (process.platform !== "linux") return null;
   // the earlier of both readings, less one tick: no later than the real start (the uptime's), nor
