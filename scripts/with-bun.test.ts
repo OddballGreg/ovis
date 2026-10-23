@@ -135,6 +135,23 @@ describe.skipIf(process.platform === "win32")("Unix Bun discovery", () => {
     expect(plain.out).toContain("Update it with: bun upgrade");
   });
 
+  // a bin directory links into the Cellar, as Homebrew does, here through a second link
+  it.each(["readlink", "ls"])("preflight follows links into Homebrew's Cellar with only %s to read them", async (reader) => {
+    const cellar = join(home, "prefix", "Cellar", "bun", "1.3.14", "bin"), bin = join(home, "prefix", "bin"), outer = join(home, "outer");
+    tool(cellar, "bun", "1.3.14");
+    mkdirSync(bin);
+    mkdirSync(outer);
+    symlinkSync(join("..", "Cellar", "bun", "1.3.14", "bin", "bun"), join(bin, "bun"));
+    symlinkSync(join(bin, "bun"), join(outer, "bun"));
+    tool(outer, "node", "v22.0.0");
+    const utils = join(base, "utils");
+    mkdirSync(utils);
+    symlinkSync(Bun.which(reader)!, join(utils, reader));
+    const result = await run(["/bin/sh", preflight], { PATH: `${tools}:${utils}`, WITH_BUN_EXTRA_DIRS: outer });
+    expect(result.code).toBe(1);
+    expect(result.out).toContain("Update it with: brew upgrade bun");
+  });
+
   it("routes each Unix Bun entry through the launcher without changing its arguments", async () => {
     const manifest: Record<string, { command: string[]; platforms?: string[] }[]> =
       Bun.TOML.parse(readFileSync(join(root, "herdr-plugin.toml"), "utf8"));

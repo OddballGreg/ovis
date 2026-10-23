@@ -11,13 +11,23 @@ if command -v bun >/dev/null 2>&1; then
   version=$(bun --version 2>/dev/null || echo unknown)
   case "$version" in
     0.*|1.[0-3].*)
-      # a Homebrew bun is updated by Homebrew, not by `bun upgrade`
-      bun_bin=$(command -v bun)
-      bun_real=$(readlink -f "$bun_bin" 2>/dev/null || echo "$bun_bin")
-      case "$bun_bin $bun_real" in
-        */Cellar/*|/opt/homebrew/*|/home/linuxbrew/.linuxbrew/*) update="brew upgrade bun" ;;
-        *) update="bun upgrade" ;;
-      esac
+      # a Homebrew bun is updated by Homebrew, not by `bun upgrade`: follow the bun on PATH link by
+      # link (plain readlink, or ls where there is none) and look at each path on the way
+      update="bun upgrade"
+      bun_path=$(command -v bun)
+      hops=0
+      while :; do
+        case "$bun_path" in
+          */Cellar/*|/opt/homebrew/*|/home/linuxbrew/.linuxbrew/*) update="brew upgrade bun"; break ;;
+        esac
+        { [ -L "$bun_path" ] && [ "$hops" -lt 16 ]; } || break
+        target=$(readlink "$bun_path" 2>/dev/null) || {
+          listing=$(ls -ld "$bun_path" 2>/dev/null) || break
+          case "$listing" in *" -> "*) target=${listing#* -> } ;; *) break ;; esac
+        }
+        case "$target" in /*) bun_path=$target ;; *) bun_path=${bun_path%/*}/$target ;; esac
+        hops=$((hops + 1))
+      done
       echo "Ovis needs Bun 1.4 or newer; this is Bun $version. Update it with: $update"; fail=1 ;;
   esac
 else
