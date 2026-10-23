@@ -155,6 +155,38 @@ describe("HerdrSidebarConfig", () => {
     expect(config.get()).toBeNull();
   });
 
+  test.each(['"""', "'''"])("preserves line-start BOMs inside %s multiline rule values", (quote) => {
+    const path = configFile([
+      "# Delimiters in comments do not open strings: \"\"\" '''",
+      `literal = '"""'`,
+      `basic = "''' and \\"quoted\\""`,
+      "\uFEFF[ui.sidebar.agents]",
+      `rows = [[{ token = "$summary", rules = [{ equals = ${quote}first`,
+      "\uFEFFsecond",
+      `${quote}, hide = true }] }]]`,
+      "\uFEFF[ui.sidebar.agents.rows_by_agent]",
+      'codex = [["$progress"]]',
+    ].join("\n"));
+    expect(new HerdrSidebarConfig(path).get()).toEqual({
+      rows: [{ name: "summary", rules: [{ equals: "first\n\uFEFFsecond\n", hide: true }] }],
+      by_agent: { codex: [{ name: "progress" }] },
+    });
+  });
+
+  test("honours escaped quotes and quote runs in multiline basic strings", () => {
+    const path = configFile([
+      "[ui.sidebar.agents]",
+      'rows = [[{ token = "$summary", rules = [{ equals = """first\\"""',
+      "\uFEFFsecond",
+      'last""""", hide = true }] }]]',
+      '\uFEFFrows_by_agent = { codex = [["$progress"]] }',
+    ].join("\r\n"));
+    expect(new HerdrSidebarConfig(path).get()).toEqual({
+      rows: [{ name: "summary", rules: [{ equals: 'first"""\n\uFEFFsecond\nlast""', hide: true }] }],
+      by_agent: { codex: [{ name: "progress" }] },
+    });
+  });
+
   test("falls back for a config larger than the size cap", () => {
     const path = configFile(`[ui.sidebar.agents]\nrows = [["$quota"]]\n#${"x".repeat(1024 * 1024)}`);
     expect(new HerdrSidebarConfig(path).get()).toBeNull();

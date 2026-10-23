@@ -27,6 +27,34 @@ function table(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
+/** Line-start BOMs outside strings are config markers; inside multiline strings they are value data. */
+function normalizeConfigBom(text: string): string {
+  let quote: string | null = null;
+  return text.split("\n").map((line) => {
+    const normalized = quote === null && line.startsWith("\uFEFF") ? line.slice(1) : line;
+    for (let i = 0; i < normalized.length;) {
+      const char = normalized[i];
+      if (quote === null) {
+        if (char === "#") break;
+        if (char === '"' || char === "'") {
+          quote = normalized.startsWith(char.repeat(3), i) ? char.repeat(3) : char;
+          i += quote.length;
+        } else i++;
+      } else if (quote[0] === '"' && char === "\\") {
+        i += 2;
+      } else if (normalized.startsWith(quote, i)) {
+        i += quote.length;
+        // Four or five closing quotes include one or two value quotes, not a new string.
+        if (quote.length === 3) while (normalized[i] === quote[0]) i++;
+        quote = null;
+      } else i++;
+    }
+    // Single-line strings cannot carry delimiter state into the next line.
+    if (quote?.length === 1) quote = null;
+    return normalized;
+  }).join("\n");
+}
+
 /** A rule with exactly one condition of its kind, as herdr accepts it; anything else herdr refuses, and is left out. */
 function tokenRule(value: unknown): PaneTokenRule | null {
   const rule = table(value);
@@ -149,7 +177,7 @@ export class HerdrSidebarConfig {
           for (let count = 1; count > 0 && length < buffer.length; length += count) count = readSync(fd, buffer, length, buffer.length - length, null);
           // A file that grew while being read is retried once its stamp changes.
           if (length <= stat.size) {
-            const text = buffer.subarray(0, length).toString("utf8").replace(/^\uFEFF/gm, "");
+            const text = normalizeConfigBom(buffer.subarray(0, length).toString("utf8"));
             next = agentRowTokens(Bun.TOML.parse(text));
           }
         }
