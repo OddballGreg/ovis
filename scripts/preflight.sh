@@ -10,7 +10,15 @@ fail=0
 if command -v bun >/dev/null 2>&1; then
   version=$(bun --version 2>/dev/null || echo unknown)
   case "$version" in
-    0.*|1.[0-3].*) echo "Ovis needs Bun 1.4 or newer; this is Bun $version. Update it with: bun upgrade"; fail=1 ;;
+    0.*|1.[0-3].*)
+      # a Homebrew bun is updated by Homebrew, not by `bun upgrade`
+      bun_bin=$(command -v bun)
+      bun_real=$(readlink -f "$bun_bin" 2>/dev/null || echo "$bun_bin")
+      case "$bun_bin $bun_real" in
+        */Cellar/*|/opt/homebrew/*|/home/linuxbrew/.linuxbrew/*) update="brew upgrade bun" ;;
+        *) update="bun upgrade" ;;
+      esac
+      echo "Ovis needs Bun 1.4 or newer; this is Bun $version. Update it with: $update"; fail=1 ;;
   esac
 else
   echo "Ovis needs Bun, and 'bun' is not on the PATH of the shell that started herdr."

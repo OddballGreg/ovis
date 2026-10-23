@@ -121,6 +121,20 @@ describe.skipIf(process.platform === "win32")("Unix Bun discovery", () => {
     expect(result.code).toBe(version === "0.9.0" || version === "1.3.9" ? 1 : 0);
   });
 
+  it("preflight names Homebrew's update for a too-old Homebrew Bun, and bun upgrade otherwise", async () => {
+    const brewDir = join(home, "Cellar", "bun", "1.3.14", "bin"), plainDir = join(home, ".bun", "bin");
+    tool(brewDir, "bun", "1.3.14");
+    tool(brewDir, "node", "v22.0.0");
+    tool(plainDir, "bun", "1.3.14");
+    tool(plainDir, "node", "v22.0.0");
+    const brew = await run(["/bin/sh", preflight], { WITH_BUN_EXTRA_DIRS: brewDir });
+    expect(brew.code).toBe(1);
+    expect(brew.out).toContain("Update it with: brew upgrade bun");
+    const plain = await run(["/bin/sh", preflight], { WITH_BUN_EXTRA_DIRS: plainDir });
+    expect(plain.code).toBe(1);
+    expect(plain.out).toContain("Update it with: bun upgrade");
+  });
+
   it("routes each Unix Bun entry through the launcher without changing its arguments", async () => {
     const manifest: Record<string, { command: string[]; platforms?: string[] }[]> =
       Bun.TOML.parse(readFileSync(join(root, "herdr-plugin.toml"), "utf8"));
