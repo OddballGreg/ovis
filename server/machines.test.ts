@@ -61,9 +61,8 @@ describe("machine settings recovery", () => {
       // When the manager loads its settings.
       const manager = new MachineManager(dir, {} as PushService, {} as CompletionTracker, async () => { throw new Error("local offline"); });
       manager.stop();
-      // Then the log preserves the filesystem cause, not a JSON parse error.
-      expect(errors).toHaveBeenCalledTimes(1);
-      expect(errors.mock.calls[0]?.[1]).toMatchObject({ code: "EACCES", message: expect.stringContaining("permission denied") });
+      // Then only the filesystem code accompanies the recovery diagnostic.
+      expect(errors.mock.calls).toEqual([[expect.any(String), "EACCES"]]);
     } finally {
       errors.mockRestore();
       chmodSync(path, 0o600);
@@ -82,11 +81,13 @@ describe("machine settings recovery", () => {
       valid.stop();
       expect(errors).toEqual([]);
 
-      writeFileSync(join(dir, "machine-settings.json"), "{");
+      const secret = "GATE_SECRET_1731";
+      writeFileSync(join(dir, "machine-settings.json"), `{"token":${secret}}`);
       const damaged = createManager();
       damaged.stop();
       expect(errors).toHaveLength(1);
-      expect(errors[0]?.[1]).toBeInstanceOf(SyntaxError);
+      expect(errors[0]?.[1]).toBe("not valid JSON");
+      expect(errors.flat().map(String).join(" ")).not.toContain(secret);
 
       errors.length = 0;
       writeFileSync(join(dir, "machine-settings.json"), JSON.stringify({ auto_update_bridges: true }));
