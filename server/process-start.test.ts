@@ -14,17 +14,11 @@ describe("bounded macOS process start reads", () => {
     expect(probes).toEqual([{ argv: ["/bin/ps", "-o", "etime=", "-p", "42"], timeout: 1000, killSignal: "SIGKILL" }]);
   });
 
-  it.each([1, 0])("does not cache failed or unreadable output with exit code %i", (exitCode) => {
-    // Given a failed read followed by a successful one.
-    let calls = 0;
-    const read = createDarwinStartReader(() => {
-      calls++;
-      return { exitCode: calls === 1 ? exitCode : 0, stdout: calls === 1 && exitCode === 0 ? "" : "00:05" };
-    }, () => 10_000, () => true);
+  it.each([1, 0])("returns unknown for failed or unreadable output with exit code %i", (exitCode) => {
+    // Given a failed exit with valid output, or a successful exit with unreadable output.
+    const read = createDarwinStartReader(() => ({ exitCode, stdout: exitCode === 0 ? "" : "00:05" }));
+    // When read, then neither case grants a process identity.
     expect(read(42)).toBeNull();
-    // When retried, then the unknown result has not masked the new reading.
-    expect(read(42)?.started).toBe(5000);
-    expect(calls).toBe(2);
   });
 
   it("returns unknown when spawning throws", () => {
@@ -34,71 +28,15 @@ describe("bounded macOS process start reads", () => {
     expect(read(42)).toBeNull();
   });
 
-  it("avoids a second spawn for a live PID within the cache window", () => {
-    // Given a successful read.
-    let calls = 0;
-    const read = createDarwinStartReader(() => { calls++; return { exitCode: 0, stdout: "00:05" }; }, () => 10_000, () => true);
-    read(42);
-    // When read again immediately, then the cached start avoids another spawn.
-    expect(read(42)?.started).toBe(5000);
-    expect(calls).toBe(1);
-  });
-
-  it("rereads a reused PID at the fixed expiry even after cache hits", () => {
-    // Given a cached old process and a clock controlled without sleeps.
-    let now = 10_000;
-    let calls = 0;
-    const read = createDarwinStartReader(() => {
-      calls++;
-      return { exitCode: 0, stdout: calls === 1 ? "00:05" : "00:00" };
-    }, () => now, () => true);
-    read(42);
-    now += 99;
-    read(42);
-    // When the PID is reused at expiry, then a hit has not extended the old identity.
-    now++;
-    expect(read(42)?.started).toBe(10_100);
-    expect(calls).toBe(2);
-  });
-
-  it("drops a cached start when the PID has exited", () => {
-    // Given a cached process that subsequently exits before expiry.
-    let alive = true;
-    let calls = 0;
-    const read = createDarwinStartReader(() => {
-      calls++;
-      return { exitCode: alive ? 0 : 1, stdout: "00:05" };
-    }, () => 10_000, () => alive);
-    read(42);
-    alive = false;
-    // When read again, then the dead process has no cached identity.
-    expect(read(42)).toBeNull();
-    expect(calls).toBe(2);
-  });
-
-  it("evicts the least recently read PID when the cache reaches its bound", () => {
-    // Given 128 live cached PIDs, with PID 0 refreshed most recently.
-    let calls = 0;
-    const read = createDarwinStartReader(() => { calls++; return { exitCode: 0, stdout: "00:05" }; }, () => 10_000, () => true);
-    for (let pid = 0; pid < 128; pid++) read(pid);
-    read(0);
-    // When another PID fills the cache, then PID 1, not PID 0, needs a new read.
-    read(128);
-    read(0);
-    expect(calls).toBe(129);
-    read(1);
-    expect(calls).toBe(130);
-  });
-
   it("preserves the before and after clocks for the lower bound and start estimate", () => {
     // Given a probe that takes 20 ms.
     let now = 10_000;
     const read = createDarwinStartReader(() => {
       now += 20;
       return { exitCode: 0, stdout: "00:05" };
-    }, () => now, () => true);
-    // When read, then its lower bound uses the earlier clock, not the cached estimate.
-    expect(read(42)).toEqual({ started: 5020, lower: 4000, readAt: 10_000 });
+    }, () => now);
+    // When read, then its lower bound uses the earlier clock, not the later estimate.
+    expect(read(42)).toEqual({ started: 5020, lower: 4000 });
   });
 });
 
