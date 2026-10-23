@@ -174,6 +174,23 @@ it("keeps the composer's New tab button off until this device turns it on, and k
   expect(SHARED_SETTING_KEYS as readonly string[]).not.toContain("composerNewTabButton");
 });
 
+it("keeps the Compact input line off until this device turns it on, with the key bar folded until shown", () => {
+  expect(DEFAULT_SETTINGS.compactTerminalInput).toBe(false);
+  expect(DEFAULT_SETTINGS.compactKeyBarShown).toBe(false);
+  expect(sanitizeSettings({}).compactTerminalInput).toBe(false);
+  expect(sanitizeSettings({ compactTerminalInput: true }).compactTerminalInput).toBe(true);
+  expect(sanitizeSettings({ compactTerminalInput: "true" }).compactTerminalInput).toBe(false);
+  expect(sanitizeSettings({ compactTerminalInput: 1 }).compactTerminalInput).toBe(false);
+  expect(sanitizeSettings({ compactKeyBarShown: true }).compactKeyBarShown).toBe(true);
+  expect(sanitizeSettings({ compactKeyBarShown: "yes" }).compactKeyBarShown).toBe(false);
+  expect(sanitizeSettings({ compactKeyBarShown: null }).compactKeyBarShown).toBe(false);
+  for (const key of ["compactTerminalInput", "compactKeyBarShown"] as const) {
+    expect(SETTING_SCOPE[key]).toBe("device");
+    expect(SHARED_SETTING_KEYS as readonly string[]).not.toContain(key);
+    expect(Object.keys(telemetrySettingsSnapshot(DEFAULT_SETTINGS))).not.toContain(key);
+  }
+});
+
 it("keeps the screen wake lock off until this device explicitly enables it", () => {
   expect(DEFAULT_SETTINGS.keepScreenOn).toBe(false);
   expect(sanitizeSettings({}).keepScreenOn).toBe(false);

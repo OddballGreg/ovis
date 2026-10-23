@@ -465,6 +465,9 @@ function TerminalPage({ keyBarButtonRef, onEditKeyBar }: { keyBarButtonRef: RefO
           <option value="direct">{t("Direct typing")}</option><option value="line">{t("Input line")}</option>
         </select>
       </SettingsRow>
+      <SettingsRow label={t("Compact input line")} description={t("On a phone, the input line is one short row and the key bar folds away behind a button at its end, so the terminal keeps more rows.")}>
+        <Toggle label={t("Compact input line")} checked={settings.compactTerminalInput} onChange={(compactTerminalInput) => update({ compactTerminalInput })} />
+      </SettingsRow>
       <SettingsRow label={t("Key bar")} description={t("Keys, order and custom combinations for the terminal.")}>
         <button type="button" ref={keyBarButtonRef} className="btn" onClick={onEditKeyBar}>{t("Edit key bar")}</button>
       </SettingsRow>

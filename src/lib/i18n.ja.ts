@@ -808,6 +808,8 @@ export const JA: Record<string, string> = {
   "Turn this on if this PC also shows herdr in a terminal window. A second after you switch to another window, this tab only watches the pane, so herdr's window keeps the pane at its own size instead of this window's. Click the tab to type again. While it watches, the pane is drawn at herdr's size and may not fill this window.": "この PC のターミナルウィンドウでも herdr を使うならオンにします。別のウィンドウに切り替えて 1 秒たつと、このタブはペインを表示するだけになり、herdr のウィンドウはペインをこのウィンドウではなく自分のサイズのまま保ちます。入力するにはタブをクリックしてください。表示中のペインは herdr のサイズで描かれるため、このウィンドウを埋めないことがあります。",
   "Follow herdr's focus": "herdr のフォーカスに追従",
   "When herdr moves to another pane, by a click in its window, a herdr command or a script, this device opens that pane too. Only on the PC open here, and only on this device.": "herdr が別のペインに移ると（herdr のウィンドウでのクリック、herdr コマンド、スクリプト）、このデバイスもそのペインを開きます。ここで開いている PC だけで、このデバイスだけに適用されます。",
+  "Compact input line": "コンパクトな入力欄",
+  "On a phone, the input line is one short row and the key bar folds away behind a button at its end, so the terminal keeps more rows.": "スマートフォンで入力欄を一行に縮め、キーバーを入力欄の端のボタンの奥に畳んで、ターミナルの行を多く残します。",
   "What should {agent} do in {folder}?": "{folder} で {agent} に何を頼みますか？",
   "No conversation yet — say something below": "まだ会話はありません。下から話しかけてください",
   "terminal ended": "ターミナルが終了しました",

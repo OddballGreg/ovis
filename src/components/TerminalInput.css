@@ -107,3 +107,94 @@
   color: var(--danger-text);
   font-size: var(--fs-xs);
 }
+
+/* the key bar's fold button (TerminalInput.tsx), the Compact input line's: it shows where the key
+   bar does (KeyBar.css) */
+.terminal-input-keys {
+  display: none;
+  position: relative;
+  align-items: center;
+  justify-content: center;
+  width: var(--touch-target-compact);
+  height: var(--touch-target-compact);
+  border: var(--hairline) solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--bg-elevated);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.terminal-input-keys[aria-pressed="true"] {
+  border-color: var(--accent);
+}
+
+.terminal-input-keys svg {
+  width: var(--icon-size);
+  height: var(--icon-size);
+}
+
+/* Settings → Terminal → Compact input line: one short row, so a phone keeps more of its grid.
+   The field, Send, the mic and the fold button are drawn --touch-target-compact (36px) tall,
+   and each still reaches --touch-target (44px): the bar's padding above and below is the
+   difference, the buttons grow into it through an invisible ::before expander, and a press on
+   the bar around the field focuses the field. The gap between buttons is the expanders' width
+   past the buttons, so two neighbours never share a tap. The bar is that 44px and its hairline */
+.terminal-input-slot.is-compact {
+  height: calc(var(--hairline) + var(--touch-target));
+}
+
+.terminal-input.is-compact {
+  padding: calc((var(--touch-target) - var(--touch-target-compact)) / 2) var(--space-2);
+  gap: calc(var(--touch-target) - var(--touch-target-compact));
+}
+
+.terminal-input.is-compact .terminal-input-text {
+  min-height: var(--touch-target-compact);
+  /* one row of text and the hairlines fill the field's drawn height */
+  padding: max(0px, (var(--touch-target-compact) - max(16px, var(--fs-md)) * var(--lh-base) - 2 * var(--hairline)) / 2) var(--space-3);
+}
+
+.terminal-input.is-compact .terminal-input-send,
+.terminal-input.is-compact .terminal-input-mic .voice-mic {
+  position: relative;
+  width: var(--touch-target-compact);
+  height: var(--touch-target-compact);
+}
+
+.terminal-input.is-compact .terminal-input-send::before,
+.terminal-input.is-compact .terminal-input-mic .voice-mic::before,
+.terminal-input-keys::before {
+  content: "";
+  position: absolute;
+  inset: calc((var(--touch-target-compact) - var(--touch-target)) / 2);
+}
+
+@media (pointer: coarse), (max-width: 768px) {
+  .terminal-input-keys {
+    display: inline-flex;
+  }
+
+  .terminal-input.is-compact.has-keys {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+  }
+
+  .terminal-input.is-compact.has-voice.has-keys {
+    grid-template-columns: minmax(0, 1fr) auto auto auto;
+  }
+
+  /* with the key bar folded away the line is the bar at the screen's bottom: it keeps clear of
+     the home indicator itself, in place of the host's inset (styles.css), and its own padding
+     under the field counts toward that room, as the key bar's does (KeyBar.css) */
+  .terminal-host:has(.terminal-input-slot.is-folded) {
+    padding-bottom: 0;
+  }
+
+  .terminal-input-slot.is-compact.is-folded {
+    height: calc(var(--hairline) + var(--touch-target)
+      + max(0px, env(safe-area-inset-bottom, 0px) - (var(--touch-target) - var(--touch-target-compact)) / 2));
+  }
+
+  .terminal-input-slot.is-folded > .terminal-input.is-compact {
+    padding-bottom: max((var(--touch-target) - var(--touch-target-compact)) / 2, env(safe-area-inset-bottom, 0px));
+  }
+}

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type KeyboardEvent } from "react";
-import { CornerDownLeft, SendHorizontal } from "lucide-react";
+import { ChevronDown, ChevronUp, CornerDownLeft, SendHorizontal } from "lucide-react";
 
 import "./TerminalInput.css";
 import { readTerminalDraft, writeTerminalDraft, TERMINAL_LINE_LIMIT, subscribeTerminalDraft, terminalDraftSending, setTerminalDraftSending, acknowledgeTerminalDraft } from "../lib/terminalDraft.ts";
@@ -21,6 +21,10 @@ export interface TerminalInputProps {
   onEnter: () => boolean | string;
   /** the line took the focus */
   onFocus?: () => void;
+  /** Settings → Terminal → Compact input line: one short row, and the key bar's fold button */
+  compact?: boolean;
+  /** the button at the line's end that folds the key bar away and brings it back (compact only) */
+  keyBar?: { shown: boolean; onToggle: () => void };
 }
 
 /** Lines the box grows to before it scrolls. */
@@ -45,7 +49,7 @@ interface SendAttempt {
  * keyboard's own editing and goes to the pane whole, then Enter. Autocorrect and spell-check stay
  * off, as in the composer: they would swap a flag, path or branch name for a dictionary word.
  */
-export function TerminalInput({ owner, active = true, connected, onSend, onEnter, onComposing, onFocus }: TerminalInputProps) {
+export function TerminalInput({ owner, active = true, connected, onSend, onEnter, onComposing, onFocus, compact = false, keyBar }: TerminalInputProps) {
   const t = useT();
   const text = useSyncExternalStore(subscribeTerminalDraft, () => readTerminalDraft(owner));
   const setText = useCallback((value: string | ((previous: string) => string)) => {
@@ -204,7 +208,9 @@ export function TerminalInput({ owner, active = true, connected, onSend, onEnter
   }, [text]);
   const rows = Math.min(MAX_ROWS, Math.max(wrappedRows, text.split("\n").length));
   return (
-    <div className={`terminal-input${dictation.shown ? " has-voice" : ""}`}>
+    <div className={`terminal-input${dictation.shown ? " has-voice" : ""}${compact ? " is-compact" : ""}${compact && keyBar ? " has-keys" : ""}`}
+      // a compact field is shorter than a finger: a press on the bar around it is a press on it
+      onClick={compact ? (event) => { if (event.target === event.currentTarget) box.current?.focus(); } : undefined}>
       <textarea
         ref={box}
         className="terminal-input-text"
@@ -250,6 +256,20 @@ export function TerminalInput({ owner, active = true, connected, onSend, onEnter
       >
         {text.length === 0 ? <CornerDownLeft aria-hidden="true" /> : <SendHorizontal aria-hidden="true" />}
       </button>
+      {compact && keyBar && (
+        <button
+          type="button"
+          className="terminal-input-keys"
+          aria-label={t("Terminal keys")}
+          title={t("Terminal keys")}
+          aria-pressed={keyBar.shown}
+          // the soft keyboard stays up, as for Send
+          onPointerDown={(event) => event.preventDefault()}
+          onClick={keyBar.onToggle}
+        >
+          {keyBar.shown ? <ChevronDown aria-hidden="true" /> : <ChevronUp aria-hidden="true" />}
+        </button>
+      )}
       {note !== null && <p className="terminal-input-note" role="alert">{note}</p>}
       {dictation.shown && <VoiceRecordingPill dictation={dictation} align="end" />}
     </div>

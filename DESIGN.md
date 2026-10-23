@@ -656,6 +656,7 @@ Comfortable values are `:root`; the final column is the complete compact overrid
 | `--control-h` | `34px` | `32px` | Buttons and fields |
 | `--segmented-inset` | `6px` | — | What the segmented track takes from `--control-h` above and below an option (its `2px` padding and the hairline, both sides): an option is `--control-h` less this, and its touch expander grows from that height to `--touch-target` |
 | `--touch-target` | `44px` | — | Coarse-pointer minimum: every control a finger can reach is at least this in both dimensions |
+| `--touch-target-compact` | `36px` | — | The drawn size of a control in the terminal's Compact input line; its hit area still reaches `--touch-target` through the bar's padding |
 | `--pointer-target` | `24px` | — | Fine-pointer minimum hit area: a glyph button under `--control-h` (the chat's copy and format buttons, an attachment tile's X) keeps its look and reaches it through an invisible `::before` expander |
 | `--touch-target-header` | `44px` | — | The phone header's controls (`<=768px`) |
 | `--keybar-h` | `48px` | — | Terminal key bar |
@@ -2459,6 +2460,22 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
   whose cap is a symbol or abbreviation carries its spoken name as `aria-label` (Esc → Escape,
   `^C` → Control C, ⌫ → Backspace, Ctrl → Control, the arrows and page keys), translated with the
   UI; a cap that is a word (Tab, Enter, Home, End) is its own name.
+- **Compact input line** (Settings → Terminal, a device setting, off by default) gives a phone's
+  grid more rows. The input line becomes one short row: the field, Send, the mic and a key-bar
+  button are drawn `--touch-target-compact` (`36px`) tall inside a bar of `--touch-target` and
+  its hairline (`45px`, against `53px` for the line and `48px` for the key bar). The `44px` rule
+  above still holds: the bar's `4px` padding above and below is each control's hit area, the
+  buttons reaching it through an invisible `::before` expander and the field because a press on
+  the bar around it focuses it; buttons stand `8px` apart, so two expanders never overlap. The
+  field still grows upward while its text wraps, as the full line does.
+  The key bar folds away behind that button (chevron, `aria-pressed`, named **Terminal keys**),
+  folded until shown and remembered per device (`compactKeyBarShown`). With the bar folded the
+  line is the bar at the screen's bottom: it carries `env(safe-area-inset-bottom)` itself in
+  place of the host's, so the inset is applied once and no band shows under it. Only a line on
+  screen folds the bar: with direct typing, or the masked input in the line's place, the bar
+  stays, as it holds the way back to the input line. The one-row field that grows with its text
+  follows the Claude and Codex phone apps' composers; the fold is this app's own, as those apps
+  have no terminal key row to fold. No code or pixels are copied from them.
 - The mobile drawer slides over a scrim. Closed visibility removes its controls from the tab order.
 
 ### In-app alert

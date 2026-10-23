@@ -160,6 +160,9 @@
      hairline, both sides. An option is --control-h less this, and its touch expander grows from that */
   --segmented-inset: 6px;
   --touch-target: 44px;
+  /* a compact touch control's drawn size (the terminal's Compact input line): it still reaches
+     --touch-target through the bar's padding, never by being drawn bigger */
+  --touch-target-compact: 36px;
   /* the smallest hit area a mouse gets: a glyph button under --control-h keeps its look and reaches
      it through an invisible ::before expander (ChatView.css, Composer.css), never by growing */
   --pointer-target: 24px;
