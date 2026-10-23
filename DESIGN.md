@@ -1432,7 +1432,8 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
   **Resuming…**, **Reading sessions…** or why the list was read again, so no row moves under the
   pointer when it speaks. A pane whose store cannot be told (herdr reports none of its processes,
   two Claudes in front of it, an unreadable environment, or a macOS `ps` line showing the variable
-  more than once or naming no folder) lists nothing and says why in words, with the next step: one
+  more than once, empty, naming `~/.claude`, or naming a folder that does not hold that Claude's
+  live PID record: `ps` cannot tell an export from the same text inside another value) lists nothing and says why in words, with the next step: one
   Claude in the pane, its store folder there, then open the list again. A row its bridge bound to
   no store (an older bridge, or a store a new tab would not repeat: none exported by the pane's
   Claude while the environment a new tab inherits exports one; that is herdr's own on Linux and

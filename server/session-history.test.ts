@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { Database } from "bun:sqlite";
 import { copyFileSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, opendirSync, readdirSync, type BigIntStats, type Dir, type Dirent, type Stats, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -1229,13 +1229,60 @@ describe("GET /api/sessions/history", () => {
     it("closes a resumed Claude's tab that does not say its store in time", async () => {
       const home = newHome();
       claudeStore(join(home, ".claude"), ID(1), "default store prompt");
-      // the new pane never shows a Claude whose store can be read: no proof of the store, so nothing is kept
-      const shell = async (): Promise<PaneProcesses> => ({ shell_pid: null, foreground_processes: [{ pid: 1, name: "bash", argv: ["bash"] }] });
-      const base = { stores: { home, env: {} }, snapshot: async () => snapshot(), paneProcesses: shell, launchSource: launchAbsent, launchCheckMs: 0 };
+      // the new pane never shows a Claude whose store can be read: no proof of the store, so nothing is kept.
+      // Both panes are a shell with nothing under it, on every platform: Windows looks under shell_pid
+      const shell = async (): Promise<PaneProcesses> => ({ shell_pid: 1, foreground_processes: [{ pid: 1, name: "bash", argv: ["bash"] }] });
+      const table = async (): Promise<ProcessRow[]> => [{ pid: 1, parent: 0, path: "bash", commandLine: "bash" }];
+      const base = { stores: { home, env: {} }, snapshot: async () => snapshot(), paneProcesses: shell, table, launchSource: launchAbsent, launchCheckMs: 0 };
       const listed = await (await handleSessionHistoryRequest(...request("workspace_id=w1&agent=claude&pane_id=p1"), { readOnly: false, ...base })).json() as ClaudeListing;
       const closed: string[] = [];
       const [status, json] = await answer(await resume({ workspace_id: "w1", pane_id: "p1", agent: "claude", session_id: ID(1), store_key: listed.sessions[0]!.resume!.source!.store_key }, { ...base, tabs: fakeTabs(closed) }));
       expect([status, json.error?.code, closed]).toEqual([409, "launch_store_unknown", ["t-new"]]);
+    });
+
+    it("closes a macOS resume whose Claude only looks exported to the listed store, and keeps one that writes there", async () => {
+      // macOS: `ps -E` prints one line, so NOTE="example CLAUDE_CONFIG_DIR=<store>" reads as an export of
+      // <store>. The new Claude's live PID record says where it really writes
+      const home = newHome();
+      const alternate = join(home, "alternate-store");
+      claudeStore(alternate, ID(1), "alternate store prompt");
+      const LSTART = "Fri Oct  9 09:00:00 2026";
+      const SOURCE = 501;
+      const STARTED = 502;
+      const lines: Record<number, string> = {
+        [SOURCE]: `claude CLAUDE_CONFIG_DIR=${alternate} HOME=${home} PATH=/usr/bin`,
+        [STARTED]: `claude NOTE=example CLAUDE_CONFIG_DIR=${alternate} HOME=${home} PATH=/usr/bin`,
+      };
+      const spawned = spyOn(Bun, "spawn").mockImplementation(((command: string[]) => {
+        const pid = Number(command[command.indexOf("-p") + 1]);
+        const text = command.includes("lstart=") ? LSTART : lines[pid] ?? "";
+        return { stdout: new Response(`${text}\n`).body, exited: Promise.resolve(0), kill: () => {} };
+      }) as unknown as typeof Bun.spawn);
+      const record = (store: string, pid: number) => {
+        mkdirSync(join(store, "sessions"), { recursive: true });
+        writeFileSync(join(store, "sessions", `${pid}.json`), JSON.stringify({ pid, sessionId: ID(1), procStart: LSTART, kind: "interactive" }));
+      };
+      const paneProcesses = async (paneId: string): Promise<PaneProcesses> => ({ shell_pid: null, foreground_processes: [{ pid: paneId === "p-new" ? STARTED : SOURCE, name: "claude", argv: ["claude"] }] });
+      try {
+        record(alternate, SOURCE);
+        const base = { stores: { home, env: {} }, snapshot: async () => snapshot(), paneProcesses, launchSource: launchAbsent, platform: "darwin", launchCheckMs: 0 };
+        const listed = await (await handleSessionHistoryRequest(...request("workspace_id=w1&agent=claude&pane_id=p1"), { readOnly: false, ...base })).json() as ClaudeListing;
+        const valid = { workspace_id: "w1", pane_id: "p1", agent: "claude", session_id: ID(1), store_key: listed.sessions[0]!.resume!.source!.store_key };
+        // the started Claude writes ~/.claude: its tab is closed, never answered as resumed
+        record(join(home, ".claude"), STARTED);
+        forgetClaudeSessions();
+        const closed: string[] = [];
+        const [status, json] = await answer(await resume(valid, { ...base, tabs: fakeTabs(closed) }));
+        expect([status, json.action, closed]).toEqual([409, undefined, ["t-new"]]);
+        // the control: the same line from a Claude that does write the listed store is kept
+        rmSync(join(home, ".claude", "sessions"), { recursive: true, force: true });
+        record(alternate, STARTED);
+        lines[STARTED] = lines[SOURCE]!;
+        forgetClaudeSessions();
+        const kept: string[] = [];
+        expect(await answer(await resume(valid, { ...base, tabs: fakeTabs(kept) }))).toEqual([200, { action: "created", workspace_id: "w1", pane_id: "p-new", agent_started: true }] as never);
+        expect(kept).toEqual([]);
+      } finally { spawned.mockRestore(); forgetClaudeSessions(); }
     });
   });
 
@@ -1326,9 +1373,11 @@ describe("GET /api/sessions/history", () => {
   it("lists a pane with no Claude from the server's default store, and refuses a pane of another workspace before reading any", async () => {
     const home = newHome();
     claudeStore(join(home, ".claude"), ID(1), "default store prompt");
-    const shell = async () => ({ shell_pid: null, foreground_processes: [{ pid: 1, name: "bash", argv: ["bash"] }] });
+    // a shell with nothing under it, on every platform: Windows looks under shell_pid
+    const shell = async () => ({ shell_pid: 1, foreground_processes: [{ pid: 1, name: "bash", argv: ["bash"] }] });
+    const table = async (): Promise<ProcessRow[]> => [{ pid: 1, parent: 0, path: "bash", commandLine: "bash" }];
     let asked = 0;
-    const options = { readOnly: false, stores: { home, env: {} }, snapshot: async () => snapshot(), paneProcesses: async () => { asked += 1; return shell(); }, launchSource: launchAbsent };
+    const options = { readOnly: false, stores: { home, env: {} }, snapshot: async () => snapshot(), paneProcesses: async () => { asked += 1; return shell(); }, table, launchSource: launchAbsent };
     const body = await (await handleSessionHistoryRequest(...request("workspace_id=w1&agent=claude&pane_id=p1"), options)).json() as ClaudeListing;
     expect(body.sessions.map((row) => [row.firstMessage, row.resume?.source?.pane_id])).toEqual([["default store prompt", "p1"]]);
     asked = 0;

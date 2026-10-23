@@ -387,22 +387,39 @@ describe("a Claude process's store source", () => {
     expect(await processClaudeSource(await standIn({}))).toEqual({ state: "absent" });
   });
 
-  it("macOS ps output proves an exported store only past herdr's argv, once, naming a directory", async () => {
+  it("macOS ps output proves an exported store only past herdr's argv, once, and where the process's live PID record is", async () => {
     const store = tempDir();
     const home = tempDir();
-    // ps prints arguments and environment as one line: herdr's argv says where the arguments end
+    const fallback = join(home, ".claude");
+    // ps prints arguments and environment as one line: herdr's argv says where the arguments end, and
+    // Claude's live PID record (sessions/<pid>.json, its start as ps lstart prints it) says which store it writes
+    const LSTART = "Fri Oct  9 09:00:00 2026";
     const lines: string[] = [];
     const spawned = spyOn(Bun, "spawn").mockImplementation(((command: string[]) => {
       expect(command[0]).toBe("/bin/ps");
-      return { stdout: new Response(lines.shift()).body, exited: Promise.resolve(0), kill: () => {} };
+      const text = command.includes("lstart=") ? `${LSTART}\n` : lines.shift();
+      return { stdout: new Response(text).body, exited: Promise.resolve(0), kill: () => {} };
     }) as unknown as typeof Bun.spawn);
+    const recordIn = (dir: string | null) => {
+      for (const each of [store, fallback]) rmSync(join(each, "sessions"), { recursive: true, force: true });
+      if (dir === null) return;
+      mkdirSync(join(dir, "sessions"), { recursive: true });
+      writeFileSync(join(dir, "sessions", "4242.json"), JSON.stringify({ pid: 4242, sessionId: SESSION, procStart: LSTART, kind: "interactive" }));
+    };
     try {
-      const read = async (line: string, argv = ["claude"]) => { forgetClaudeSessions(); lines.push(`${line}\n`); return processClaudeSource(4242, argv, home, "darwin"); };
-      // the usual case, a store exported to plain `claude`: that store
+      const read = async (line: string, argv = ["claude"], recorded: string | null = store) => { forgetClaudeSessions(); recordIn(recorded); lines.push(`${line}\n`); return processClaudeSource(4242, argv, home, "darwin"); };
+      // the usual case, a store exported to plain `claude` that holds its record: that store
       expect(await read(`claude CLAUDE_CONFIG_DIR=${store} HOME=${home} PATH=/usr/bin`)).toEqual({ state: "override", dir: store });
       expect(await read(`claude HOME=${home} PATH=/usr/bin CLAUDE_CONFIG_DIR=${store}`)).toEqual({ state: "override", dir: store });
-      // exported empty: its own override, which Claude reads as its default store
-      expect(await read(`claude CLAUDE_CONFIG_DIR= HOME=${home} PATH=/usr/bin`)).toEqual({ state: "override", dir: "" });
+      // the same text inside another variable's value (NOTE="example CLAUDE_CONFIG_DIR=<store>") reads alike;
+      // the record is in ~/.claude, so that Claude writes there: no proof of the store the text names
+      expect(await read(`claude NOTE=example CLAUDE_CONFIG_DIR=${store} HOME=${home} PATH=/usr/bin`, ["claude"], fallback)).toEqual({ state: "unreadable" });
+      // no record anywhere yet: no proof either
+      expect(await read(`claude CLAUDE_CONFIG_DIR=${store} HOME=${home} PATH=/usr/bin`, ["claude"], null)).toEqual({ state: "unreadable" });
+      // the lookalike naming ~/.claude, where a Claude with nothing exported writes its record too: the
+      // record cannot tell an export from text inside another value, so no proof; nor of an empty export
+      expect(await read(`claude NOTE=example CLAUDE_CONFIG_DIR=${fallback} HOME=${home} PATH=/usr/bin`, ["claude"], fallback)).toEqual({ state: "unreadable" });
+      expect(await read(`claude CLAUDE_CONFIG_DIR= HOME=${home} PATH=/usr/bin`, ["claude"], fallback)).toEqual({ state: "unreadable" });
       // an argument naming the variable is an argument, not an assignment
       expect(await read(`claude --settings CLAUDE_CONFIG_DIR=${store} HOME=${home} PATH=/usr/bin`, ["claude", "--settings", `CLAUDE_CONFIG_DIR=${store}`])).toEqual({ state: "absent" });
       // a line that does not start with herdr's argv, two assignments, or a value naming no directory: no proof

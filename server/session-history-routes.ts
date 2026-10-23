@@ -15,7 +15,7 @@
  * the environment a new tab inherits exports none either (claude-store.ts herdrLaunchSource).
  */
 import type { SessionHistoryResponse, SessionResumeResponse, SessionSnapshot } from "../shared/protocol.ts";
-import { claudeStoreOf, herdrLaunchSource, isClaudeProcess, paneClaudeSource, type ClaudeSource, type PaneProcess } from "./claude-store.ts";
+import { claudeProcessSession, claudeStoreOf, herdrLaunchSource, isClaudeProcess, paneClaudeSource, type ClaudeSource, type PaneProcess } from "./claude-store.ts";
 import { agentLaunch } from "./agent-launch.ts";
 import { recentProcessTable } from "./gjc-runtime.ts";
 import { herdrSocketPath, paneProcessInfo, sessionSnapshot, tabClose, tabCreate } from "./herdr/client.ts";
@@ -91,10 +91,10 @@ async function windowsPaneClaude(shellPid: number, table: () => Promise<ProcessR
 }
 
 /**
- * The Claude store of a pane (claude-store.ts claudeStoreOf), and whether a Claude was found there
- * (no Claude: the server's default store); null when it cannot be told.
+ * The Claude store of a pane (claude-store.ts claudeStoreOf), whether a Claude was found there (no
+ * Claude: the server's default store) and its pid; null when it cannot be told.
  */
-async function paneStore(paneId: string, options: StoreOptions): Promise<{ store: NonNullable<Awaited<ReturnType<typeof claudeStoreOf>>>; claude: boolean } | null> {
+async function paneStore(paneId: string, options: StoreOptions): Promise<{ store: NonNullable<Awaited<ReturnType<typeof claudeStoreOf>>>; claude: boolean; pid: number | null } | null> {
   let processes: PaneProcesses | undefined;
   try { processes = await (options.paneProcesses ?? herdrPaneProcesses)(paneId); } catch { return null; }
   // only processes herdr reported say there is no Claude: an answer without them is no answer
@@ -113,19 +113,31 @@ async function paneStore(paneId: string, options: StoreOptions): Promise<{ store
   const home = options.stores?.home ?? process.env["HOME"] ?? "";
   const source = await paneClaudeSource(foreground, home, platform, table);
   const store = await claudeStoreOf(source, home, options.stores?.env ?? process.env);
-  return store === null ? null : { store, claude: source !== null };
+  const claude = foreground.filter(isClaude);
+  return store === null ? null : { store, claude: source !== null, pid: claude.length === 1 ? claude[0]!.pid : null };
 }
 
 /**
- * The store the Claude a resume started in `paneId` came up on, once it says one; null when it
- * does not within `launchCheckMs`.
+ * The store the Claude a resume started in `paneId` came up on, once it says one, and whether it
+ * writes `listedDir`; null when it says no store within `launchCheckMs`. Only Linux reads a
+ * process's environment exactly: elsewhere the store it came up on is read from `ps` text (macOS)
+ * or found by its PID record (Windows), so Claude's own live PID record must also be in the listed
+ * store's folder, a proof that does not depend on that reading. Claude writes the record as it
+ * starts, so it is waited for too.
  */
-async function startedStore(paneId: string, options: StoreOptions): Promise<NonNullable<Awaited<ReturnType<typeof paneStore>>>["store"] | null> {
+async function startedStore(paneId: string, listedDir: string, options: StoreOptions): Promise<{ store: NonNullable<Awaited<ReturnType<typeof paneStore>>>["store"]; writesListed: boolean } | null> {
   const deadline = Date.now() + (options.launchCheckMs ?? 15_000);
+  const platform = options.platform ?? process.platform;
+  const home = options.stores?.home ?? process.env["HOME"] ?? "";
+  let landed: Awaited<ReturnType<typeof paneStore>> = null;
   for (;;) {
     const found = await paneStore(paneId, options);
-    if (found?.claude) return found.store;
-    if (Date.now() >= deadline) return null;
+    if (found?.claude) {
+      landed = found;
+      if (platform === "linux") return { store: found.store, writesListed: true };
+      if (found.pid !== null && await claudeProcessSession(home, found.pid, listedDir, platform, options.table ?? recentProcessTable) !== null) return { store: found.store, writesListed: true };
+    }
+    if (Date.now() >= deadline) return landed === null ? null : { store: landed.store, writesListed: false };
     await Bun.sleep(200);
   }
 }
@@ -242,12 +254,12 @@ export async function handleSessionResumeRequest(request: Request, options: { re
     const created = await tabs.create({ workspaceId, cwd, ...(store.env === null ? {} : { env: store.env }) });
     const launched = await tabs.start(created.root_pane.pane_id, { kind: "claude", args: ["--resume", sessionId] });
     if (launched.agent_started) {
-      const landed = await startedStore(created.root_pane.pane_id, options);
+      const landed = await startedStore(created.root_pane.pane_id, store.dir, options);
       if (landed === null) {
         await tabs.close(created.tab.tab_id);
         return refuse(409, "launch_store_unknown", "the new tab's Claude did not say its store in time, so its tab was closed");
       }
-      if (!sameStore(landed, store)) {
+      if (!landed.writesListed || !sameStore(landed.store, store)) {
         await tabs.close(created.tab.tab_id);
         return refuse(409, "launch_store_changed", "the new tab's shell chose another Claude store, so its tab was closed");
       }

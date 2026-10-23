@@ -143,6 +143,12 @@ async function windowsProcessStore(home: string, pid: number, table: () => Promi
   return owners[0] ?? null;
 }
 
+/** Whether two paths name one folder (claudeStoreKey: by its file id where it has one). */
+async function sameFolder(one: string, other: string): Promise<boolean> {
+  const identity = async (path: string) => { try { return claudeStoreKey(path, await stat(path, { bigint: true })); } catch { return claudeStoreKey(path, null); } };
+  return await identity(one) === await identity(other);
+}
+
 /** A named store: an absolute path to a directory, else null. */
 async function namedDirectory(dir: string | null): Promise<string | null> {
   if (dir === null || !isAbsolute(dir)) return null;
@@ -173,11 +179,12 @@ async function environSource(environ: string): Promise<SourceRead> {
 /**
  * A macOS `ps -E -o command=` line as a source. ps prints the arguments, then the environment, as
  * one line: herdr's argv for the process says where the arguments end, so an argument naming the
- * variable is not read as an assignment. A value still cannot be bounded (one holding ` NAME=` is
- * cut there), so one exported value counts only when it is the only one shown and names a
- * directory (or is empty). None shown proves none only beside the rest of an environment: a process
- * that overwrote its environment's memory shows none of it. When the line does not start with the
- * argv, any assignment shown is no proof.
+ * variable is not read as an assignment. Past them, entries cannot be told from text inside another
+ * value (NOTE="example CLAUDE_CONFIG_DIR=<dir>" reads like an export of <dir>), so the one value
+ * shown is only a candidate: readClaudeSource keeps it only where the process's live PID record is.
+ * None shown proves none only beside the rest of an environment: a process that overwrote its
+ * environment's memory shows none of it. When the line does not start with the argv, any assignment
+ * shown is no proof.
  */
 async function psLineSource(text: string, argv: readonly string[]): Promise<ClaudeSource> {
   const line = text.replace(/\s+$/, "");
@@ -213,7 +220,15 @@ async function readClaudeSource(pid: number, argv: readonly string[], home: stri
       } finally { clearTimeout(timer); }
       const legacy = await namedDirectory(configDirInPsLine(text));
       if (code !== 0 || text.trim() === "") return { source: { state: "unreadable" }, legacy };
-      return { source: await psLineSource(text, argv), legacy };
+      const source = await psLineSource(text, argv);
+      // An export read from ps counts only for a folder other than ~/.claude that holds Claude's live
+      // PID record: only a real export moves the store there. ~/.claude holds the record with nothing
+      // exported too, so there (and for an empty value) a real export cannot be told from the text.
+      if (source.state === "override" && (source.dir === "" || await sameFolder(source.dir, join(home, ".claude"))
+        || await claudeProcessSession(home, pid, source.dir, "darwin") === null)) {
+        return { source: { state: "unreadable" }, legacy };
+      }
+      return { source, legacy };
     }
     return unreadable;
   } catch (error) {
