@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { chromium } from "playwright-core";
+import { chromium, type Request } from "playwright-core";
 import { chromePath } from "./chrome-path.ts";
 
 assert.equal(process.platform, "win32", "this regression requires native Windows");
@@ -39,11 +39,14 @@ try {
   await until(async () => (await paneRead({ paneId: pane, source: "visible", format: "text" })).text.includes("WIN-HISTORY-120"), "PowerShell output");
   browser = await chromium.launch({ executablePath: chromePath(), headless: true });
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, hasTouch: true });
+  await context.addInitScript(() => localStorage.setItem("ovis:settings", JSON.stringify({ terminalWheelSpeed: 1 })));
   const page = await context.newPage();
   const errors: string[] = [];
   let scrollWrites = 0;
+  const requestStarts = new Map<Request, number>();
   page.on("pageerror", (error) => { errors.push(error.message); console.error(error); });
   page.on("request", (request) => {
+    requestStarts.set(request, requestStarts.size + 1);
     if (request.method() === "POST" && new URL(request.url()).pathname === "/api/pane/scroll") scrollWrites++;
   });
   await page.goto(`http://127.0.0.1:${server.port}/?pane=${encodeURIComponent(pane)}`);
@@ -81,18 +84,29 @@ try {
   await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
   // A real wheel request is the positive control: the same history writer must run before
   // checking the tap's absence of writes, rather than passing after an arbitrary frame count.
-  const wheelWritten = page.waitForResponse((response) =>
-    response.request().method() === "POST" && new URL(response.url()).pathname === "/api/pane/scroll",
-    { timeout: 15_000 });
   await host.hover();
+  const scrollUrl = new URL("/api/pane/scroll", page.url()).href;
+  const beforeWheelRequest = requestStarts.size;
+  // Speed 1 moves three native history lines. A tap's earlier request cannot be the control,
+  // even when its response arrives after the wheel; the pane and changed target must also match.
+  const wheelWritten = page.waitForEvent("requestfinished", {
+    predicate: (request) => (requestStarts.get(request) ?? 0) > beforeWheelRequest
+      && request.method() === "POST" && request.url() === scrollUrl
+      && request.postData() === JSON.stringify({ pane_id: pane, offset_from_bottom: 3 }),
+    timeout: 15_000,
+  });
   await page.mouse.wheel(0, -1);
-  const wheelResponse = await wheelWritten;
-  assert.ok(wheelResponse.ok(), "the positive-control wheel writes native history");
-  await wheelResponse.finished();
-  // The writer drains queued writes before waking the metrics reader.
-  await page.waitForResponse((response) =>
-    response.request().method() === "GET" && new URL(response.url()).pathname === "/api/pane/scroll",
-    { timeout: 15_000 });
+  const wheelRequest = await wheelWritten;
+  assert.ok((await wheelRequest.response())?.ok(), "the positive-control wheel writes native history");
+  // Only a reader started after the control's entire response completed can fence the writer.
+  // requestfinished bounds body completion too; an old in-flight GET cannot satisfy this wait.
+  const afterWheelRequest = requestStarts.size;
+  const metricsRead = await page.waitForEvent("requestfinished", {
+    predicate: (request) => (requestStarts.get(request) ?? 0) > afterWheelRequest
+      && request.method() === "GET" && request.url() === `${scrollUrl}?pane_id=${encodeURIComponent(pane)}`,
+    timeout: 15_000,
+  });
+  assert.ok((await metricsRead.response())?.ok(), "fresh native history metrics complete after the control");
   assert.equal(scrollWrites, writesBeforeTap + 1, "only the wheel, not the unmoved tap, writes shared native history");
   await paneScroll(pane, 0);
   await until(async () => (await text()).includes("P".repeat(100)), "return to prompt after the control wheel");
