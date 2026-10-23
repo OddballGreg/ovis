@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { AgentStatus, HerdrPane, SessionSnapshot } from "../../shared/protocol.ts";
 import machines from "../../site/demo/fixtures/machines.json";
-import { activityOrder, isSeenDone, liveSeqs, newSeqMemory, shownStatus, stateSeqs } from "./sidebarOrder.ts";
+import { activityOrder, isSeenDone, liveSeqs, newSeqMemory, shownStatus, stateSeqs, waitingOrder } from "./sidebarOrder.ts";
 import { DEFAULT_SETTINGS, sanitizeSettings } from "./settings.ts";
 
 const template = machines.machines[0]!.snapshot!;
@@ -109,8 +109,39 @@ describe("opened finish identity", () => {
   });
 });
 
+describe("longest wait order", () => {
+  const raw = (row: HerdrPane) => row.agent_status;
+
+  it("ranks blocked, then an unread finish, then ready, then working, whatever their recency", () => {
+    const panes = [pane("working", "working"), pane("ready", "idle"), pane("finished", "done", 1), pane("blocked", "blocked"), { ...pane("bg", "done", 1), background_wait: true as const }];
+    const seqs = new Map([["working", 1], ["ready", 2], ["finished", 3], ["blocked", 4], ["bg", 0]]);
+    expect(waitingOrder(panes, (p) => p, (p) => shownStatus(p, {}), seqs).map((p) => p.pane_id)).toEqual(["blocked", "finished", "ready", "bg", "working"]);
+  });
+
+  it("puts the oldest state change first within a rank, then the order given, then panes with no counter", () => {
+    const panes = [pane("new", "done", 1), pane("none", "done", 1), pane("tie-a", "done", 1), pane("old", "done", 1), pane("tie-b", "done", 1)];
+    const seqs = new Map([["new", 30], ["tie-a", 20], ["old", 10], ["tie-b", 20]]);
+    expect(waitingOrder(panes, (p) => p, raw, seqs).map((p) => p.pane_id)).toEqual(["old", "tie-a", "tie-b", "new", "none"]);
+    expect(activityOrder(panes, (p) => p, seqs).map((p) => p.pane_id).slice(0, 2)).toEqual(["new", "tie-a"]);
+  });
+
+  it("takes a finish already opened for ready, behind an unread one and among the other ready agents", () => {
+    const panes = [pane("ready", "idle"), pane("opened", "done", 2), pane("unread", "done", 3)];
+    const seqs = new Map([["ready", 5], ["opened", 1], ["unread", 9]]);
+    const seen = { opened: 2 };
+    expect(waitingOrder(panes, (p) => p, (p) => shownStatus(p, seen), seqs).map((p) => p.pane_id)).toEqual(["unread", "opened", "ready"]);
+    expect(waitingOrder(panes, (p) => p, raw, seqs).map((p) => p.pane_id)).toEqual(["opened", "unread", "ready"]);
+  });
+
+  it("leaves a status herdr adds later after working", () => {
+    const panes = [pane("odd", "question"), pane("working", "working")];
+    expect(waitingOrder(panes, (p) => p, raw, new Map([["odd", 1], ["working", 2]])).map((p) => p.pane_id)).toEqual(["working", "odd"]);
+  });
+});
+
 it("defaults to herdr's order and accepts only known settings", () => {
   expect(DEFAULT_SETTINGS.agentOrder).toBe("workspace");
   expect(sanitizeSettings({ agentOrder: "activity" })).toMatchObject({ agentOrder: "activity" });
+  expect(sanitizeSettings({ agentOrder: "waiting" })).toMatchObject({ agentOrder: "waiting" });
   expect(sanitizeSettings({ agentOrder: "recent" })).toMatchObject({ agentOrder: "workspace" });
 });

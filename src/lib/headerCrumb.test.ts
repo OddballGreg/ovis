@@ -67,6 +67,23 @@ it("keeps a folder name that ends in a space as it is", () => {
   expect(headerCrumb({ ...base, title: "branch", cwd: "/repo/branch " }).folder).toBe("branch ");
 });
 
+it("counts the pane's own title under a tab's name as said, and keeps it in the tooltip", () => {
+  // Tab name: the tab's name is the title, and the pane's title (a path shown as its folder) opens the second line
+  const tabbed = { ...base, workspace: "ws", title: "Review", subtitle: "checkout-api" };
+  const crumb = headerCrumb({ ...tabbed, cwd: "/home/me/dev/checkout-api" });
+  expect(crumb.folder).toBeNull();
+  expect(crumb.tooltip).toBe("ws › Review › checkout-api · /home/me/dev/checkout-api");
+  // a folder the subtitle does not say still shows
+  expect(headerCrumb({ ...tabbed, cwd: "/home/me/dev/retry-flag" }).folder).toBe("retry-flag");
+  expect(headerCrumb({ ...tabbed, cwd: null }).tooltip).toBe("ws › Review › checkout-api");
+  // no subtitle, or a blank one, is the line without it
+  for (const subtitle of [null, undefined, "", "  "]) {
+    const plain = headerCrumb({ ...base, subtitle, cwd: "/home/me/dev/retry-flag" });
+    expect(plain.folder).toBe("retry-flag");
+    expect(plain.tooltip).toBe("checkout-api › Idempotent payments · /home/me/dev/retry-flag");
+  }
+});
+
 it("takes the chat's surface only when the chat is what the pane column draws", () => {
   expect(showsChat({}, "chat")).toBe(true);
   expect(showsChat({ restore_error: null }, "chat")).toBe(true);

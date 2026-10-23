@@ -212,7 +212,18 @@ it("draws agent logos in their brand colors unless Mono was chosen", () => {
   }
 });
 
+it("names agent rows by the agent's title unless Tab name was chosen", () => {
+  expect(DEFAULT_SETTINGS.agentRowTitle).toBe("agent");
+  expect(sanitizeSettings({ agentRowTitle: "tab" }).agentRowTitle).toBe("tab");
+  for (const agentRowTitle of [null, "Tab", "label", true]) {
+    expect(sanitizeSettings({ agentRowTitle }).agentRowTitle).toBe("agent");
+  }
+});
+
 describe("telemetry settings snapshot", () => {
+  it("reports Longest wait as Activity, the one other order the deployed schema knows", () => {
+    expect(telemetrySettingsSnapshot(sanitizeSettings({ agentOrder: "waiting" })).agentOrder).toBe("activity");
+  });
   it("reports current enum, boolean and bounded scalar values", () => {
     const settings = sanitizeSettings({
       terminalInputMode: "direct",

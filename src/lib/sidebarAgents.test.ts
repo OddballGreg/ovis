@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { AgentInfo, HerdrPane, SessionSnapshot, TabInfo, WorkspaceInfo } from "../../shared/protocol.ts";
-import { agentContext, agentTabName, paneMark, sidebarAgents, workspaceAgentLabels } from "./sidebarAgents.ts";
+import { agentContext, agentRowLines, agentTabName, paneMark, renamedTabTitle, sidebarAgents, workspaceAgentLabels } from "./sidebarAgents.ts";
 
 function workspace(id: string): WorkspaceInfo {
   return { workspace_id: id, active_tab_id: `${id}:t1`, label: id, number: 1, tab_count: 1, pane_count: 1, focused: false, agent_status: "idle" };
@@ -147,5 +147,34 @@ describe("agentTabName", () => {
     // herdr relabels the survivor "1" and leaves its number at 2
     const survivor = { ...tab("w1:t2", "w1"), label: "1", number: 2 };
     expect(agentTabName(survivor, [survivor], t)).toBeNull();
+  });
+});
+
+describe("renamedTabTitle", () => {
+  it("names a pane by its tab only once the tab was renamed, judged by its place", () => {
+    const first = { ...tab("w1:t1", "w1"), label: "1" };
+    const second = { ...tab("w1:t2", "w1"), label: "Review", number: 2 };
+    expect(renamedTabTitle(first, [first, second])).toBeNull();
+    expect(renamedTabTitle(second, [first, second])).toBe("Review");
+    expect(renamedTabTitle({ ...second, label: "1" }, [{ ...second, label: "1" }])).toBeNull();
+    expect(renamedTabTitle(null, [first])).toBeNull();
+  });
+});
+
+describe("agentRowLines", () => {
+  const base = { agentTitle: "Idempotent payments", tabTitle: null, agentLabel: "claude", markAgent: null, machineName: null, workspaceLabel: "checkout-api", tabName: "Review" };
+
+  it("keeps the agent's title and its usual second line without a tab name to lead", () => {
+    expect(agentRowLines(base)).toEqual({ title: "Idempotent payments", context: ["claude", "checkout-api", "Review"] });
+    expect(agentRowLines({ ...base, tabTitle: " " })).toEqual({ title: "Idempotent payments", context: ["claude", "checkout-api", "Review"] });
+  });
+
+  it("leads with the tab's name, opens the second line with the agent's title and names the tab once", () => {
+    expect(agentRowLines({ ...base, tabTitle: "Review" })).toEqual({ title: "Review", context: ["Idempotent payments", "claude", "checkout-api"] });
+  });
+
+  it("does not say the agent's title twice when it matches the tab's name or a part of the line", () => {
+    expect(agentRowLines({ ...base, agentTitle: "Review", tabTitle: "Review" })).toEqual({ title: "Review", context: ["claude", "checkout-api"] });
+    expect(agentRowLines({ ...base, agentTitle: "checkout-api", tabTitle: "Review" })).toEqual({ title: "Review", context: ["claude", "checkout-api"] });
   });
 });
