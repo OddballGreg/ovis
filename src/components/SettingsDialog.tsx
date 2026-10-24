@@ -324,6 +324,12 @@ function AppearancePage() {
       <SettingsRow label={t("Agents order")} description={t("Activity keeps a waiting agent on top, then the one that changed last; herdr's own order is not changed")} wide>
         <Segmented label={t("Agents order")} value={settings.agentOrder} onChange={(agentOrder) => update({ agentOrder })} options={[{ value: "workspace", label: t("Workspaces") }, { value: "activity", label: t("Activity") }]} />
       </SettingsRow>
+      <SettingsRow label={t("Agents list")} description={t("At the bottom docks the list above the footer; under the workspaces it follows the last workspace and scrolls with them")} wide>
+        <Segmented label={t("Agents list")} value={settings.agentsPlacement} onChange={(agentsPlacement) => update({ agentsPlacement })} options={[{ value: "bottom", label: t("At the bottom") }, { value: "below", label: t("Under the workspaces") }]} />
+      </SettingsRow>
+      <SettingsRow label={t("Agents on a phone")} description={t("How the Agents list starts in the phone's sidebar; a wider screen always starts it unfolded")} wide>
+        <Segmented label={t("Agents on a phone")} value={settings.agentsDrawerFold} onChange={(agentsDrawerFold) => update({ agentsDrawerFold })} options={[{ value: "folded", label: t("Folded") }, { value: "open", label: t("Unfolded") }]} />
+      </SettingsRow>
       <SettingsRow label={t("Agent logos")} description={t("Draw each agent's logo in its brand colors, or without color")} wide>
         <Segmented label={t("Agent logos")} value={settings.agentMarks} onChange={(agentMarks) => update({ agentMarks })} options={[{ value: "color", label: t("Color") }, { value: "mono", label: t("Mono") }]} />
       </SettingsRow>

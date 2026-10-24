@@ -42,6 +42,14 @@
 
 .agents-sidebar.is-empty .agent-list-contents::after { display: none; }
 
+/* Under the workspaces the list takes the height of all its rows: the scroll it shares with the
+   workspaces moves it (Machines.css) */
+.agents-sidebar.is-below { max-height: none; }
+
+.agents-sidebar.is-below .agent-list-contents { overflow: visible; }
+
+.agents-sidebar.is-below .agent-list-contents::after { display: none; }
+
 .agent-section-toggle {
   flex: 0 0 auto;
   width: 100%;

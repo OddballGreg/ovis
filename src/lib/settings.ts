@@ -25,6 +25,12 @@ export type Density = "compact" | "comfortable";
 export type SidebarRows = "one" | "two";
 /** the Agents list's order: herdr's workspace order, or a waiting agent first and then the latest change */
 export type AgentOrder = "workspace" | "activity";
+/** where the Agents list sits in the sidebar: docked above the footer, or straight after the last workspace in one scroll with it */
+export type AgentsPlacement = "bottom" | "below";
+export const AGENTS_PLACEMENTS: readonly AgentsPlacement[] = ["bottom", "below"];
+/** how the Agents list starts in the phone's drawer: folded, leaving the room to the workspaces, or open */
+export type AgentsDrawerFold = "folded" | "open";
+export const AGENTS_DRAWER_FOLDS: readonly AgentsDrawerFold[] = ["folded", "open"];
 /** how agent logos are drawn: in their brand colors, or without color: Claude's in the text color, the others in grey (data-marks on <html>) */
 export type AgentMarks = "color" | "mono";
 /** what the plan meters count: the share of a limit used, or what is left of it */
@@ -75,6 +81,10 @@ export interface Settings {
   sidebarRows: SidebarRows;
   /** The Agents list's order. Activity is display-only: herdr's own order never changes. */
   agentOrder: AgentOrder;
+  /** The Agents list's place: docked above the footer, or under the workspaces in the same scroll */
+  agentsPlacement: AgentsPlacement;
+  /** Whether the Agents list starts folded in the phone's drawer; a desktop always starts it open */
+  agentsDrawerFold: AgentsDrawerFold;
   /** Agent logos: brand colors, or without color, so a list of one agent is not a stripe of tiles */
   agentMarks: AgentMarks;
   /** the sidebar's state marks: this app's own, or herdr's dots or symbols, as its `[ui] status_indicators` (lib/status.ts) */
@@ -183,12 +193,12 @@ export type DiffStyle = (typeof DIFF_STYLES)[number];
 
 /** Raw custom text, key combinations and account keys are never copied. Requiring every other
  * Settings field in the projection makes a new field require an explicit collection decision.
- * fileOpen, webLinks, the launch modes, followHerdrFocus and composerNewTabButton are not collected: the
- * telemetry schema (shared/telemetry.ts) does not carry them. */
+ * fileOpen, webLinks, the launch modes, followHerdrFocus, composerNewTabButton and the Agents list's
+ * placement and drawer fold are not collected: the telemetry schema (shared/telemetry.ts) does not carry them. */
 type TelemetrySourceSettings = Omit<Settings,
   "keyBarExtras" | "keyBarItems" | "shortcutOverrides" | "terminalFontFamily" | "chatFontFamily"
   | "quickReplies" | "usageOrder" | "usageHidden" | "fileOpen" | "webLinks" | "claudeLaunchMode" | "codexLaunchMode"
-  | "followHerdrFocus" | "composerNewTabButton">;
+  | "followHerdrFocus" | "composerNewTabButton" | "agentsPlacement" | "agentsDrawerFold">;
 
 /** Compare structured custom settings by content against this app's built-in defaults. */
 function differsFromDefault(value: unknown, defaultValue: unknown): boolean {
@@ -259,6 +269,7 @@ export function telemetrySettingsSnapshot(settings: Settings): TelemetrySettings
  */
 export const SETTING_SCOPE = {
   theme: "shared", palette: "shared", darkTheme: "shared", lightTheme: "shared", language: "shared", sidebarRows: "shared", agentOrder: "shared",
+  agentsPlacement: "shared", agentsDrawerFold: "shared",
   agentMarks: "shared", autoSendQueued: "shared", showThinking: "shared", quickReplies: "shared",
   showQuickReplies: "shared", showUsage: "shared", usageCount: "shared",
   usageGlance: "shared", usageOrder: "shared", usageHidden: "shared", defaultView: "device", suggestionChip: "device",
@@ -293,6 +304,8 @@ export const DEFAULT_SETTINGS: Settings = {
   density: "comfortable",
   sidebarRows: "one",
   agentOrder: "workspace",
+  agentsPlacement: "bottom",
+  agentsDrawerFold: "folded",
   agentMarks: "color",
   statusIndicators: "classic",
   palette: DEFAULT_THEME,
@@ -464,6 +477,8 @@ export function sanitizeSettings(raw: unknown): Settings {
     density: density === "compact" || density === "comfortable" ? density : DEFAULT_SETTINGS.density,
     sidebarRows: record["sidebarRows"] === "one" || record["sidebarRows"] === "two" ? record["sidebarRows"] : DEFAULT_SETTINGS.sidebarRows,
     agentOrder: record["agentOrder"] === "workspace" || record["agentOrder"] === "activity" ? record["agentOrder"] : DEFAULT_SETTINGS.agentOrder,
+    agentsPlacement: AGENTS_PLACEMENTS.find((placement) => placement === record["agentsPlacement"]) ?? DEFAULT_SETTINGS.agentsPlacement,
+    agentsDrawerFold: AGENTS_DRAWER_FOLDS.find((fold) => fold === record["agentsDrawerFold"]) ?? DEFAULT_SETTINGS.agentsDrawerFold,
     agentMarks: record["agentMarks"] === "color" || record["agentMarks"] === "mono" ? record["agentMarks"] : DEFAULT_SETTINGS.agentMarks,
     statusIndicators: record["statusIndicators"] === "classic" || record["statusIndicators"] === "dots" || record["statusIndicators"] === "symbols" ? record["statusIndicators"] : DEFAULT_SETTINGS.statusIndicators,
     darkTheme,

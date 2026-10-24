@@ -83,7 +83,8 @@ interface PinMenu { key: string; anchor: HTMLElement; point?: { x: number; y: nu
 
 /**
  * All PCs' live agents form a second list; workspace and PC folds do not hide these rows.
- * In the phone's drawer the list starts folded, leaving the room to the workspaces.
+ * In the phone's drawer the list starts folded, leaving the room to the workspaces, unless
+ * Settings → Agents on a phone starts it open.
  * The pinned agents stand first, in a card; on a desktop only a
  * right-click (or the context-menu key) opens the menu. A row's ⋯, or a right-click on it, opens its
  * menu, which pins or unpins it.
@@ -91,8 +92,9 @@ interface PinMenu { key: string; anchor: HTMLElement; point?: { x: number; y: nu
 export function AgentSidebar({ machines, selectedMachineId, selectedPaneId, stateWord, onSelect }: AgentSidebarProps) {
   const t = useT();
   const listId = useId();
-  const [collapsed, setCollapsed] = useState(() => window.matchMedia?.(DRAWER_QUERY).matches === true);
   const { settings } = useSettings();
+  // the first render's choice only: a fold the user makes afterwards stays until the sidebar is drawn anew
+  const [collapsed, setCollapsed] = useState(() => settings.agentsDrawerFold === "folded" && window.matchMedia?.(DRAWER_QUERY).matches === true);
   // shared with the other browsers of this server (lib/preferencesSync.ts)
   const pinned = useSyncExternalStore(subscribeSidebarPins, currentSidebarPins, currentSidebarPins);
   // which `$name` tokens herdr's own sidebar draws, from this server's herdr config (server/herdr-sidebar.ts)
@@ -199,7 +201,9 @@ export function AgentSidebar({ machines, selectedMachineId, selectedPaneId, stat
   };
   // Settings -> Sidebar rows -> One line: an agent row is one line too, its place dim after its title
   const oneLine = settings.sidebarRows === "one";
-  return <section ref={sectionRef} className={`agents-sidebar${collapsed ? " is-collapsed" : ""}${rows.length === 0 ? " is-empty" : ""}${oneLine ? " is-one-line" : ""}`} aria-label={t("Agents")}>
+  // Settings -> Agents list -> Under the workspaces: the list scrolls with the workspaces (MachineSidebar.tsx)
+  const below = settings.agentsPlacement === "below";
+  return <section ref={sectionRef} className={`agents-sidebar${collapsed ? " is-collapsed" : ""}${rows.length === 0 ? " is-empty" : ""}${oneLine ? " is-one-line" : ""}${below ? " is-below" : ""}`} aria-label={t("Agents")}>
     <button type="button" className="agent-section-toggle sidebar-section-label" aria-expanded={!collapsed} aria-controls={listId} onClick={() => setCollapsed(!collapsed)}>
       {collapsed ? <ChevronRight className="agent-section-caret" aria-hidden="true" /> : <ChevronDown className="agent-section-caret" aria-hidden="true" />}
       <span>{t("Agents")}</span>

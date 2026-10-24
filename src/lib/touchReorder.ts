@@ -61,7 +61,11 @@ export interface TouchReorderHandlers {
 const ROW = ".workspace-group[data-workspace]";
 /** where a press may pick a row up: its title, not its fold or its ⋯ */
 const HANDLE = ".workspace-select";
-const SCROLLER = ".machine-list";
+/**
+ * the box the workspace rows scroll in: the workspace list itself, or, with the Agents list under
+ * the workspaces, the one scroll the two share (MachineSidebar.tsx)
+ */
+export const SIDEBAR_SCROLLER = ".sidebar-shell:not(.is-agents-below) .machine-list, .sidebar-scroll";
 
 /** Watches the rows under `root`; returns the cleanup. */
 export function watchTouchReorder(root: HTMLElement, handlers: TouchReorderHandlers): () => void {
@@ -128,7 +132,7 @@ export function watchTouchReorder(root: HTMLElement, handlers: TouchReorderHandl
     const { id, row, y } = press;
     press = null;
     if (!row.isConnected || !handlers.canLift(id)) return;
-    const scroller = row.closest<HTMLElement>(SCROLLER);
+    const scroller = row.closest<HTMLElement>(SIDEBAR_SCROLLER);
     lift = { id, row, scroller, startY: y, startScroll: scroller?.scrollTop ?? 0, y, frame: 0, over: id };
     row.style.transition = "none";
     // a long press may have begun selecting the title: the lifted row drags, it does not select

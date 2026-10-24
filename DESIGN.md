@@ -931,6 +931,13 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
   Agents list gives its space back; PC and workspace folds do not hide agent rows. In the drawer
   (`max-width: 768px`) the list starts folded. Until the PCs are in and every connected PC's
   panes have come, an empty list says **Loading agents…**, never "No agents running".
+- Appearance's **Agents list** is **At the bottom** by default, the docked layout above.
+  **Under the workspaces** follows herdr's own TUI sidebar, where the agents come straight after
+  the workspaces: the Agents heading sits after the last workspace and one scroll area
+  (`.sidebar-scroll`) holds both lists, so neither scrolls or fades by itself and the footer stays
+  at the bottom. **Agents on a phone** is **Folded** by default; **Unfolded** starts the list open
+  in the drawer. A wider screen always starts it open. Both choices are shared with the other
+  browsers of the server; the fold the user makes afterwards stays this page's.
 - A PC's header is the head of its workspaces, and the caret beside its `+` is the one fold over
   them. The roster has no label or fold of its own.
 - A repository's parent row keeps `workspace.label`; its opened linked

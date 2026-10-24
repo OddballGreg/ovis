@@ -13,6 +13,7 @@ import { SidebarActivityProvider, type SidebarActivity } from "../lib/sidebarAct
 import { UsageMeters } from "./UsageMeters.tsx";
 import "./Machines.css";
 import { useT } from "../lib/i18n.ts";
+import { useSettings } from "../lib/settings.ts";
 import { useAnnouncedText } from "../lib/useAnnouncedText.ts";
 import { machineErrorText, saysHerdrAway } from "../lib/userError.ts";
 
@@ -35,13 +36,18 @@ export function MachineSidebar(props: Props) {
   // the roster's wait is a live region that is in the list from its first render, clipped while empty (never
   // display: none), and its words land a frame after it (lib/useAnnouncedText.ts)
   const loadingWords = useAnnouncedText(props.machines.length === 0 ? t("Loading PCs…") : null);
+  const { settings } = useSettings();
+  const list = <div className="machine-list" aria-label={t("PCs and workspaces")}>
+    {props.machines.map((machine) => <MachineGroup key={machine.id} {...props} machine={machine} />)}
+    <p className={loadingWords === null ? "visually-hidden" : "tree-state"} role="status">{loadingWords}</p>
+  </div>;
+  const agents = <AgentSidebar machines={props.machines} selectedMachineId={props.selectedMachineId} selectedPaneId={props.selectedPaneId} stateWord={(machine) => t(STATE_WORD[machine.state])} onSelect={props.onSelect} />;
+  // Settings → Agents list: docked above the footer, each list scrolling by itself, or straight
+  // after the last workspace, the two scrolling as one as herdr's own sidebar does (Machines.css)
+  const below = settings.agentsPlacement === "below";
   // no top bar: a workspace starts from its PC's header, and Add PC lives in Settings → Remote PCs
-  return <SidebarActivityProvider value={activity}><div className="sidebar-shell">
-    <div className="machine-list" aria-label={t("PCs and workspaces")}>
-      {props.machines.map((machine) => <MachineGroup key={machine.id} {...props} machine={machine} />)}
-      <p className={loadingWords === null ? "visually-hidden" : "tree-state"} role="status">{loadingWords}</p>
-    </div>
-    <AgentSidebar machines={props.machines} selectedMachineId={props.selectedMachineId} selectedPaneId={props.selectedPaneId} stateWord={(machine) => t(STATE_WORD[machine.state])} onSelect={props.onSelect} />
+  return <SidebarActivityProvider value={activity}><div className={`sidebar-shell${below ? " is-agents-below" : ""}`}>
+    {below ? <div className="sidebar-scroll">{list}{agents}</div> : <>{list}{agents}</>}
     <footer className="sidebar-footer">
       {/* browsers without an install prompt (iOS, plain HTTP) get the steps instead */}
       {!installed && <button className="btn btn-ghost sidebar-footer-action" aria-expanded={canInstall ? undefined : installHelpOpen} onClick={() => { if (canInstall) void install(); else setInstallHelpOpen(!installHelpOpen); }}><Download aria-hidden="true" />{t("Install app")}</button>}
