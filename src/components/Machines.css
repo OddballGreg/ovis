@@ -31,6 +31,32 @@
 
 .machine-list > .tree-state { padding-left: calc(var(--side-gutter) + var(--side-box)); }
 
+/* Agents under the workspaces (Settings → Agents list): one scroll holds both lists, the Agents
+   heading straight after the last workspace, and the footer stays below it. A block box, so
+   neither list shrinks to fit, and neither scrolls or fades by itself. */
+.sidebar-scroll {
+  position: relative;
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scroll-padding-bottom: var(--space-4);
+}
+
+.sidebar-scroll > .machine-list { overflow: visible; }
+
+.sidebar-scroll > .machine-list::after { display: none; }
+
+.sidebar-scroll::after {
+  content: "";
+  position: sticky;
+  bottom: 0;
+  display: block;
+  height: var(--space-4);
+  background: linear-gradient(transparent, var(--bg-panel));
+  pointer-events: none;
+}
+
 .machine-group {
   --machine-indent: calc(var(--side-gutter) + var(--side-box));
 }

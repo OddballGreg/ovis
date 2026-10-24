@@ -11,7 +11,7 @@ import { FONT_FAMILY_MAX_CHARS } from "./fontFamily.ts";
 import { DEFAULT_KEY_BAR_ITEMS, migrateKeyBarItems } from "./keyBar.ts";
 import { SHARED_SETTING_KEYS } from "../../shared/preferences.ts";
 import { NOTICE_VERSION, TELEMETRY_SETTINGS_KEYS, TELEMETRY_THEME_SIDE_KEYS, telemetrySettings } from "../../shared/telemetry.ts";
-import { SETTING_SCOPE, telemetrySettingsSnapshot, alertPrefs, CHAT_FONT_MAX, CHAT_FONT_MIN, CHAT_LANE_MAX_REM, CHAT_LANE_MIN, CHAT_WIDTHS, chatFontSize, chatLaneLength, chatLaneWidth, DEFAULT_SETTINGS, MARKDOWN_WIDTHS, QUICK_REPLIES_MAX, QUICK_REPLY_MAX_CHARS, quickReplyButtons, sanitizeSettings, terminalTheme, forgetPaneViews, DICTATION_LANGUAGES, VOICE_BUTTONS, wantsVoiceInput } from "./settings.ts";
+import { SETTING_SCOPE, telemetrySettingsSnapshot, alertPrefs, AGENTS_DRAWER_FOLDS, AGENTS_PLACEMENTS, CHAT_FONT_MAX, CHAT_FONT_MIN, CHAT_LANE_MAX_REM, CHAT_LANE_MIN, CHAT_WIDTHS, chatFontSize, chatLaneLength, chatLaneWidth, DEFAULT_SETTINGS, MARKDOWN_WIDTHS, QUICK_REPLIES_MAX, QUICK_REPLY_MAX_CHARS, quickReplyButtons, sanitizeSettings, terminalTheme, forgetPaneViews, DICTATION_LANGUAGES, VOICE_BUTTONS, wantsVoiceInput } from "./settings.ts";
 import { applyToDocument, loadSettings, saveSettings } from "./settings.ts";
 import { sanitizeSettings as oldSanitizeSettings, saveSettings as oldSaveSettings } from "./settings.legacy-fixture.ts";
 import { themeFor } from "./themeFor.ts";
@@ -72,6 +72,19 @@ describe("saved theme migration", () => {
     oldSaveSettings({ ...old, terminalFontSize: 18 });
     expect(loadSettings().darkTheme).toBe("tokyo-night");
     expect(loadSettings().terminalFontSize).toBe(18);
+  });
+
+  it("reads the Agents list's placement and drawer fold beside an old tab, which falls back to today's layout", () => {
+    putOld({ theme: "dark", palette: "charcoal" });
+    expect(loadSettings()).toMatchObject({ agentsPlacement: "bottom", agentsDrawerFold: "folded" });
+    saveSettings(sanitizeSettings({ agentsPlacement: "below", agentsDrawerFold: "open" }));
+    expect(loadSettings()).toMatchObject({ agentsPlacement: "below", agentsDrawerFold: "open" });
+    // an open old tab reads the record without them and, saving it whole, drops them: the defaults draw the layout it knows
+    const old = readOld();
+    expect(old).not.toHaveProperty("agentsPlacement");
+    expect(old).not.toHaveProperty("agentsDrawerFold");
+    oldSaveSettings({ ...old, terminalFontSize: 18 });
+    expect(loadSettings()).toMatchObject({ agentsPlacement: "bottom", agentsDrawerFold: "folded", terminalFontSize: 18 });
   });
 
   it("survives repeated stale saves from an already-open old tab (f1)", () => {
@@ -218,6 +231,30 @@ it("keeps sidebar rows on one line unless two lines were chosen", () => {
   for (const sidebarRows of [null, true, "three", 2]) {
     expect(sanitizeSettings({ sidebarRows }).sidebarRows).toBe("one");
   }
+});
+
+it("docks the Agents list at the bottom unless Under the workspaces was chosen, for every browser of the server", () => {
+  expect(DEFAULT_SETTINGS.agentsPlacement).toBe("bottom");
+  expect(sanitizeSettings({}).agentsPlacement).toBe("bottom");
+  for (const agentsPlacement of AGENTS_PLACEMENTS) expect(sanitizeSettings({ agentsPlacement }).agentsPlacement).toBe(agentsPlacement);
+  for (const agentsPlacement of [null, true, "top", "Below", 1]) expect(sanitizeSettings({ agentsPlacement }).agentsPlacement).toBe("bottom");
+  expect(SETTING_SCOPE.agentsPlacement).toBe("shared");
+  expect(SHARED_SETTING_KEYS as readonly string[]).toContain("agentsPlacement");
+});
+
+it("starts the drawer's Agents list folded unless Unfolded was chosen, for every browser of the server", () => {
+  expect(DEFAULT_SETTINGS.agentsDrawerFold).toBe("folded");
+  expect(sanitizeSettings({}).agentsDrawerFold).toBe("folded");
+  for (const agentsDrawerFold of AGENTS_DRAWER_FOLDS) expect(sanitizeSettings({ agentsDrawerFold }).agentsDrawerFold).toBe(agentsDrawerFold);
+  for (const agentsDrawerFold of [null, true, false, "closed", "Open", 0]) expect(sanitizeSettings({ agentsDrawerFold }).agentsDrawerFold).toBe("folded");
+  expect(SETTING_SCOPE.agentsDrawerFold).toBe("shared");
+  expect(SHARED_SETTING_KEYS as readonly string[]).toContain("agentsDrawerFold");
+});
+
+it("keeps the Agents list's placement and drawer fold out of telemetry", () => {
+  const snapshot = telemetrySettingsSnapshot(sanitizeSettings({ agentsPlacement: "below", agentsDrawerFold: "open" }));
+  expect(snapshot).not.toHaveProperty("agentsPlacement");
+  expect(snapshot).not.toHaveProperty("agentsDrawerFold");
 });
 
 it("draws agent logos in their brand colors unless Mono was chosen", () => {

@@ -26,7 +26,7 @@ import { useMediaQuery } from "../lib/useMediaQuery.ts";
 import { useAnnouncedText } from "../lib/useAnnouncedText.ts";
 import { useWorktreeBranches } from "../lib/useWorktreeBranches.ts";
 import { useSessionHistoryOffered } from "../lib/useSessionHistoryOffered.ts";
-import { watchTouchReorder } from "../lib/touchReorder.ts";
+import { SIDEBAR_SCROLLER, watchTouchReorder } from "../lib/touchReorder.ts";
 import { placeBlock, workspaceMoves, worktreeGroups as groupWorktrees } from "../lib/workspaceOrder.ts";
 import { worktreeLabel } from "../lib/worktreeName.ts";
 import { lastViewedPane, rememberViewedPane } from "../lib/lastViewedPane.ts";
@@ -316,7 +316,7 @@ export function Sidebar({ snapshot, online, selectedPaneId, actions, watching = 
     const id = revealOpenedWorkspace.current;
     if (!id) return;
     const row = [...(workspaceRoot.current?.querySelectorAll<HTMLElement>(".workspace-group") ?? [])].find((candidate) => candidate.dataset.workspace === id);
-    const scroller = workspaceRoot.current?.closest<HTMLElement>(".machine-list");
+    const scroller = workspaceRoot.current?.closest<HTMLElement>(SIDEBAR_SCROLLER);
     if (!row || !scroller || scroller.clientHeight === 0) return;
     const item = row.getBoundingClientRect();
     const panel = scroller.getBoundingClientRect();

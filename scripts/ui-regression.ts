@@ -2242,6 +2242,17 @@ try {
   await mobilePage.getByRole("textbox", { name: "Message", exact: true }).blur();
   await mobilePage.locator('button[aria-controls="workspace-drawer"]').click();
   assert.equal(await mobilePage.locator(".agents-sidebar .agent-section-toggle").getAttribute("aria-expanded"), "false", "a phone's drawer opens with Agents folded");
+  // Settings → Agents on a phone changed after the page is drawn, as another browser's change arrives,
+  // folds or unfolds the open drawer's list at once, without a reload
+  const sharePhoneFold = async (agentsDrawerFold: string): Promise<void> => {
+    const response = await fetch(`${origin}/api/preferences`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ settings: { agentsDrawerFold } }) });
+    assert.equal(response.ok, true, `the server stores Agents on a phone: ${agentsDrawerFold}`);
+  };
+  const phoneAgentsToggle = mobilePage.locator(".agents-sidebar .agent-section-toggle");
+  await sharePhoneFold("open");
+  await until(async () => await phoneAgentsToggle.getAttribute("aria-expanded") === "true", "a shared Unfolded unfolds a phone's Agents without a reload");
+  await sharePhoneFold("folded");
+  await until(async () => await phoneAgentsToggle.getAttribute("aria-expanded") === "false", "a shared Folded folds it again");
   await mobilePage.locator(`.pane-select[title^="${paneB} —"]`).click();
   await mobilePage.getByRole("textbox", { name: "Message", exact: true }).waitFor();
   console.log("PASS a pane picked on a phone waits for a tap before raising the keyboard");
