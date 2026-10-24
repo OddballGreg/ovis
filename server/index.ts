@@ -62,6 +62,7 @@ import { handleMachineRequest, nonCanonicalPath } from "./machine-api.ts";
 import { handleSessionHistoryRequest, SESSION_HISTORY_PATH } from "./session-history-routes.ts";
 import { HerdrSidebarConfig, herdrConfigPath } from "./herdr-sidebar.ts";
 import { closeCodexDaemonSources } from "./codex-daemon.ts";
+import { reapOpencodeV1Orphans, stopOpencodeV1 } from "./opencode-v1.ts";
 import { MachineRelay } from "./machine-relay.ts";
 import { sameOrigin } from "./machine-security.ts";
 import { PLUGIN_LOG_LIMIT, pluginActionResult, pluginLogEntry, pluginPaneContext, waitForPluginAction } from "./plugin-actions.ts";
@@ -776,6 +777,7 @@ export function createServer(
         void options.portal?.shutdown();
         registration?.close();
         closeCodexDaemonSources();
+        void stopOpencodeV1();
       });
       server.stop(true);
       requestLog.close();
@@ -806,6 +808,8 @@ if (import.meta.main) {
     process.exit(1);
   }
   telemetry.start();
+  // an OpenCode server a run of this one killed outright left behind (opencode-v1.ts)
+  reapOpencodeV1Orphans();
   let stopping = false;
   const shutdown = () => {
     if (stopping) return;
@@ -813,8 +817,8 @@ if (import.meta.main) {
     telemetry.stop();
     instance.stop();
     // Attach sidecars need ~1.2s to release herdr's exclusive client slot; Portal unregisters from
-    // its relay, and the pipes it logs to must outlive it
-    void Promise.all([Bun.sleep(2000), portal.shutdown()]).then(() => process.exit(0));
+    // its relay, and the pipes it logs to must outlive it; the OpenCode server this one started goes too
+    void Promise.all([Bun.sleep(2000), portal.shutdown(), stopOpencodeV1()]).then(() => process.exit(0));
   };
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);

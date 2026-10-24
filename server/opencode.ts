@@ -45,6 +45,7 @@ const BUSY_TIMEOUT_MS = 250;
 
 const SESSION_ID = /^ses_[A-Za-z0-9]{1,64}$/;
 const MESSAGE_ID = /^msg_[A-Za-z0-9]{1,64}$/;
+export { MESSAGE_ID as OPENCODE_MESSAGE_ID, SESSION_ID as OPENCODE_SESSION_ID };
 /** A tool call's whole output: the message holding it and the call's place in its content. */
 export const OPENCODE_TOOL_REF = /^(msg_[A-Za-z0-9]{1,64}):(\d{1,4})$/;
 /** An image in a message, by its place among that message's images. */
@@ -573,25 +574,31 @@ function readRow<T>(path: string, sessionId: string, id: string, read: (row: { t
   }
 }
 
+/** The whole output of the tool call at `index` in a row's content, or null when there is none. */
+function rowToolOutput(row: { type: string; data: Row }, index: number): string | null {
+  if (row.type !== "assistant" || !Array.isArray(row.data.content)) return null;
+  const block = record(row.data.content[index]);
+  return block.type === "tool" ? toolText(record(block.state)) : null;
+}
+
+/** A row's `nth` image, decoded, or null when it has fewer. */
+function rowImage(row: { type: string; data: Row }, nth: number): { mediaType: string; bytes: Uint8Array<ArrayBuffer> } | null {
+  const image = rowImages(row.type, row.data)[nth];
+  return image === undefined ? null : { mediaType: image.media_type, bytes: new Uint8Array(Buffer.from(image.data, "base64")) };
+}
+
 /** The whole output of a tool call whose page output was cut (ref `<message id>:<place in its content>`). */
 export function opencodeToolOutput(path: string, sessionId: string, ref: string): string | null {
   const match = OPENCODE_TOOL_REF.exec(ref);
   if (match === null) return null;
-  return readRow(path, sessionId, match[1]!, (row) => {
-    if (row.type !== "assistant" || !Array.isArray(row.data.content)) return null;
-    const block = record(row.data.content[Number(match[2])]);
-    return block.type === "tool" ? toolText(record(block.state)) : null;
-  });
+  return readRow(path, sessionId, match[1]!, (row) => rowToolOutput(row, Number(match[2])));
 }
 
 /** An image a page named by its ref (`opencode:<message id>:<nth image>`), decoded. */
 export function opencodeImage(path: string, sessionId: string, ref: string): { mediaType: string; bytes: Uint8Array<ArrayBuffer> } | null {
   const match = OPENCODE_IMAGE_REF.exec(ref);
   if (match === null) return null;
-  return readRow(path, sessionId, match[1]!, (row) => {
-    const image = rowImages(row.type, row.data)[Number(match[2])];
-    return image === undefined ? null : { mediaType: image.media_type, bytes: new Uint8Array(Buffer.from(image.data, "base64")) };
-  });
+  return readRow(path, sessionId, match[1]!, (row) => rowImage(row, Number(match[2])));
 }
 
 /** The OpenCode version that wrote this session (its `version` column, 2.x or 1.x store); null when unknown. */
@@ -641,11 +648,19 @@ function storeFlavor(db: Database): StoreFlavor {
   return "unknown";
 }
 
-/** One 1.x message with its parts, in the order the page reads them. */
-interface Message1 {
+/**
+ * One 1.x message with its parts: a `message` row's data and its `part` rows' data, the same shape
+ * OpenCode 1.x's own server answers `GET /session/:id/message` with (`{ info, parts }`), so the
+ * store reader here and the HTTP reader (opencode-v1.ts) map it to turns the same way.
+ */
+export interface OpencodeMessage1 {
   id: string;
   data: Row;
   parts: Row[];
+}
+
+/** One 1.x message with its parts, in the order the page reads them. */
+interface Message1 extends OpencodeMessage1 {
   updated: number;
   size: number;
 }
@@ -688,7 +703,7 @@ function adaptMessageError1(value: unknown): Row | undefined {
 const adaptToolError1 = (value: unknown): unknown => typeof value === "string" && value.length > 0 ? { message: value } : value;
 
 /** A 1.x message and its parts as the 2.x row shape `opencodeRecord` reads, or null for one it shows nothing of. */
-function adaptMessage1(message: Message1): { type: string; data: Row } | null {
+function adaptMessage1(message: OpencodeMessage1): { type: string; data: Row } | null {
   const role = message.data.role;
   if (role === "user") {
     const prompt = message.parts.filter((part) => part.type === "text" && typeof part.text === "string").map((part) => part.text as string).join("\n");
@@ -716,6 +731,28 @@ function adaptMessage1(message: Message1): { type: string; data: Row } | null {
   return { type: "assistant", data: { time: message.data.time, content, finish: message.data.finish, error: adaptMessageError1(message.data.error), tokens: message.data.tokens } };
 }
 
+/** A 1.x message as the chat shows it (as `opencodeRecord` reads a 2.x row), or null for one it does not. */
+export function opencodeMessage1Record(message: OpencodeMessage1): OpencodeRecord | null {
+  const adapted = adaptMessage1(message);
+  return adapted === null ? null : opencodeRecord(message.id, adapted.type, adapted.data);
+}
+
+/** The whole output of a 1.x message's tool call by the ref a page gave it, or null. */
+export function opencodeMessage1ToolOutput(message: OpencodeMessage1, ref: string): string | null {
+  const match = OPENCODE_TOOL_REF.exec(ref);
+  if (match === null || match[1] !== message.id) return null;
+  const adapted = adaptMessage1(message);
+  return adapted === null ? null : rowToolOutput(adapted, Number(match[2]));
+}
+
+/** A 1.x message's image by the ref a page gave it, decoded, or null. */
+export function opencodeMessage1Image(message: OpencodeMessage1, ref: string): { mediaType: string; bytes: Uint8Array<ArrayBuffer> } | null {
+  const match = OPENCODE_IMAGE_REF.exec(ref);
+  if (match === null || match[1] !== message.id) return null;
+  const adapted = adaptMessage1(message);
+  return adapted === null ? null : rowImage(adapted, Number(match[2]));
+}
+
 /** The 1.x session's own view: what a `/undo` hides, and what any change to the store changes. */
 function sessionView1(db: Database, sessionId: string): (SessionView & { rows: number }) | null {
   const session = db.query<{ revert: string | null }, [string]>("SELECT revert FROM session WHERE id = ?").get(sessionId);
@@ -739,8 +776,8 @@ function sessionView1(db: Database, sessionId: string): (SessionView & { rows: n
   return { end, historyId, signature: `${historyId}:${stats.count}:${stats.updated}:${stats.parts}:${stats.partUpdated}`, rows: stats.count + stats.parts };
 }
 
-/** The settings OpenCode's footer shows for a 1.x session: the latest step's model and usage at `end`. */
-function sessionMetadata1(messages: readonly Message1[], end: number): ConversationMetadata {
+/** The settings OpenCode's footer shows for a 1.x session: the latest step's model and usage before `end`. */
+export function opencodeMessage1Metadata(messages: readonly Pick<OpencodeMessage1, "data">[], end: number): ConversationMetadata {
   let model: string | null = null;
   let usage: Row | null = null;
   for (let index = end - 1; index >= 0; index--) {
@@ -808,14 +845,11 @@ function conversation1(db: Database, cacheKey: string, sessionId: string, page: 
   }
 
   const records: (OpencodeRecord | null)[] = [];
-  for (let index = start; index < to; index++) {
-    const adapted = adaptMessage1(messages[index]!);
-    records.push(adapted === null ? null : opencodeRecord(messages[index]!.id, adapted.type, adapted.data));
-  }
+  for (let index = start; index < to; index++) records.push(opencodeMessage1Record(messages[index]!));
   const result = {
     kind: "page" as const,
     turns: opencodeTurns(records),
-    metadata: sessionMetadata1(messages, to),
+    metadata: opencodeMessage1Metadata(messages, to),
     cursor: start > 0 ? `${view.historyId}:${start}` : null,
     history_id: view.historyId,
     signature: view.signature,
@@ -838,5 +872,5 @@ function sessionRow1(db: Database, sessionId: string, id: string): { type: strin
     if (hidden !== null && (row.time_created > hidden.time_created || (row.time_created === hidden.time_created && id >= boundary))) return null;
   }
   const parts = db.query<{ data: string }, [string]>("SELECT data FROM part WHERE message_id = ? ORDER BY time_created, id").all(id).map((part) => parseData(part.data));
-  return adaptMessage1({ id, data: parseData(row.data), parts, updated: 0, size: 0 });
+  return adaptMessage1({ id, data: parseData(row.data), parts });
 }

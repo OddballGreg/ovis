@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { parseElapsed, processStartedAt, processStartLowerBound, processStartUpperBound, processStartUpperBoundAsync } from "./process-start.ts";
+import { DARWIN_START_TOLERANCE_MS, parseElapsed, processStartedAt, processStartLowerBound, processStartUpperBound, processStartUpperBoundAsync, sameProcessStart } from "./process-start.ts";
 
 describe("process start time", () => {
   it("reads every form of ps's elapsed time", () => {
@@ -8,6 +8,19 @@ describe("process start time", () => {
     expect(parseElapsed("01:02:03")).toBe(3723);
     expect(parseElapsed("2-01:02:03")).toBe(2 * 86400 + 3723);
     expect(parseElapsed("")).toBeNull();
+  });
+
+  it("tells one process's start from another's: exactly on Linux, within a second on macOS", () => {
+    expect(sameProcessStart(1_700_000_000_000, 1_700_000_000_000, "linux")).toBe(true);
+    expect(sameProcessStart(1_700_000_000_000, 1_700_000_000_010, "linux")).toBe(false);
+    // macOS reads the clock less a whole-second ps time: two reads of one start differ by under a second
+    expect(sameProcessStart(1_700_000_000_000, 1_700_000_000_000 + DARWIN_START_TOLERANCE_MS, "darwin")).toBe(true);
+    expect(sameProcessStart(1_700_000_000_000, 1_700_000_000_000 - 640, "darwin")).toBe(true);
+    expect(sameProcessStart(1_700_000_000_000, 1_700_000_000_000 + DARWIN_START_TOLERANCE_MS + 1, "darwin")).toBe(false);
+    for (const platform of ["linux", "darwin"] as const) {
+      expect(sameProcessStart(null, 1, platform)).toBe(false);
+      expect(sameProcessStart(1, null, platform)).toBe(false);
+    }
   });
 
   it("tells when a running process started, to the second", async () => {

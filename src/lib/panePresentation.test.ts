@@ -16,7 +16,7 @@ for (const source of ["claude-transcript", "codex-transcript"] as const) {
   });
 }
 
-for (const source of ["omp-transcript", "omo-transcript", "gjc-transcript", "pi-transcript", "opencode-transcript", "grok-transcript", "devin-transcript", "hermes-transcript", "agy-transcript"] as const) {
+for (const source of ["omp-transcript", "omo-transcript", "gjc-transcript", "pi-transcript", "opencode-transcript", "opencode-http", "grok-transcript", "devin-transcript", "hermes-transcript", "agy-transcript"] as const) {
 it(`${source} does not accept prose without native completion evidence`, () => {
   const conversation = { source, turns: [
     { role: "assistant", ts: null, parts: [{ kind: "text", text: "Native stop" }] },
