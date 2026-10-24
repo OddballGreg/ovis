@@ -10,7 +10,7 @@ import { useT } from "../lib/i18n.ts";
 import { useAnnouncedText } from "../lib/useAnnouncedText.ts";
 import { agentRoster, type AgentRow } from "../lib/agentRoster.ts";
 import { agentContext, agentTabName, paneMark } from "../lib/sidebarAgents.ts";
-import { useSettings } from "../lib/settings.ts";
+import { type AgentsDrawerFold, useSettings } from "../lib/settings.ts";
 import { useSidebarActivity } from "../lib/sidebarActivity.tsx";
 import { currentSidebarPins, pruneSidebarPins, setSidebarPins, sidebarPinKey, subscribeSidebarPins, toggleSidebarPin } from "../lib/sidebarPins.ts";
 import { PANE_DRAG_TYPE, paneDragData } from "../lib/split.ts";
@@ -74,6 +74,8 @@ export interface AgentSidebarProps {
 
 /** the width under which the sidebar is a drawer (src/styles.css) */
 const DRAWER_QUERY = "(max-width: 768px)";
+/** whether Settings → Agents on a phone starts the list folded on this screen */
+const startsFolded = (fold: AgentsDrawerFold): boolean => fold === "folded" && window.matchMedia?.(DRAWER_QUERY).matches === true;
 /**
  * The row whose menu is open, by its pin key: at its ⋯, or at the pointer for a right-click. What
  * the menu says of the row is read from the row at each render, so a value that changes while it is
@@ -93,8 +95,16 @@ export function AgentSidebar({ machines, selectedMachineId, selectedPaneId, stat
   const t = useT();
   const listId = useId();
   const { settings } = useSettings();
-  // the first render's choice only: a fold the user makes afterwards stays until the sidebar is drawn anew
-  const [collapsed, setCollapsed] = useState(() => settings.agentsDrawerFold === "folded" && window.matchMedia?.(DRAWER_QUERY).matches === true);
+  // Settings → Agents on a phone, as it stands when it is drawn and whenever it changes after (the shared
+  // preferences arrive after the first render, lib/preferencesSync.ts); a fold the user makes stays until the setting changes
+  const drawerFold = settings.agentsDrawerFold;
+  const [collapsed, setCollapsed] = useState(() => startsFolded(drawerFold));
+  const foldSetting = useRef(drawerFold);
+  useEffect(() => {
+    if (foldSetting.current === drawerFold) return;
+    foldSetting.current = drawerFold;
+    setCollapsed(startsFolded(drawerFold));
+  }, [drawerFold]);
   // shared with the other browsers of this server (lib/preferencesSync.ts)
   const pinned = useSyncExternalStore(subscribeSidebarPins, currentSidebarPins, currentSidebarPins);
   // which `$name` tokens herdr's own sidebar draws, from this server's herdr config (server/herdr-sidebar.ts)

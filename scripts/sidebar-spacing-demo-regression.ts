@@ -1,5 +1,6 @@
 /**
- * Purpose: verify sidebar spacing when PC groups fold in a real browser.
+ * Purpose: verify sidebar spacing when PC groups fold, and which box scrolls for each
+ * Settings → Agents list placement, in a real browser.
  * Tags: sidebar, spacing, responsive, browser, regression.
  * Usage: bun scripts/sidebar-spacing-demo-regression.ts
  */
@@ -28,6 +29,14 @@ const closeAgentWorkspaces = (page: Page) => page.evaluate(async () => {
   }
   throw new Error("the demo still lists an agent workspace after 32 closes");
 });
+
+/** Opens `count` shell workspaces through the demo's own API, so the PC's list is longer than the sidebar. */
+const addShellWorkspaces = (page: Page, count: number) => page.evaluate(async (count) => {
+  for (let made = 0; made < count; made++) {
+    const response = await fetch("/api/workspace/create", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd: `/home/demo/extra-${made + 1}`, label: `extra-${made + 1}` }) });
+    if (!response.ok) throw new Error(`opening workspace extra-${made + 1} answered ${response.status}`);
+  }
+}, count);
 
 let server: ReturnType<typeof Bun.serve> | undefined;
 try {
@@ -103,6 +112,86 @@ try {
       assert.equal(await agentToggle.getAttribute("aria-expanded"), "false");
       assert.equal(await page.locator(".agent-list-contents").getAttribute("hidden"), "");
       console.log(`PASS ${label} sidebar spacing after folding the PC section`);
+      await context.close();
+    } finally {
+      await browser.close();
+    }
+  }
+
+  // Settings → Agents list, with more workspaces than the sidebar holds: at the bottom the PCs' list
+  // scrolls by itself above the docked Agents; under the workspaces one scroll holds both lists
+  for (const [mobile, below] of [[false, false], [true, false], [false, true], [true, true]] as const) {
+    const label = `${mobile ? "390px" : "desktop"} with Agents ${below ? "under the workspaces" : "at the bottom"}`;
+    const browser = await chromium.launch({ executablePath: process.env.CHROME_PATH ?? chromium.executablePath(), headless: true, args: ["--no-sandbox"] });
+    try {
+      const context = await browser.newContext({
+        viewport: mobile ? { width: 390, height: 844 } : { width: 1280, height: 900 },
+        isMobile: mobile,
+        hasTouch: mobile,
+        locale: "en-US",
+      });
+      await context.addInitScript((settings) => {
+        localStorage.removeItem("herdr-web-ui:pc-collapsed:local");
+        localStorage.setItem("herdr-web-ui:settings", JSON.stringify(settings));
+      }, below ? { agentsPlacement: "below", agentsDrawerFold: "open" } : { agentsDrawerFold: "open" });
+      const page = await context.newPage();
+      await page.goto(`http://127.0.0.1:${server.port}/app/`);
+      await page.locator(".conn-live").waitFor({ state: "attached" });
+      // before the drawer opens: a new workspace closes it
+      await addShellWorkspaces(page, 12);
+      if (mobile) await page.locator(".drawer-toggle").tap();
+      await page.locator(".agents-sidebar .agent-title").first().waitFor();
+      assert.equal(await page.locator(".agents-sidebar .agent-section-toggle").getAttribute("aria-expanded"), "true", `${label} Agents starts unfolded, as Settings asks`);
+      assert.equal(await page.locator(".sidebar-shell.is-agents-below").count(), below ? 1 : 0, `${label} shell says where Agents sits`);
+      const metrics = await page.evaluate(() => {
+        const box = (selector: string) => document.querySelector<HTMLElement>(selector)?.getBoundingClientRect();
+        const list = document.querySelector<HTMLElement>(".machine-list")!;
+        const scroll = document.querySelector<HTMLElement>(".sidebar-scroll");
+        const overflowing = [...document.querySelectorAll<HTMLElement>(".sidebar-shell, .sidebar-shell *")]
+          .filter((element) => ["auto", "scroll"].includes(getComputedStyle(element).overflowY) && element.scrollHeight > element.clientHeight + 1)
+          .map((element) => element.classList[0]);
+        const scroller = (scroll ?? list).getBoundingClientRect();
+        const past = [...list.querySelectorAll<HTMLElement>(".workspace-group")].findIndex((group) => group.getBoundingClientRect().top >= scroller.bottom);
+        return {
+          overflowing,
+          hasScroll: scroll !== null,
+          listOverflow: getComputedStyle(list).overflowY,
+          listFade: getComputedStyle(list, "::after").display,
+          listBottom: list.getBoundingClientRect().bottom,
+          agentsTop: box(".agents-sidebar")!.top,
+          footerBottom: box(".sidebar-footer")!.bottom,
+          shellBottom: box(".sidebar-shell")!.bottom,
+          past,
+        };
+      });
+      assert.equal(Math.round(metrics.footerBottom), Math.round(metrics.shellBottom), `${label} footer stays at the bottom`);
+      if (below) {
+        assert.deepEqual(metrics.overflowing, ["sidebar-scroll"], `${label} only the shared scroll overflows`);
+        assert.equal(metrics.listFade, "none", `${label} the PCs' list draws no fade of its own`);
+        assert.ok(Math.abs(metrics.agentsTop - metrics.listBottom) <= 1, `${label} Agents heading follows the last workspace (gap ${metrics.agentsTop - metrics.listBottom}px)`);
+      } else {
+        assert.equal(metrics.hasScroll, false, `${label} has no shared scroll`);
+        assert.equal(metrics.listOverflow, "auto", `${label} the PCs' list keeps its own scroll`);
+        assert.ok(metrics.overflowing.includes("machine-list"), `${label} the PCs' list is the scroller (${metrics.overflowing.join(", ")})`);
+        assert.ok(!metrics.overflowing.includes("sidebar-scroll"), `${label} nothing else scrolls the workspaces`);
+      }
+      assert.ok(metrics.past >= 0, `${label} has a workspace past the fold`);
+
+      // a workspace past the fold, brought into view, moves the scroll that holds it and no other
+      const target = page.locator(".machine-list .workspace-group").nth(metrics.past).locator(":scope > .workspace-header .workspace-select");
+      await target.focus();
+      const revealed = await target.evaluate((select, isBelow) => {
+        const list = document.querySelector<HTMLElement>(".machine-list")!;
+        const scroll = document.querySelector<HTMLElement>(".sidebar-scroll");
+        const scroller = isBelow ? scroll! : list;
+        const row = select.getBoundingClientRect();
+        const panel = scroller.getBoundingClientRect();
+        return { scrolled: scroller.scrollTop, other: isBelow ? list.scrollTop : 0, inView: row.top >= panel.top - 1 && row.bottom <= panel.bottom + 1 };
+      }, below);
+      assert.ok(revealed.scrolled > 0, `${label} ${below ? "the shared scroll" : "the PCs' list"} scrolled to the workspace`);
+      assert.equal(revealed.other, 0, `${label} the PCs' list does not scroll inside the shared one`);
+      assert.equal(revealed.inView, true, `${label} the workspace is in view`);
+      console.log(`PASS ${label}: ${below ? "one scroll holds the workspaces and Agents" : "the PCs' list scrolls by itself above Agents"}`);
       await context.close();
     } finally {
       await browser.close();
