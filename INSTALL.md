@@ -211,9 +211,9 @@ Other PCs over SSH are added from the web UI (Settings → Remote PCs → **Add 
 | `HERDR_SOCKET` | `~/.config/herdr/herdr.sock` | herdr socket. The plugin follows herdr's session (herdr passes `HERDR_SOCKET_PATH`); a `HERDR_SOCKET` set in the plugin config wins |
 | `HERDR_WEB_AUTO_UPDATE` | `0` | `1` installs new versions automatically |
 | `HERDR_WEB_STATE_DIR` | `~/.config/herdr-web-ui` | Push keys, device subscriptions, PC registrations, update builds. Keep it across reinstalls. |
-| `OVIS_OPENCODE_URL` | unset | An OpenCode 1.x server (`opencode serve`) to read OpenCode panes' chats from instead of `opencode.db`, for a build that keeps its sessions elsewhere. `OPENCODE_SERVER_PASSWORD` (and `OPENCODE_SERVER_USERNAME`) are sent to it when set |
-| `OVIS_OPENCODE_SERVE` | `0` | `1` has the app start and own one loopback `opencode serve` for that, when a chat first needs it, and stop it with the app. `OVIS_OPENCODE_URL` wins when both are set |
-| `OVIS_OPENCODE_BIN` | `opencode` | The OpenCode executable `OVIS_OPENCODE_SERVE=1` starts |
+| `HERDR_WEB_OPENCODE_URL` | unset | An OpenCode 1.x server (`opencode serve`) to read OpenCode panes' chats from instead of `opencode.db`, for a build that keeps its sessions elsewhere. `OPENCODE_SERVER_PASSWORD` (and `OPENCODE_SERVER_USERNAME`) are sent to it when set, over `https://` or loopback only |
+| `HERDR_WEB_OPENCODE_SERVE` | `0` | `1` has the app start and own one loopback `opencode serve` for that, when a chat first needs it, and stop it with the app. `HERDR_WEB_OPENCODE_URL` wins when both are set |
+| `HERDR_WEB_OPENCODE_BIN` | `opencode` | The OpenCode executable `HERDR_WEB_OPENCODE_SERVE=1` starts |
 
 The [user guide](docs/guide.md#configuration) lists the rest.
 

@@ -62,7 +62,7 @@ import { handleMachineRequest, nonCanonicalPath } from "./machine-api.ts";
 import { handleSessionHistoryRequest, SESSION_HISTORY_PATH } from "./session-history-routes.ts";
 import { HerdrSidebarConfig, herdrConfigPath } from "./herdr-sidebar.ts";
 import { closeCodexDaemonSources } from "./codex-daemon.ts";
-import { stopOpencodeV1 } from "./opencode-v1.ts";
+import { reapOpencodeV1Orphans, stopOpencodeV1 } from "./opencode-v1.ts";
 import { MachineRelay } from "./machine-relay.ts";
 import { sameOrigin } from "./machine-security.ts";
 import { PLUGIN_LOG_LIMIT, pluginActionResult, pluginLogEntry, pluginPaneContext, waitForPluginAction } from "./plugin-actions.ts";
@@ -808,6 +808,8 @@ if (import.meta.main) {
     process.exit(1);
   }
   telemetry.start();
+  // an OpenCode server a run of this one killed outright left behind (opencode-v1.ts)
+  reapOpencodeV1Orphans();
   let stopping = false;
   const shutdown = () => {
     if (stopping) return;

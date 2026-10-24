@@ -25,9 +25,9 @@
  *   stream is projected onto the branch the leaf stands on before it is read.
  * - OpenCode: herdr's integration reports the session id, and OpenCode 2 keeps the
  *   session in its own SQLite store (opencode.ts), read by `seq` rather than by
-  *   byte offset: its cursors name rows, and it pages and caches on its own. When
-  *   OpenCode's own 1.x server is configured (opencode-v1.ts), the session is read
-  *   from it first, and the store only when it cannot answer.
+ *   byte offset: its cursors name rows, and it pages and caches on its own. When
+ *   OpenCode's own 1.x server is configured (opencode-v1.ts), the session is read
+ *   from it first, and the store only when it never could answer for it.
  *
  * This module turns those files into the conversation the chat lens renders;
  * the pty stays the input path. Pure parsing lives in parseClaudeTranscript /
@@ -1811,10 +1811,12 @@ export async function paneConversation(paneId: string, codexHome?: string, page:
   }
   if (resolved.source === "opencode-transcript") {
     // a session OpenCode's own server serves (opencode-v1.ts) is read from it, not from a store
-    // file that may be another's or stale; when that server cannot answer, the store is read as before
+    // file that may be another's or stale; when that server cannot answer, the store is read as before,
+    // unless the server answered for the session already (then its last page, or unavailable)
     const served = await opencodeV1Conversation(resolved.session, page);
-    if (served !== null && served.kind !== "unavailable") {
+    if (served !== null && !(served.kind === "unavailable" && served.reason === "session_not_found")) {
       if (served.kind === "history_changed") throw new HistoryChanged();
+      if (served.kind === "unavailable") throw new ConversationUnavailable(served.reason);
       rememberPaneRead(paneId, opencodeV1ReadKey(resolved.session));
       const { kind: _kind, signature, ...conversation } = served;
       const key = `opencode-http\0${resolved.session}\0${page.before ?? ""}\0${page.since ?? ""}\0${page.from ?? ""}`;

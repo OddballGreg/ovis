@@ -4,13 +4,15 @@ import type { SessionSnapshot } from "../shared/protocol.ts";
 import { ConversationNotStarted, ConversationUnavailable, paneTranscript, type NativeTranscript } from "./conversation.ts";
 import { agyDatabasePath } from "./agy.ts";
 import { sessionSnapshot } from "./herdr/client.ts";
-import { opencodeV1Configured, opencodeV1Signature } from "./opencode-v1.ts";
+import { opencodeV1Changes, opencodeV1Configured, opencodeV1Serving, opencodeV1Signature } from "./opencode-v1.ts";
 
 const STAT_INTERVAL_MS = 250;
 const RESOLVE_INTERVAL_MS = 5000;
 const MISSING_RESOLVE_INTERVAL_MS = 2000;
 /** A session OpenCode's own server serves is asked for its signature this often, not on every stat. */
 const SERVED_INTERVAL_MS = 1000;
+/** ...and this often once the server's event stream is seen to carry its changes (opencodeV1Changes). */
+const SERVED_EVENTS_INTERVAL_MS = 5000;
 
 interface WatchedConversation {
   transcript: NativeTranscript | null;
@@ -91,8 +93,11 @@ export class ConversationMonitor {
     const cwd = transcript.source === "devin-transcript" ? transcript.cwd : "";
     const catalog = transcript.source === "agy-transcript" ? agyDatabasePath(transcript.path) : null;
     const catalogIdentity = catalog === null ? "" : `${fileIdentity(catalog)}:${fileIdentity(`${catalog}-wal`)}`;
-    // a session OpenCode's own server serves changes in no file here: its server is asked instead
-    const served = transcript.source === "opencode-transcript" && opencodeV1Configured() ? this.served(paneId, state, transcript.session) : null;
+    // a session OpenCode's own server serves changes in no file here: its server is asked instead, once
+    // a chat was read from it; until then the store answers the chat, and its file is watched
+    const served = transcript.source === "opencode-transcript" && opencodeV1Configured() && opencodeV1Serving(transcript.session)
+      ? this.served(paneId, state, transcript.session)
+      : null;
     const observed = `${transcript.source}\0${transcript.path}\0${session}\0${cwd}\0${identity}\0${wal}\0${catalogIdentity}\0${served ?? ""}`;
     // Resolve once immediately on disappearance, not on every missing-file stat.
     if (served === null && identity === "missing" && observed !== state.observed) state.nextResolve = 0;
@@ -100,10 +105,16 @@ export class ConversationMonitor {
     return served !== null || identity !== "missing";
   }
 
-  /** The served session's last signature, asked again at most every SERVED_INTERVAL_MS and never twice at once. */
+  /**
+   * The served session's last signature and its count of change events. The signature is asked
+   * again at most every SERVED_INTERVAL_MS, never twice at once, and less often while the event
+   * stream carries the session's changes: a started `opencode serve` hears no other process's writes.
+   */
   private served(paneId: string, state: WatchedConversation, sessionId: string): string {
     const now = Date.now();
-    if (!state.servedAsking && (state.servedAt ?? 0) + SERVED_INTERVAL_MS <= now) {
+    const changes = opencodeV1Changes(sessionId);
+    const interval = changes.carried ? SERVED_EVENTS_INTERVAL_MS : SERVED_INTERVAL_MS;
+    if (!state.servedAsking && (state.servedAt ?? 0) + interval <= now) {
       state.servedAsking = true;
       state.servedAt = now;
       void opencodeV1Signature(sessionId).catch(() => null).then((signature) => {
@@ -113,7 +124,7 @@ export class ConversationMonitor {
         this.read(paneId, state);
       });
     }
-    return state.served?.startsWith(`${sessionId}:`) ? state.served : "";
+    return `${state.served?.startsWith(`${sessionId}:`) ? state.served : ""}\0${changes.count}`;
   }
 
   private poll(): void {
