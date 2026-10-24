@@ -314,7 +314,7 @@ export const KO: Record<string, string> = {
   "Workspaces": "워크스페이스순",
   "Activity": "활동순",
   "Agents list": "에이전트 목록",
-  "At the bottom docks the list above the footer; Under the workspaces puts it after the last workspace, to scroll with them": "“맨 아래”는 목록을 하단 메뉴 바로 위에 고정합니다. “워크스페이스 아래”는 마지막 워크스페이스 바로 뒤에 두고 함께 스크롤합니다",
+  "“At the bottom” docks the list above the footer; “Under the workspaces” puts it after the last workspace, to scroll with them": "“맨 아래”는 목록을 하단 메뉴 바로 위에 고정합니다. “워크스페이스 아래”는 마지막 워크스페이스 바로 뒤에 두고 함께 스크롤합니다",
   "At the bottom": "맨 아래",
   "Under the workspaces": "워크스페이스 아래",
   "Agents on a phone": "휴대폰의 에이전트",

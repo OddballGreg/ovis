@@ -318,7 +318,7 @@ export const ZH: Record<string, string> = {
   "Workspaces": "工作区顺序",
   "Activity": "按活动",
   "Agents list": "代理列表",
-  "At the bottom docks the list above the footer; Under the workspaces puts it after the last workspace, to scroll with them": "“底部”会把列表固定在页脚上方；“工作区下方”会把它放在最后一个工作区之后，并与工作区一起滚动",
+  "“At the bottom” docks the list above the footer; “Under the workspaces” puts it after the last workspace, to scroll with them": "“底部”会把列表固定在页脚上方；“工作区下方”会把它放在最后一个工作区之后，并与工作区一起滚动",
   "At the bottom": "底部",
   "Under the workspaces": "工作区下方",
   "Agents on a phone": "手机上的代理",

@@ -316,7 +316,7 @@ export const JA: Record<string, string> = {
   "Workspaces": "ワークスペース順",
   "Activity": "アクティビティ順",
   "Agents list": "エージェント一覧",
-  "At the bottom docks the list above the footer; Under the workspaces puts it after the last workspace, to scroll with them": "「一番下」では一覧をフッターのすぐ上に固定します。「ワークスペースの下」では最後のワークスペースのすぐ後に置き、一緒にスクロールします",
+  "“At the bottom” docks the list above the footer; “Under the workspaces” puts it after the last workspace, to scroll with them": "「一番下」では一覧をフッターのすぐ上に固定します。「ワークスペースの下」では最後のワークスペースのすぐ後に置き、一緒にスクロールします",
   "At the bottom": "一番下",
   "Under the workspaces": "ワークスペースの下",
   "Agents on a phone": "スマートフォンのエージェント",

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { createElement } from "react";
+import { Activity, createElement } from "react";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 
 import type { Machine } from "../../shared/machines.ts";
@@ -20,21 +20,24 @@ const machine: Machine = {
   },
 };
 
-describe("AgentSidebar fold on a phone", () => {
+describe("AgentSidebar fold and Settings → Agents on a phone", () => {
   const descriptors = new Map<string, PropertyDescriptor | undefined>();
   let records: Map<string, string>;
   let renderer: ReactTestRenderer | null;
   let update: (patch: Partial<Settings>) => void;
   let settingsNow: Settings;
+  /** whether the drawer query matches: a phone, or a wider screen */
+  let drawer: boolean;
   beforeEach(() => {
     for (const key of ["window", "document", "navigator", "getComputedStyle", "IS_REACT_ACT_ENVIRONMENT"]) descriptors.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
     records = new Map();
     renderer = null;
+    drawer = true;
     Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
     Object.defineProperty(globalThis, "navigator", { configurable: true, value: { languages: ["en"] } });
-    // a phone: the drawer query matches
+    // the drawer query, as `drawer` says when it is asked
     Object.defineProperty(globalThis, "window", { configurable: true, value: {
-      matchMedia: () => ({ matches: true, addEventListener() {}, removeEventListener() {} }),
+      matchMedia: () => ({ matches: drawer, addEventListener() {}, removeEventListener() {} }),
       localStorage: { getItem: (key: string) => records.get(key) ?? null, setItem: (key: string, value: string) => records.set(key, value) },
       requestAnimationFrame: () => 0, cancelAnimationFrame() {},
       addEventListener() {}, removeEventListener() {},
@@ -59,15 +62,19 @@ describe("AgentSidebar fold on a phone", () => {
     settingsNow = value.settings;
     return null;
   }
+  /** the sidebar's Agents list, in an <Activity> that is shown or hidden as `mode` says */
+  const tree = (mode: "visible" | "hidden") => createElement(SettingsProvider, {
+    children: [
+      createElement(Probe, { key: "probe" }),
+      createElement(Activity, { key: "agents", mode, children:
+        createElement(AgentSidebar, { machines: [machine], selectedMachineId: "local", selectedPaneId: null, stateWord: () => "disconnected", onSelect: () => {} }) }),
+    ],
+  });
   const mount = (): void => {
-    act(() => {
-      renderer = create(createElement(SettingsProvider, {
-        children: [
-          createElement(Probe, { key: "probe" }),
-          createElement(AgentSidebar, { key: "agents", machines: [machine], selectedMachineId: "local", selectedPaneId: null, stateWord: () => "disconnected", onSelect: () => {} }),
-        ],
-      }));
-    });
+    act(() => { renderer = create(tree("visible")); });
+  };
+  const show = (mode: "visible" | "hidden"): void => {
+    act(() => renderer!.update(tree(mode)));
   };
   const folded = (): boolean => renderer!.root.find((node) => node.props.className === "agent-list-contents").props.hidden === true;
   const toggle = (): void => {
@@ -107,5 +114,34 @@ describe("AgentSidebar fold on a phone", () => {
     expect(folded()).toBe(false);
     set({ agentsDrawerFold: "folded" });
     expect(folded()).toBe(true);
+  });
+
+  test("a list hidden and shown again keeps the user's fold: its effects run again, with no new value", () => {
+    mount();
+    expect(folded()).toBe(true);
+    toggle();
+    expect(folded()).toBe(false);
+    show("hidden");
+    show("visible");
+    expect(folded()).toBe(false);
+  });
+
+  test("on a wider screen the setting starts the list unfolded and never undoes the user's fold", () => {
+    drawer = false;
+    records.set(SETTINGS_STORAGE_KEY, JSON.stringify({ agentsDrawerFold: "folded" }));
+    mount();
+    expect(folded()).toBe(false);
+    toggle();
+    expect(folded()).toBe(true);
+    // the shared preferences change it: the user's fold here stays either way
+    set({ agentsDrawerFold: "open" });
+    expect(folded()).toBe(true);
+    set({ agentsDrawerFold: "folded" });
+    expect(folded()).toBe(true);
+    toggle();
+    expect(folded()).toBe(false);
+    set({ agentsDrawerFold: "open" });
+    set({ agentsDrawerFold: "folded" });
+    expect(folded()).toBe(false);
   });
 });

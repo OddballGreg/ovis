@@ -74,8 +74,10 @@ export interface AgentSidebarProps {
 
 /** the width under which the sidebar is a drawer (src/styles.css) */
 const DRAWER_QUERY = "(max-width: 768px)";
+/** whether this screen draws the sidebar as the phone's drawer */
+const inDrawer = (): boolean => window.matchMedia?.(DRAWER_QUERY).matches === true;
 /** whether Settings → Agents on a phone starts the list folded on this screen */
-const startsFolded = (fold: AgentsDrawerFold): boolean => fold === "folded" && window.matchMedia?.(DRAWER_QUERY).matches === true;
+const startsFolded = (fold: AgentsDrawerFold): boolean => fold === "folded" && inDrawer();
 /**
  * The row whose menu is open, by its pin key: at its ⋯, or at the pointer for a right-click. What
  * the menu says of the row is read from the row at each render, so a value that changes while it is
@@ -96,14 +98,17 @@ export function AgentSidebar({ machines, selectedMachineId, selectedPaneId, stat
   const listId = useId();
   const { settings } = useSettings();
   // Settings → Agents on a phone, as it stands when it is drawn and whenever it changes after (the shared
-  // preferences arrive after the first render, lib/preferencesSync.ts); a fold the user makes stays until the setting changes
+  // preferences arrive after the first render, lib/preferencesSync.ts); a fold the user makes stays until the setting changes,
+  // and on a wider screen, where the setting does not apply, it stays
   const drawerFold = settings.agentsDrawerFold;
   const [collapsed, setCollapsed] = useState(() => startsFolded(drawerFold));
   const foldSetting = useRef(drawerFold);
   useEffect(() => {
+    // the effect also runs again with the same value (a hidden <Activity> shown again, Fast Refresh): only a new one refolds
     if (foldSetting.current === drawerFold) return;
     foldSetting.current = drawerFold;
-    setCollapsed(startsFolded(drawerFold));
+    if (!inDrawer()) return;
+    setCollapsed(drawerFold === "folded");
   }, [drawerFold]);
   // shared with the other browsers of this server (lib/preferencesSync.ts)
   const pinned = useSyncExternalStore(subscribeSidebarPins, currentSidebarPins, currentSidebarPins);
