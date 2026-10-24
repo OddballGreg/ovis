@@ -1,10 +1,12 @@
 /**
- * What opencode-v1.ts starts `opencode serve` through, so that the server it started never
- * outlives it: this runs the command it is given, prints `pid <n>` for it, and stops it once its
- * own stdin ends. The server that started it holds the other end of that pipe, and the pipe ends
- * however that server goes, a SIGKILL or the OOM killer included, which run no exit handler.
- * SIGTERM, SIGINT and SIGHUP stop it too. A stop asks with SIGTERM, then SIGKILL after the grace
- * period; this exits with the command's exit code.
+ * What opencode-v1.ts starts `opencode serve` through, and the only process that stops it: this
+ * runs the command it is given in a process group of its own, prints `pid <n>` for it, and stops
+ * that group once its own stdin ends. The server that started it holds the other end of that pipe,
+ * and the pipe ends however that server goes, a SIGKILL or the OOM killer included, which run no
+ * exit handler. SIGTERM, SIGINT and SIGHUP stop it too; their handlers are in place before the
+ * command starts, so a stop asked at any time is heard. A stop sends the group SIGTERM, then
+ * SIGKILL after the grace period, and once the command has exited whatever is left of its group
+ * (a child it started) gets SIGKILL. This exits with the command's exit code.
  *
  *   bun server/opencode-watchdog.ts <grace ms> <command> [args…]
  */
@@ -12,7 +14,10 @@
 export interface WatchedCommand {
   pid: number;
   exited: Promise<number | null>;
+  /** signals the command's process group */
   kill(signal: "SIGTERM" | "SIGKILL"): void;
+  /** SIGKILL to what is left of the group once the command exited */
+  sweep(): void;
 }
 
 export interface WatchdogDeps {
@@ -25,19 +30,33 @@ export interface WatchdogDeps {
 
 /** Run `argv` until it exits, stopping it when stdin ends or a signal asks; its exit code. */
 export async function watchdog(argv: string[], graceMs: number, deps: WatchdogDeps): Promise<number | null> {
-  const command = deps.spawn(argv);
-  deps.print(`pid ${command.pid}`);
+  let command: WatchedCommand | null = null;
+  let asked = false;
   let killer: ReturnType<typeof setTimeout> | undefined;
   const stop = () => {
-    if (killer !== undefined) return;
-    command.kill("SIGTERM");
-    killer = setTimeout(() => command.kill("SIGKILL"), graceMs);
+    asked = true;
+    if (command === null || killer !== undefined) return;
+    const running = command;
+    running.kill("SIGTERM");
+    killer = setTimeout(() => running.kill("SIGKILL"), graceMs);
   };
-  void deps.stdinEnded.then(stop, stop);
   deps.onSignal(stop);
+  void deps.stdinEnded.then(stop, stop);
+  command = deps.spawn(argv);
+  deps.print(`pid ${command.pid}`);
+  if (asked) stop();
   const code = await command.exited;
   clearTimeout(killer);
+  command.sweep();
   return code;
+}
+
+/** Signal a process group; Windows has none, so there the process alone. */
+function signalGroup(pid: number, signal: "SIGTERM" | "SIGKILL", child: { kill(signal: "SIGTERM" | "SIGKILL"): void }): void {
+  try {
+    if (process.platform === "win32") child.kill(signal);
+    else process.kill(-pid, signal);
+  } catch { /* gone already */ }
 }
 
 if (import.meta.main) {
@@ -50,8 +69,13 @@ if (import.meta.main) {
   })();
   const code = await watchdog(argv, graceMs, {
     spawn(command) {
-      const child = Bun.spawn(command, { stdin: "ignore", stdout: "ignore", stderr: "ignore", windowsHide: true });
-      return { pid: child.pid, exited: child.exited.then((exit) => child.signalCode === null ? exit : null), kill: (signal) => { try { child.kill(signal); } catch { /* gone already */ } } };
+      const child = Bun.spawn(command, { stdin: "ignore", stdout: "ignore", stderr: "ignore", windowsHide: true, detached: true });
+      return {
+        pid: child.pid,
+        exited: child.exited.then((exit) => child.signalCode === null ? exit : null),
+        kill: (signal) => signalGroup(child.pid, signal, child),
+        sweep: () => { if (process.platform !== "win32") signalGroup(child.pid, "SIGKILL", child); },
+      };
     },
     stdinEnded,
     onSignal(stop) {

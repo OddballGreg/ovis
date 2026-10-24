@@ -11,18 +11,22 @@ import * as herdr from "./herdr/client.ts";
 import { forgetOpencodeState, opencodeConversation, type OpencodeAnswer } from "./opencode.ts";
 import {
   forgetOpencodeV1State,
-  killOpencodeV1Now,
+  OPENCODE_V1_HELD_BYTES,
+  OPENCODE_V1_INCOMPATIBLE_STARTS,
   OPENCODE_V1_MAX_WALK_REQUESTS,
   OPENCODE_V1_NOT_FOUND_MS,
+  OPENCODE_V1_PIN_MS,
   opencodeV1Changes,
   opencodeV1Configured,
   opencodeV1Conversation,
   opencodeV1Endpoint,
+  opencodeV1HeldBytes,
   opencodeV1Image,
   opencodeV1Mode,
   opencodeV1Options,
   opencodeV1Serving,
   opencodeV1Signature,
+  opencodeV1State,
   opencodeV1ToolOutput,
   opencodeV1Version,
   OpencodeServe,
@@ -30,6 +34,7 @@ import {
   resetOpencodeV1,
   serveEnvironment,
   stopOpencodeV1,
+  stopOpencodeV1Now,
   type ServeChild,
   type ServeDeps,
 } from "./opencode-v1.ts";
@@ -52,6 +57,8 @@ class FakeServer {
   requests: string[] = [];
   failing = false;
   password: string | null = null;
+  /** what its health check says it is */
+  version = "1.19.0";
   /** called before a message list is answered, with its query */
   onList: ((search: URLSearchParams) => void) | null = null;
   private clock = T0;
@@ -96,7 +103,7 @@ class FakeServer {
     if (request.method !== "GET") return new Response("read-only fixture", { status: 405 });
     if (this.password !== null && request.headers.get("authorization") !== `Basic ${btoa(`opencode:${this.password}`)}`) return new Response(null, { status: 401 });
     if (this.failing) return new Response("down", { status: 500 });
-    if (url.pathname === "/global/health") return Response.json({ healthy: true, version: "1.19.0" });
+    if (url.pathname === "/global/health") return Response.json({ healthy: true, version: this.version });
     if (url.pathname === "/global/event") {
       let controller: ReadableStreamDefaultController<string>;
       const body = new ReadableStream<string>({
@@ -172,6 +179,14 @@ async function until(check: () => boolean | Promise<boolean>, ms = 5_000): Promi
   throw new Error("timed out waiting");
 }
 
+/** Whether a process runs (a zombie an orphan left until its new parent reaps it does not). */
+const alive = (pid: number): boolean => {
+  if (process.platform === "linux") {
+    try { return readFileSync(`/proc/${pid}/stat`, "utf8").split(") ")[1]!.split(" ")[0] !== "Z"; } catch { return false; }
+  }
+  try { process.kill(pid, 0); return true; } catch { return false; }
+};
+
 const listRequests = (requests: string[]) => requests.filter((path) => /\/message\?/.test(path) && !path.includes("limit=1&") && !path.endsWith("limit=1"));
 
 let server: FakeServer;
@@ -186,7 +201,7 @@ beforeEach(async () => {
 });
 afterEach(async () => {
   server.stop();
-  for (const key of ["env", "deps", "serve", "stateDir", "now", "windowBytes"] as const) delete opencodeV1Options[key];
+  for (const key of ["env", "deps", "serve", "stateDir", "now", "windowBytes", "heldBytes"] as const) delete opencodeV1Options[key];
   await resetOpencodeV1();
 });
 
@@ -224,8 +239,8 @@ describe("where the HTTP source is", () => {
   });
 
   it("knows OpenCode 1.x by its health check's version", () => {
-    for (const version of ["1.19.0", "1.0.0-beta.3", "0.0.0-fix/some-branch-v1.19.0-202610240522"]) expect(opencodeV1Version(version)).toBe(true);
-    for (const version of ["2.0.0", "0.9.1", "0.0.0-dev-202610240522", "", undefined, 1]) expect(opencodeV1Version(version)).toBe(false);
+    for (const version of ["1.19.0", "1.0.0-beta.3", "0.0.0-fix/some-branch-v1.19.0-202610240522", "0.0.0-dev-v1.19.0", "0.0.0-v1.2.3"]) expect(opencodeV1Version(version)).toBe(true);
+    for (const version of ["2.0.0", "0.9.1", "0.0.0-dev-202610240522", "0.0.0-dev-v1.19.0.1", "0.0.0-dev-v1.19", "0.0.0-dev-v10.1.0", "0.0.0-try-v1.2.3x", "2.0.0-dev-v1.2.3", "", undefined, 1]) expect(opencodeV1Version(version)).toBe(false);
   });
 
   it("sends the password it was given", async () => {
@@ -598,6 +613,158 @@ describe("a pane's chat with the HTTP source", () => {
       monitor.stop();
     }
   });
+
+  it("reads a chat from the server once a server that was still starting is up, though the store answered it first", async () => {
+    const s = server.session();
+    s.user("from the store");
+    const db = storeOf(server, s.id);
+    s.user("only on the server");
+    panes = [paneOf(s.id)];
+    const fake = fakeDeps();
+    const answered = Promise.withResolvers<"ready">();
+    opencodeV1Options.env = { HERDR_WEB_OPENCODE_SERVE: "1" };
+    opencodeV1Options.deps = { ...fake.deps, freePort: async () => Number(new URL(server.url).port), ready: () => answered.promise };
+    opencodeV1Options.serve = { ...fast, waitMs: 5 };
+    const first = await paneConversation("pane-oc", undefined, {}, undefined, db);
+    expect(first.source).toBe("opencode-transcript");
+    expect(opencodeV1State()).toBe("starting");
+    const changes: string[] = [];
+    const monitor = new ConversationMonitor((_pane, signature) => { changes.push(signature); }, undefined, undefined, db);
+    try {
+      monitor.watch("pane-oc");
+      await until(() => changes.length >= 1);
+      const before = changes.length;
+      // the store did not change; the server came up, and that is a change the chat reads again on
+      answered.resolve("ready");
+      await until(() => changes.length > before);
+      expect(opencodeV1State()).toBe("ready");
+      const again = await paneConversation("pane-oc", undefined, {}, undefined, db);
+      expect(again.source).toBe("opencode-http");
+      expect(prompts(again)).toEqual(["from the store", "only on the server"]);
+    } finally {
+      monitor.stop();
+    }
+  });
+});
+
+describe("a server the user names", () => {
+  it("is checked to be OpenCode 1.x once, and not read from when it is another version", async () => {
+    const s = server.session();
+    s.user("hello");
+    expect(opencodeV1State()).toBe("starting");
+    page(await opencodeV1Conversation(s.id));
+    page(await opencodeV1Conversation(s.id));
+    expect(server.requests.filter((path) => path === "/global/health")).toEqual(["/global/health"]);
+    expect(opencodeV1State()).toBe("ready");
+
+    await resetOpencodeV1();
+    server.version = "2.0.0";
+    server.requests = [];
+    const lines: string[] = [];
+    const log = spyOn(console, "error").mockImplementation((line: string) => { lines.push(line); });
+    try {
+      expect(await opencodeV1Conversation(s.id)).toBeNull();
+      expect(await opencodeV1Conversation(s.id)).toBeNull();
+      expect(await opencodeV1Signature(s.id)).toBeNull();
+    } finally {
+      log.mockRestore();
+    }
+    expect(server.requests).toEqual(["/global/health"]);
+    expect(opencodeV1State()).toBe("unavailable");
+    expect(lines).toEqual(["The OpenCode server HERDR_WEB_OPENCODE_URL names is not OpenCode 1.x; chats are read from opencode.db until it changes or the app restarts."]);
+  });
+});
+
+describe("a session read from the server, when the server stops answering for it", () => {
+  it("goes back to the store once the server has failed it continuously for longer than the pin lasts", async () => {
+    let clock = 1_000_000;
+    opencodeV1Options.now = () => clock;
+    const s = server.session();
+    s.user("hello");
+    const newest = page(await opencodeV1Conversation(s.id));
+    server.failing = true;
+    expect(await opencodeV1Conversation(s.id)).toEqual(newest);
+    clock += OPENCODE_V1_PIN_MS - 1;
+    // an answer in between starts the count over
+    server.failing = false;
+    page(await opencodeV1Conversation(s.id));
+    server.failing = true;
+    expect(await opencodeV1Signature(s.id)).toBeNull();
+    clock += OPENCODE_V1_PIN_MS;
+    expect(await opencodeV1Conversation(s.id)).toEqual(newest);
+    expect(opencodeV1Serving(s.id)).toBe(true);
+    clock += 1;
+    expect(opencodeV1Serving(s.id)).toBe(false);
+    expect(await opencodeV1Conversation(s.id)).toBeNull();
+    expect(await opencodeV1ToolOutput(s.id, "msg_000001FIX:0")).toBeUndefined();
+  });
+
+  it("goes back to the store for a session the server says it does not hold", async () => {
+    const s = server.session();
+    s.user("hello");
+    page(await opencodeV1Conversation(s.id));
+    expect(opencodeV1Serving(s.id)).toBe(true);
+    server.sessions.delete(s.id);
+    expect(await opencodeV1Conversation(s.id)).toEqual({ kind: "unavailable", reason: "session_not_found" });
+    expect(opencodeV1Serving(s.id)).toBe(false);
+    server.failing = true;
+    expect(await opencodeV1Conversation(s.id)).toEqual({ kind: "unavailable", reason: "session_not_found" });
+  });
+
+  it("goes back to the store once the started server answers as another version", async () => {
+    const s = server.session();
+    s.user("hello");
+    const fake = fakeDeps();
+    opencodeV1Options.env = { HERDR_WEB_OPENCODE_SERVE: "1" };
+    opencodeV1Options.deps = { ...fake.deps, freePort: async () => Number(new URL(server.url).port) };
+    opencodeV1Options.serve = fast;
+    page(await opencodeV1Conversation(s.id));
+    expect(opencodeV1Serving(s.id)).toBe(true);
+    fake.spawned[0]!.exit(1);
+    await tick();
+    fake.advance(10_000);
+    fake.setHealth("incompatible");
+    expect(await opencodeV1Conversation(s.id)).toBeNull();
+    expect(opencodeV1Serving(s.id)).toBe(false);
+  });
+});
+
+describe("what the source holds of a session", () => {
+  const big = (n: number) => ({ type: "text", text: `${"x".repeat(800)}${n}` });
+
+  it("counts a message once, though a cached chunk and a walk's spine both hold it", async () => {
+    opencodeV1Options.heldBytes = 1_000_000;
+    opencodeV1Options.windowBytes = 500_000;
+    const s = server.session();
+    s.user("start");
+    for (let n = 0; n < 100; n++) s.assistant([big(n)], { finish: "stop" });
+    const answer = page(await opencodeV1Conversation(s.id));
+    expect(answer.cursor).toBeNull();
+    // the walk reached the start: its older chunks are cached and in its spine, every message once
+    const total = server.sessions.get(s.id)!.messages.reduce((sum, item) => sum + Buffer.byteLength(JSON.stringify(item)), 0);
+    expect(opencodeV1HeldBytes()).toBe(total);
+  });
+
+  it("stays within its budget however many sessions and older pages are read", async () => {
+    const budget = 60_000;
+    opencodeV1Options.heldBytes = budget;
+    opencodeV1Options.windowBytes = 8_000;
+    let peak = 0;
+    for (let n = 0; n < 6; n++) {
+      const s = server.session(`ses_budget${n}`);
+      for (let m = 0; m < 150; m++) { s.user(`p${m}`); s.assistant([big(m)], { finish: "stop" }); }
+      let answer = page(await opencodeV1Conversation(s.id));
+      peak = Math.max(peak, opencodeV1HeldBytes());
+      for (let older = 0; older < 8 && answer.cursor !== null; older++) {
+        answer = page(await opencodeV1Conversation(s.id, { before: answer.cursor }));
+        peak = Math.max(peak, opencodeV1HeldBytes());
+        expect(opencodeV1HeldBytes()).toBeLessThanOrEqual(budget);
+      }
+    }
+    expect(peak).toBeGreaterThan(budget / 2);
+    expect(peak).toBeLessThanOrEqual(budget);
+    expect(OPENCODE_V1_HELD_BYTES).toBe(64 * 1024 * 1024);
+  });
 });
 
 /** A started server's lifecycle, against a clock and a process of its own. */
@@ -614,10 +781,10 @@ function fakeDeps(options: { stubborn?: boolean } = {}) {
       spawned.push(entry);
       const child: ServeChild = {
         exited: exited.promise,
-        kill: (signal) => {
-          entry.signals.push(signal);
-          // a stubborn server ignores SIGTERM
-          if (signal === "SIGKILL" || !options.stubborn) exited.resolve(null);
+        stop: () => {
+          entry.signals.push("stop");
+          // a stubborn one's watchdog takes its time
+          if (!options.stubborn) exited.resolve(null);
         },
       };
       return child;
@@ -661,7 +828,7 @@ describe("the server this one starts", () => {
     expect(one).toEqual({ baseUrl: "http://127.0.0.1:40000", authorization: `Basic ${btoa(`opencode:${env["OPENCODE_SERVER_PASSWORD"]}`)}` });
     expect(serve.state).toBe("ready");
     await serve.stop();
-    expect(fake.spawned[0]!.signals).toEqual(["SIGTERM"]);
+    expect(fake.spawned[0]!.signals).toEqual(["stop"]);
     expect(await serve.endpoint()).toBeNull();
     expect(fake.spawned.length).toBe(1);
   });
@@ -704,7 +871,7 @@ describe("the server this one starts", () => {
     fake.setHealth(false);
     expect(await serve.endpoint()).toBeNull();
     await tick();
-    expect(fake.spawned[0]!.signals).toEqual(["SIGTERM"]);
+    expect(fake.spawned[0]!.signals).toEqual(["stop"]);
     expect(fake.logs.at(-1)).toContain("did not answer its health check");
 
     fake.advance(1_000);
@@ -721,8 +888,24 @@ describe("the server this one starts", () => {
     fake.setHealth("incompatible");
     expect(await serve.endpoint()).toBeNull();
     await tick();
-    expect(fake.spawned[2]!.signals).toEqual(["SIGTERM"]);
+    expect(fake.spawned[2]!.signals).toEqual(["stop"]);
     expect(fake.logs.at(-1)).toBe("OpenCode server is not OpenCode 1.x; the next chat that needs it starts it again in 60s.");
+    expect(serve.incompatible).toBe(true);
+
+    // another version every time: after a few starts, none again until the configuration changes
+    for (let start = 1; start < OPENCODE_V1_INCOMPATIBLE_STARTS; start++) {
+      fake.advance(60_000);
+      expect(await serve.endpoint()).toBeNull();
+      await tick();
+    }
+    expect(fake.spawned.length).toBe(2 + OPENCODE_V1_INCOMPATIBLE_STARTS);
+    expect(fake.logs.at(-1)).toBe("OpenCode server is not OpenCode 1.x; it is not started again until HERDR_WEB_OPENCODE_BIN changes or the app restarts.");
+    const logged = fake.logs.length;
+    fake.advance(24 * 3_600_000);
+    expect(await serve.endpoint()).toBeNull();
+    expect(serve.state).toBe("incompatible");
+    expect(fake.spawned.length).toBe(2 + OPENCODE_V1_INCOMPATIBLE_STARTS);
+    expect(fake.logs.length).toBe(logged);
     await serve.stop();
   });
 
@@ -759,16 +942,16 @@ describe("the server this one starts", () => {
     expect(prompts(page(answer))).toEqual(["hello"]);
     expect(fake.spawned.map((entry) => entry.argv[0])).toEqual(["/opt/opencode"]);
     await stopOpencodeV1();
-    expect(fake.spawned[0]!.signals).toEqual(["SIGTERM"]);
+    expect(fake.spawned[0]!.signals).toEqual(["stop"]);
   });
 
-  it("stops for good once: a second stop waits for the same exit, nothing starts after it, and the exit hook still reaches the server", async () => {
+  it("stops for good once: a second stop waits for the same exit, nothing starts after it, and the exit hook asks the watchdog again", async () => {
     const s = server.session();
     s.user("hello");
     const fake = fakeDeps({ stubborn: true });
     opencodeV1Options.env = { HERDR_WEB_OPENCODE_SERVE: "1" };
     opencodeV1Options.deps = { ...fake.deps, freePort: async () => Number(new URL(server.url).port) };
-    opencodeV1Options.serve = { ...fast, stopGraceMs: 60_000 };
+    opencodeV1Options.serve = { ...fast, stopWaitMs: 300 };
     expect(page(await opencodeV1Conversation(s.id)).turns.length).toBe(1);
     const first = stopOpencodeV1();
     const second = stopOpencodeV1();
@@ -776,16 +959,18 @@ describe("the server this one starts", () => {
     let settled = false;
     void second.then(() => { settled = true; });
     await tick();
-    // SIGTERM went, and the stubborn server is still running: the stop has not settled
-    expect(fake.spawned[0]!.signals).toEqual(["SIGTERM"]);
+    // the watchdog was asked, and is still stopping a slow server: the stop waits for it
+    expect(fake.spawned[0]!.signals).toEqual(["stop"]);
     expect(settled).toBe(false);
     expect(await opencodeV1Endpoint()).toBeNull();
     expect(fake.spawned.length).toBe(1);
-    // what the process `exit` handler does
-    killOpencodeV1Now();
-    expect(fake.spawned[0]!.signals).toEqual(["SIGTERM", "SIGKILL"]);
+    // what the process `exit` handler does: ask again, and kill nothing from here
+    stopOpencodeV1Now();
+    expect(fake.spawned[0]!.signals).toEqual(["stop", "stop"]);
+    // past its wait, the stop settles; the watchdog, never killed from here, finishes on its own
     await first;
     expect(settled).toBe(true);
+    fake.spawned[0]!.exit(0);
   });
 });
 
@@ -824,9 +1009,12 @@ describe("a server a hard kill left behind", () => {
     const script = join(stateDir, "fake-opencode.ts");
     writeFileSync(script, `
       const port = Number(process.argv[process.argv.indexOf("--port") + 1]);
+      // a child of its own, as OpenCode's MCP servers and tools are
+      const child = Bun.spawn([process.execPath, "-e", "setInterval(() => {}, 1000)"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
       Bun.serve({ port, hostname: "127.0.0.1", fetch(request) {
         const path = new URL(request.url).pathname;
         if (path === "/global/health") return Response.json({ healthy: true, version: "1.19.0" });
+        if (path === "/fixture/child") return Response.json({ pid: child.pid });
         if (path === "/fixture/env") return Response.json({ cwd: process.cwd(), pure: process.env.OPENCODE_PURE, herdr: Object.keys(process.env).filter((key) => key.startsWith("HERDR_")) });
         return new Response(null, { status: 404 });
       } });
@@ -842,17 +1030,20 @@ describe("a server a hard kill left behind", () => {
     const env = await fetch(`${endpoint!.baseUrl}/fixture/env`).then((response) => response.json()) as { cwd: string; pure: string; herdr: string[] };
     expect(env).toEqual({ cwd: join(stateDir, "opencode-serve", "cwd"), pure: "1", herdr: [] });
     expect(readdirSync(join(stateDir, "opencode-serve", "cwd"))).toEqual([]);
+    const { pid: child } = await fetch(`${endpoint!.baseUrl}/fixture/child`).then((response) => response.json()) as { pid: number };
     if (process.platform === "linux") {
-      // a watchdog killed outright, alone: this server stops what it ran, and the next chat starts another
+      // a watchdog killed outright, alone: the server's whole group goes from here, and the next chat starts another
       const pid = Number(/^\d+-(\d+)\.json$/.exec(readdirSync(run)[0]!)![1]);
-      const watchdog = Number(readFileSync(`/proc/${pid}/stat`, "utf8").split(") ")[1]!.split(" ")[1]);
-      process.kill(watchdog, "SIGKILL");
-      await until(() => !existsSync(`/proc/${pid}`) && readdirSync(run).length === 0);
+      const stat = readFileSync(`/proc/${pid}/stat`, "utf8").split(") ")[1]!.split(" ");
+      expect(Number(stat[2])).toBe(pid);
+      process.kill(Number(stat[1]), "SIGKILL");
+      await until(() => !alive(pid) && !alive(child) && readdirSync(run).length === 0);
       await expect(fetch(`${endpoint!.baseUrl}/global/health`)).rejects.toThrow();
       return;
     }
     await stopOpencodeV1();
     expect(readdirSync(run)).toEqual([]);
     await expect(fetch(`${endpoint!.baseUrl}/global/health`)).rejects.toThrow();
+    await until(() => !alive(child));
   });
 });

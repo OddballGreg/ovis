@@ -4,7 +4,7 @@ import type { SessionSnapshot } from "../shared/protocol.ts";
 import { ConversationNotStarted, ConversationUnavailable, paneTranscript, type NativeTranscript } from "./conversation.ts";
 import { agyDatabasePath } from "./agy.ts";
 import { sessionSnapshot } from "./herdr/client.ts";
-import { opencodeV1Changes, opencodeV1Configured, opencodeV1Serving, opencodeV1Signature } from "./opencode-v1.ts";
+import { opencodeV1Changes, opencodeV1Configured, opencodeV1Serving, opencodeV1Signature, opencodeV1State } from "./opencode-v1.ts";
 
 const STAT_INTERVAL_MS = 250;
 const RESOLVE_INTERVAL_MS = 5000;
@@ -94,11 +94,12 @@ export class ConversationMonitor {
     const catalog = transcript.source === "agy-transcript" ? agyDatabasePath(transcript.path) : null;
     const catalogIdentity = catalog === null ? "" : `${fileIdentity(catalog)}:${fileIdentity(`${catalog}-wal`)}`;
     // a session OpenCode's own server serves changes in no file here: its server is asked instead, once
-    // a chat was read from it; until then the store answers the chat, and its file is watched
-    const served = transcript.source === "opencode-transcript" && opencodeV1Configured() && opencodeV1Serving(transcript.session)
-      ? this.served(paneId, state, transcript.session)
-      : null;
-    const observed = `${transcript.source}\0${transcript.path}\0${session}\0${cwd}\0${identity}\0${wal}\0${catalogIdentity}\0${served ?? ""}`;
+    // a chat was read from it; until then the store answers the chat, and its file is watched, with
+    // where the server stands, so a chat the store answered while it was starting is read again once it is up
+    const http = transcript.source === "opencode-transcript" && opencodeV1Configured();
+    const served = http && opencodeV1Serving(transcript.session) ? this.served(paneId, state, transcript.session) : null;
+    const source = http ? opencodeV1State() : "";
+    const observed = `${transcript.source}\0${transcript.path}\0${session}\0${cwd}\0${identity}\0${wal}\0${catalogIdentity}\0${served ?? ""}\0${source}`;
     // Resolve once immediately on disappearance, not on every missing-file stat.
     if (served === null && identity === "missing" && observed !== state.observed) state.nextResolve = 0;
     this.publish(paneId, state, observed);

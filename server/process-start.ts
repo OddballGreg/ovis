@@ -26,6 +26,20 @@ export function processStartedAt(pid: number): number | null {
   return linuxBirth(pid);
 }
 
+/** How far apart two of macOS's processStartedAt readings of one process can be: `ps` counts whole seconds. */
+export const DARWIN_START_TOLERANCE_MS = 1_000;
+
+/**
+ * Whether two processStartedAt readings name the same start. Linux reads the same number every
+ * time, so they must be equal; macOS's is the clock less a whole-second `ps` time, so they may be
+ * up to DARWIN_START_TOLERANCE_MS apart (a caller that must tell a reused pid apart checks more,
+ * as its command line).
+ */
+export function sameProcessStart(recorded: number | null, read: number | null, platform: NodeJS.Platform = process.platform): boolean {
+  if (recorded === null || read === null) return false;
+  return platform === "darwin" ? Math.abs(recorded - read) <= DARWIN_START_TOLERANCE_MS : recorded === read;
+}
+
 /**
  * Linux: /proc/stat's `btime` and the start's ticks after boot. The same on every read, so it is the
  * process's identity (pending input compares it exactly); but `btime` is whole seconds and stays

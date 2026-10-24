@@ -12,8 +12,12 @@
  * `HERDR_WEB_OPENCODE_SERVE=1` has this server start one of its own on loopback
  * (`HERDR_WEB_OPENCODE_BIN`, else `opencode` on PATH) when a chat first needs it, behind a password
  * only this process knows, in an empty folder under the state folder, through
- * opencode-watchdog.ts, which stops it when this process is gone however it went. It is started
- * again after a backoff when it dies, and stopped with this server.
+ * opencode-watchdog.ts. The watchdog runs it as a process group of its own and is the only process
+ * that stops it: this one closes the pipe to the watchdog and sends it SIGTERM, never SIGKILL, and
+ * the pipe closes by itself when this process is gone however it went. Only a watchdog killed
+ * outright leaves its server running; then the server's group is stopped from here, or by
+ * reapOpencodeV1Orphans on the next start. It is started again after a backoff when it dies, and
+ * stopped with this server. A named server's version is checked once (`checkedUrl`).
  *
  * `GET /session/:id/message?limit=&before=` answers the newest `limit` messages before a cursor,
  * oldest first, and the cursor for the messages before those in `X-Next-Cursor` (none at the
@@ -23,7 +27,10 @@
  * `session.revert`, hiding the messages from its message on, which changes the history id.
  *
  * Once a session has been read from the server, a failed read answers the last page it gave (or
- * nothing) rather than the store: the store may be stale, and its history id is another one.
+ * nothing) rather than the store: the store may be stale, and its history id is another one. That
+ * pin ends (`pinned`) when the server says it does not hold the session (a 404, which the caller
+ * reads from the store), answers as another version, or has failed the session for
+ * OPENCODE_V1_PIN_MS.
  */
 
 import { createHash, randomBytes } from "node:crypto";
@@ -52,7 +59,7 @@ import {
   type OpencodeRecord,
   type RowMeta,
 } from "./opencode.ts";
-import { processStartedAt } from "./process-start.ts";
+import { processStartedAt, sameProcessStart } from "./process-start.ts";
 import { defaultStateDir } from "./update-state.ts";
 
 type Env = Record<string, string | undefined>;
@@ -74,8 +81,16 @@ export const OPENCODE_V1_MAX_WALK_REQUESTS = 24;
 const SERVER_CURSOR = /^[A-Za-z0-9_\-+/=]{1,1024}$/;
 /** A session the server said it does not hold is not asked about again for this long. */
 export const OPENCODE_V1_NOT_FOUND_MS = 30_000;
-/** How long a started server waits between SIGTERM and SIGKILL. */
-const STOP_GRACE_MS = 2_000;
+/** How long the watchdog waits between SIGTERM and SIGKILL to the server's process group. */
+const WATCHDOG_GRACE_MS = 2_000;
+/** How long a stop waits for the watchdog to exit: longer than its grace, and it is never killed from here. */
+const STOP_WAIT_MS = WATCHDOG_GRACE_MS + 3_000;
+/** A started server that answers as another version this many times is not started again. */
+export const OPENCODE_V1_INCOMPATIBLE_STARTS = 3;
+/** A session served over HTTP is read from the store again once the server has failed it this long. */
+export const OPENCODE_V1_PIN_MS = 120_000;
+/** OpenCode's event stream answers its headers within this, or it is tried again later. */
+const EVENT_HEADERS_MS = 10_000;
 /** OpenCode's event stream sends a heartbeat every 10 s: silence past this is a stream that is down. */
 const EVENT_SILENCE_MS = 30_000;
 /** One event past this is not read: it counts as a change of every session. */
@@ -116,14 +131,17 @@ export function opencodeV1Mode(env: Env = process.env): OpencodeV1Mode {
   return null;
 }
 
-/** Whether a health check's version is OpenCode 1.x: `1.x`, or a build of a 1.x branch (`0.0.0-<branch>-v1.x.y-…`). */
+/**
+ * Whether a health check's version is OpenCode 1.x: `1.x`, or a build of a 1.x branch, which ends
+ * in the version it was built from (`0.0.0-<branch>-v1.x.y`, or with a further `-…`).
+ */
 export function opencodeV1Version(version: unknown): boolean {
-  return typeof version === "string" && (/^1\.\d/.test(version) || /^0\.0\.0-.*\bv?1\.\d+\.\d+/.test(version));
+  return typeof version === "string" && /^(?:1\.\d|0\.0\.0-(?:.*-)?v1\.\d+\.\d+(?:-|$))/.test(version);
 }
 
 interface Answer { status: number; body: string; headers: IncomingHttpHeaders }
 
-/** Connections kept open per origin: the newest page is asked again on every change. */
+/** Connections kept open per origin: the newest page is asked again on every change (Bun's node:http keeps them, one socket for many requests). */
 const agents = new Map<string, HttpAgent>();
 
 function agentFor(url: URL): HttpAgent {
@@ -186,6 +204,16 @@ export function opencodeV1Get(endpoint: OpencodeV1Endpoint, path: string, maxByt
 /** What an error was, for a log line: its class only, never its message (it may quote a session). */
 const errorClass = (error: unknown): string => error instanceof Error ? error.constructor.name : typeof error;
 
+/** A server's health check: "ready" when it is OpenCode 1.x, "incompatible" when another version, false when it does not answer healthy. */
+async function health(endpoint: OpencodeV1Endpoint): Promise<"ready" | "incompatible" | false> {
+  const answer = await opencodeV1Get(endpoint, "/global/health", 64 * 1024, 2_000);
+  if (answer?.status !== 200) return false;
+  let body: Row;
+  try { body = record(JSON.parse(answer.body)); } catch { return false; }
+  if (body.healthy !== true) return false;
+  return opencodeV1Version(body.version) ? "ready" : "incompatible";
+}
+
 /* -------------------------------------------------------------------------------------------------
  * The server this one starts (HERDR_WEB_OPENCODE_SERVE=1)
  * ----------------------------------------------------------------------------------------------- */
@@ -193,7 +221,8 @@ const errorClass = (error: unknown): string => error instanceof Error ? error.co
 export interface ServeChild {
   /** settles with the exit code (null when a signal ended it) */
   readonly exited: Promise<number | null>;
-  kill(signal: "SIGTERM" | "SIGKILL"): void;
+  /** ask its watchdog to stop it: the pipe to the watchdog closes, and the watchdog gets SIGTERM */
+  stop(): void;
 }
 
 /** What starting a server takes, apart so the lifecycle can be tested without one. */
@@ -212,7 +241,8 @@ export interface ServeOptions {
   readyPollMs?: number;
   minBackoffMs?: number;
   maxBackoffMs?: number;
-  stopGraceMs?: number;
+  /** how long a stop waits for the server's watchdog to exit; longer than the watchdog's own grace */
+  stopWaitMs?: number;
   /** how long one caller waits for a server that is starting */
   waitMs?: number;
   /** a server that answers its health check must still run this much later to count as up */
@@ -256,43 +286,34 @@ const defaultServeDeps: ServeDeps = {
   spawn(argv, env) {
     const folders = serveFolders();
     // stdin stays an open pipe the watchdog reads: it ends when this process does, however it ends
-    const proc = Bun.spawn([process.execPath, WATCHDOG, String(STOP_GRACE_MS), ...argv], {
+    const proc = Bun.spawn([process.execPath, WATCHDOG, String(WATCHDOG_GRACE_MS), ...argv], {
       env, cwd: folders.cwd, stdin: "pipe", stdout: "pipe", stderr: "ignore", windowsHide: true,
     });
     const pipe = proc.stdin;
-    let served: { pid: number; started: number | null } | null = null;
-    let file: string | null = null;
-    void watchdogPid(proc.stdout).then((pid) => {
-      if (pid === null || proc.exitCode !== null) return;
-      served = { pid, started: processStartedAt(pid) };
-      const entry: RunRecord = { owner: { pid: process.pid, started: processStartedAt(process.pid) }, pid, started: served.started, args: argv.slice(1).join(" ") };
-      try {
-        file = join(folders.run, `${process.pid}-${pid}.json`);
-        writeFileSync(file, JSON.stringify(entry), { mode: 0o600 });
-      } catch { file = null; }
+    const recorded = watchdogPid(proc.stdout).then((pid) => {
+      if (pid === null) return null;
+      const entry: RunRecord = { owner: { pid: process.pid, started: processStartedAt(process.pid) }, pid, started: processStartedAt(pid), args: argv.slice(1).join(" ") };
+      const file = join(folders.run, `${process.pid}-${pid}.json`);
+      try { writeFileSync(file, JSON.stringify(entry), { mode: 0o600 }); } catch { return { entry, file: null }; }
+      return { entry, file };
     });
-    const exited = proc.exited.then((code) => {
-      // a watchdog that went alone (killed outright) leaves its server running: it goes too, and
-      // its record stays when that fails, for reapOpencodeV1Orphans
-      const known = served;
-      if (known !== null && known.started !== null && processStartedAt(known.pid) === known.started) {
-        try { process.kill(known.pid, "SIGKILL"); } catch { return proc.signalCode === null ? code : null; }
+    const exited = proc.exited.then(async (code) => {
+      // the watchdog stops its server's group before it exits; one killed outright could not, and
+      // then the group goes here, by the same checks as reapOpencodeV1Orphans
+      const known = await recorded;
+      if (known !== null) {
+        if (stillRuns(known.entry, defaultReapDeps)) {
+          try { defaultReapDeps.kill(known.entry.pid); } catch { /* gone already */ }
+        }
+        if (known.file !== null) rmSync(known.file, { force: true });
       }
-      if (file !== null) rmSync(file, { force: true });
       return proc.signalCode === null ? code : null;
     });
     return {
       exited,
-      kill(signal) {
-        if (signal === "SIGKILL") {
-          // the watchdog cannot pass a SIGKILL on: the server it runs gets one of its own
-          const known = served;
-          if (known !== null && proc.exitCode === null && known.started !== null && processStartedAt(known.pid) === known.started) {
-            try { process.kill(known.pid, "SIGKILL"); } catch { /* gone already */ }
-          }
-          try { void pipe.end(); } catch { /* closed already */ }
-        }
-        try { proc.kill(signal); } catch { /* gone already */ }
+      stop() {
+        try { void pipe.end(); } catch { /* closed already */ }
+        try { proc.kill("SIGTERM"); } catch { /* gone already */ }
       },
     };
   },
@@ -307,14 +328,7 @@ const defaultServeDeps: ServeDeps = {
       });
     });
   },
-  async ready(endpoint) {
-    const answer = await opencodeV1Get(endpoint, "/global/health", 64 * 1024, 2_000);
-    if (answer?.status !== 200) return false;
-    let health: Row;
-    try { health = record(JSON.parse(answer.body)); } catch { return false; }
-    if (health.healthy !== true) return false;
-    return opencodeV1Version(health.version) ? "ready" : "incompatible";
-  },
+  ready: (endpoint) => health(endpoint),
   now: () => Date.now(),
   log: (line) => console.error(line),
 };
@@ -324,6 +338,7 @@ export interface ReapDeps {
   started(pid: number): number | null;
   /** the command line a process runs, as one string; null where that cannot be read */
   args(pid: number): string | null;
+  /** SIGKILL to the process group `pid` leads */
   kill(pid: number): void;
 }
 
@@ -340,13 +355,23 @@ function processArgs(pid: number): string | null {
   return null;
 }
 
-const defaultReapDeps: ReapDeps = { started: processStartedAt, args: processArgs, kill: (pid) => process.kill(pid, "SIGKILL") };
+/** SIGKILL to the process group a started server leads (its watchdog started it as one); the process alone on Windows. */
+function killGroup(pid: number): void {
+  process.kill(process.platform === "win32" ? pid : -pid, "SIGKILL");
+}
+
+const defaultReapDeps: ReapDeps = { started: processStartedAt, args: processArgs, kill: killGroup };
+
+/** Whether the server a record names still runs: the same start (sameProcessStart), and its command line, so a reused pid is not it. */
+function stillRuns(entry: RunRecord, deps: ReapDeps): boolean {
+  return typeof entry.started === "number" && sameProcessStart(entry.started, deps.started(entry.pid)) && deps.args(entry.pid)?.endsWith(entry.args) === true;
+}
 
 /**
  * Stop each `opencode serve` an earlier run of this server started and left running: one whose
- * watchdog went with it (opencode-watchdog.ts normally stops it). Only a record whose owner is gone
- * counts, and only a process that still runs its command line since the same start is stopped, so
- * a reused pid is left alone. Returns how many were stopped.
+ * watchdog was killed outright with it (opencode-watchdog.ts normally stops it). Only a record
+ * whose owner is gone counts, and only a server that still runs (stillRuns) is stopped, with the
+ * process group it leads. Returns how many were stopped.
  */
 export function reapOpencodeV1Orphans(stateDir = opencodeV1Options.stateDir ?? defaultStateDir(), deps: ReapDeps = defaultReapDeps): number {
   const run = join(stateDir, "opencode-serve", "run");
@@ -363,8 +388,8 @@ export function reapOpencodeV1Orphans(stateDir = opencodeV1Options.stateDir ?? d
       rmSync(file, { force: true });
       continue;
     }
-    if (typeof owner.started === "number" && deps.started(owner.pid) === owner.started) continue;
-    if (typeof entry.started === "number" && deps.started(entry.pid) === entry.started && deps.args(entry.pid)?.endsWith(entry.args) === true) {
+    if (typeof owner.started === "number" && sameProcessStart(owner.started, deps.started(owner.pid))) continue;
+    if (stillRuns(entry, deps)) {
       try { deps.kill(entry.pid); reaped++; } catch { /* gone already */ }
     }
     rmSync(file, { force: true });
@@ -416,18 +441,22 @@ function track(child: ServeChild): void {
   void child.exited.finally(() => liveChildren.delete(child));
   if (exitHook) return;
   exitHook = true;
-  process.once("exit", killOpencodeV1Now);
+  process.once("exit", stopOpencodeV1Now);
 }
 
-/** The last word, from a process `exit` handler, where no waiting is possible: every started server gets SIGKILL. */
-export function killOpencodeV1Now(): void {
-  for (const each of liveChildren) each.kill("SIGKILL");
+/**
+ * The last word, from a process `exit` handler, where no waiting is possible: every started
+ * server's watchdog is asked to stop it (its pipe closes, it gets SIGTERM), and stops it alone.
+ */
+export function stopOpencodeV1Now(): void {
+  for (const each of liveChildren) each.stop();
 }
 
 /**
  * One `opencode serve` on loopback, started on first use. A start that fails, or a server that
  * exits, waits a backoff (doubling, capped) before the next use starts another; only a server that
- * stayed up `stableMs` starts the count over. Meanwhile callers get no endpoint.
+ * stayed up `stableMs` starts the count over. Meanwhile callers get no endpoint. One that answers
+ * as another version OPENCODE_V1_INCOMPATIBLE_STARTS times is not started again.
  */
 export class OpencodeServe {
   private child: ServeChild | null = null;
@@ -435,6 +464,9 @@ export class OpencodeServe {
   private starting: Promise<OpencodeV1Endpoint | null> | null = null;
   private failures = 0;
   private retryAt = 0;
+  private incompatibleStarts = 0;
+  /** the last health check it answered said another version */
+  private lastIncompatible = false;
   private stopping: Promise<void> | null = null;
   private readonly options: Required<ServeOptions>;
 
@@ -444,19 +476,25 @@ export class OpencodeServe {
       readyPollMs: options.readyPollMs ?? 200,
       minBackoffMs: options.minBackoffMs ?? 1_000,
       maxBackoffMs: options.maxBackoffMs ?? 60_000,
-      stopGraceMs: options.stopGraceMs ?? STOP_GRACE_MS,
+      stopWaitMs: options.stopWaitMs ?? STOP_WAIT_MS,
       waitMs: options.waitMs ?? 10_000,
       settleMs: options.settleMs ?? 250,
       stableMs: options.stableMs ?? 60_000,
     };
   }
 
-  get state(): "idle" | "starting" | "ready" | "backoff" | "stopped" {
+  get state(): "idle" | "starting" | "ready" | "backoff" | "incompatible" | "stopped" {
     if (this.stopping !== null) return "stopped";
     if (this.starting !== null) return "starting";
     if (this.endpointNow !== null) return "ready";
+    if (this.gaveUp) return "incompatible";
     return this.deps.now() < this.retryAt ? "backoff" : "idle";
   }
+
+  /** Its last health check answered as another version than OpenCode 1.x. */
+  get incompatible(): boolean { return this.lastIncompatible; }
+
+  private get gaveUp(): boolean { return this.incompatibleStarts >= OPENCODE_V1_INCOMPATIBLE_STARTS; }
 
   /** The server running now, starting none. */
   get current(): OpencodeV1Endpoint | null { return this.endpointNow; }
@@ -466,7 +504,7 @@ export class OpencodeServe {
     if (this.stopping !== null) return Promise.resolve(null);
     if (this.endpointNow !== null) return Promise.resolve(this.endpointNow);
     if (this.starting === null) {
-      if (this.deps.now() < this.retryAt) return Promise.resolve(null);
+      if (this.gaveUp || this.deps.now() < this.retryAt) return Promise.resolve(null);
       this.starting = this.start().finally(() => { this.starting = null; });
     }
     // a chat waits for a server starting this long, then reads its fallback until it is up
@@ -478,6 +516,10 @@ export class OpencodeServe {
 
   private backoff(why: string): void {
     this.failures++;
+    if (this.gaveUp) {
+      this.deps.log(`OpenCode server ${why}; it is not started again until HERDR_WEB_OPENCODE_BIN changes or the app restarts.`);
+      return;
+    }
     const wait = Math.min(this.options.maxBackoffMs, this.options.minBackoffMs * 2 ** (this.failures - 1));
     this.retryAt = this.deps.now() + wait;
     this.deps.log(`OpenCode server ${why}; the next chat that needs it starts it again in ${Math.ceil(wait / 1000)}s.`);
@@ -516,10 +558,13 @@ export class OpencodeServe {
       const answer = await this.deps.ready(endpoint).catch(() => false as const);
       if (answer === "incompatible") {
         why = "is not OpenCode 1.x";
+        this.lastIncompatible = true;
+        this.incompatibleStarts++;
         this.failures = Math.max(this.failures, 30);
         break;
       }
       if (answer === "ready") {
+        this.lastIncompatible = false;
         // one that answers and exits at once (its port taken, a crash after startup) is not up
         await Promise.race([child.exited, Bun.sleep(this.options.settleMs)]);
         if (exited || this.stopping !== null || this.child !== child) return null;
@@ -531,34 +576,32 @@ export class OpencodeServe {
     }
     if (exited) return null;
     why ??= "did not answer its health check";
-    // it goes, and its exit sets the backoff
-    if (this.child === child) this.end(child);
+    // its watchdog stops it, and its exit sets the backoff
+    if (this.child === child) child.stop();
     return null;
   }
 
-  private end(child: ServeChild): void {
-    child.kill("SIGTERM");
-    const killer = setTimeout(() => child.kill("SIGKILL"), this.options.stopGraceMs);
-    killer.unref?.();
-    void child.exited.finally(() => clearTimeout(killer));
-  }
-
-  /** Stop the server for good (this server is stopping); settles once it has exited. Asked again, the same wait. */
+  /**
+   * Stop the server for good (this server is stopping): its watchdog is asked to, and this waits
+   * for it up to `stopWaitMs`, longer than the watchdog's own grace. Asked again, the same wait.
+   */
   stop(): Promise<void> {
     this.stopping ??= (async () => {
       this.endpointNow = null;
       const child = this.child;
       this.child = null;
       if (child === null) return;
-      this.end(child);
-      await child.exited.catch(() => undefined);
+      child.stop();
+      // fixed wait: the most a stop waits for the watchdog, raced against its exit
+      const waited = Bun.sleep(this.options.stopWaitMs);
+      await Promise.race([child.exited.catch(() => undefined), waited]);
     })();
     return this.stopping;
   }
 }
 
-/** Tests point the source at a fixture: an environment, the deps a started server uses, a state folder, a clock, a page window. */
-export const opencodeV1Options: { env?: Env; deps?: ServeDeps; serve?: ServeOptions; stateDir?: string; now?: () => number; windowBytes?: number } = {};
+/** Tests point the source at a fixture: an environment, the deps a started server uses, a state folder, a clock, a page window, a cache budget. */
+export const opencodeV1Options: { env?: Env; deps?: ServeDeps; serve?: ServeOptions; stateDir?: string; now?: () => number; windowBytes?: number; heldBytes?: number } = {};
 
 let serve: { key: string; instance: OpencodeServe } | null = null;
 /** Set once this server is stopping: nothing starts another OpenCode server after it. */
@@ -572,12 +615,46 @@ export function opencodeV1Configured(): boolean {
   return opencodeV1Mode(sourceEnv()) !== null;
 }
 
+/**
+ * A named server's health check, once per endpoint: "ready" or "incompatible" is kept until the
+ * endpoint changes or this server restarts, and one that did not answer is asked again next time.
+ */
+let urlCheck: { key: string; state: "unchecked" | "ready" | "incompatible" | "failed"; pending: Promise<void> | null } | null = null;
+let loggedIncompatibleUrl = false;
+
+const endpointKey = (endpoint: OpencodeV1Endpoint): string => `${endpoint.baseUrl}\0${endpoint.authorization ?? ""}`;
+
+function urlCheckOf(endpoint: OpencodeV1Endpoint): NonNullable<typeof urlCheck> {
+  const key = endpointKey(endpoint);
+  if (urlCheck?.key !== key) {
+    urlCheck = { key, state: "unchecked", pending: null };
+    loggedIncompatibleUrl = false;
+  }
+  return urlCheck;
+}
+
+async function checkedUrl(endpoint: OpencodeV1Endpoint): Promise<OpencodeV1Endpoint | null> {
+  const check = urlCheckOf(endpoint);
+  if (check.state === "unchecked" || check.state === "failed") {
+    check.pending ??= health(endpoint).catch(() => false as const).then((answer) => {
+      check.pending = null;
+      check.state = answer === false ? "failed" : answer;
+      if (answer === "incompatible" && !loggedIncompatibleUrl) {
+        loggedIncompatibleUrl = true;
+        console.error("The OpenCode server HERDR_WEB_OPENCODE_URL names is not OpenCode 1.x; chats are read from opencode.db until it changes or the app restarts.");
+      }
+    });
+    await check.pending;
+  }
+  return check.state === "ready" ? endpoint : null;
+}
+
 /** The server to read from: the configured one, or the one this server starts; null when none is configured or can be had now. */
 export async function opencodeV1Endpoint(): Promise<OpencodeV1Endpoint | null> {
   const env = sourceEnv();
   const mode = opencodeV1Mode(env);
   if (mode === null) return null;
-  if (mode.kind === "url") return mode.endpoint;
+  if (mode.kind === "url") return checkedUrl(mode.endpoint);
   if (shutdown !== null) return null;
   if (serve?.key !== mode.bin) {
     void serve?.instance.stop();
@@ -590,8 +667,34 @@ export async function opencodeV1Endpoint(): Promise<OpencodeV1Endpoint | null> {
 function currentEndpoint(): OpencodeV1Endpoint | null {
   const mode = opencodeV1Mode(sourceEnv());
   if (mode === null) return null;
-  if (mode.kind === "url") return mode.endpoint;
+  if (mode.kind === "url") return urlCheck?.key === endpointKey(mode.endpoint) && urlCheck.state === "ready" ? mode.endpoint : null;
   return shutdown === null && serve?.key === mode.bin ? serve.instance.current : null;
+}
+
+/**
+ * Where the HTTP source stands, asking and starting nothing: what a pane's monitor watches, so that
+ * a chat read from the store while the server was starting or backing off is read again once it
+ * is ready. "off" when it is not configured.
+ */
+export function opencodeV1State(): "off" | "starting" | "ready" | "backoff" | "unavailable" {
+  const mode = opencodeV1Mode(sourceEnv());
+  if (mode === null) return "off";
+  if (mode.kind === "url") {
+    const check = urlCheck?.key === endpointKey(mode.endpoint) ? urlCheck : null;
+    if (check === null || check.state === "unchecked") return "starting";
+    return check.state === "ready" ? "ready" : check.state === "failed" ? "backoff" : "unavailable";
+  }
+  if (shutdown !== null || serve?.key !== mode.bin) return "unavailable";
+  const state = serve.instance.state;
+  return state === "starting" || state === "ready" || state === "backoff" ? state : "unavailable";
+}
+
+/** The source answered as another version than OpenCode 1.x. */
+function sourceIncompatible(): boolean {
+  const mode = opencodeV1Mode(sourceEnv());
+  if (mode === null) return false;
+  if (mode.kind === "url") return urlCheck?.key === endpointKey(mode.endpoint) && urlCheck.state === "incompatible";
+  return serve?.key === mode.bin && serve.instance.incompatible;
 }
 
 /**
@@ -614,6 +717,8 @@ export function stopOpencodeV1(): Promise<void> {
 export async function resetOpencodeV1(): Promise<void> {
   await stopOpencodeV1();
   shutdown = null;
+  urlCheck = null;
+  loggedIncompatibleUrl = false;
   forgetOpencodeV1State();
 }
 
@@ -684,6 +789,7 @@ class EventStream {
       method: "GET",
       headers: { Accept: "text/event-stream", ...(this.endpoint.authorization === null ? {} : { Authorization: this.endpoint.authorization }) },
     }, (response) => {
+      clearTimeout(headers);
       if (this.request !== req) { response.destroy(); return; }
       if (response.statusCode === 404 && this.path === "/global/event") {
         this.path = "/event";
@@ -719,8 +825,11 @@ class EventStream {
       response.once("close", ended);
       response.once("error", ended);
     });
+    // a server that takes the connection and never answers is a stream that is down
+    const headers = setTimeout(() => { if (this.request === req) this.drop(); }, EVENT_HEADERS_MS);
+    headers.unref?.();
     this.request = req;
-    req.once("error", () => { if (this.request === req) this.drop(); });
+    req.once("error", () => { clearTimeout(headers); if (this.request === req) this.drop(); });
     req.end();
   }
 
@@ -838,6 +947,7 @@ async function sessionInfo(endpoint: OpencodeV1Endpoint, sessionId: string): Pro
   const answer = await getJson(endpoint, `/session/${enc(sessionId)}`);
   if (answer.status === 404) {
     remember(missing, sessionId, now() + OPENCODE_V1_NOT_FOUND_MS, 256);
+    served.delete(sessionId);
     return null;
   }
   const info = record(answer.value);
@@ -858,28 +968,75 @@ async function message(endpoint: OpencodeV1Endpoint, sessionId: string, id: stri
  * Chunks older than the newest, by session, size and server cursor, for older pages. What comes
  * before a message stays as it was (a `/undo` hides newer messages, under another history id, and
  * deletes nothing older), so neither these nor a walk's reused chunks (`spines`) are asked again.
+ *
+ * Both share one budget, OPENCODE_V1_HELD_BYTES of the messages' JSON: a message held by a
+ * cached chunk and a spine both, or by a chunk and the cut of it a later walk reused, is counted
+ * once (`holders`). Past it, cached chunks go first, oldest first, then spines, oldest first. The
+ * parsed copy of each message kept beside its JSON takes about as much again; the pages answered
+ * (`answers`) are bounded apart, by count.
  */
 const chunks = new Map<string, Chunk>();
-let chunkBytes = 0;
-const CHUNK_CACHE_BYTES = 4 * OPENCODE_WINDOW_BYTES;
+export const OPENCODE_V1_HELD_BYTES = 4 * OPENCODE_WINDOW_BYTES;
 const CHUNK_CACHE_ENTRIES = 128;
+const holders = new Map<Wire, number>();
+let heldBytes = 0;
 
+const heldBudget = (): number => opencodeV1Options.heldBytes ?? OPENCODE_V1_HELD_BYTES;
 const chunkSize = (found: Chunk): number => found.messages.reduce((sum, each) => sum + each.size, 0);
+
+function hold(found: Chunk): void {
+  for (const each of found.messages) {
+    const count = holders.get(each) ?? 0;
+    if (count === 0) heldBytes += each.size;
+    holders.set(each, count + 1);
+  }
+}
+
+function release(found: Chunk): void {
+  for (const each of found.messages) {
+    const count = (holders.get(each) ?? 1) - 1;
+    if (count > 0) holders.set(each, count);
+    else if (holders.delete(each)) heldBytes -= each.size;
+  }
+}
+
+/** The JSON bytes of the messages the chunk cache and the spines hold, each counted once. */
+export const opencodeV1HeldBytes = (): number => heldBytes;
 
 function dropChunk(key: string): void {
   const found = chunks.get(key);
   if (found === undefined) return;
   chunks.delete(key);
-  chunkBytes -= chunkSize(found);
+  release(found);
+}
+
+function dropSpine(sessionId: string): void {
+  const found = spines.get(sessionId);
+  if (found === undefined) return;
+  spines.delete(sessionId);
+  for (const each of found) release(each);
+}
+
+function keepSpine(sessionId: string, found: Chunk[]): void {
+  for (const each of found) hold(each);
+  dropSpine(sessionId);
+  spines.set(sessionId, found);
+  while (spines.size > 8) dropSpine(spines.keys().next().value!);
+  trim();
+}
+
+function trim(): void {
+  while (heldBytes > heldBudget() && chunks.size > 0) dropChunk(chunks.keys().next().value!);
+  while (heldBytes > heldBudget() && spines.size > 0) dropSpine(spines.keys().next().value!);
 }
 
 function keepChunk(key: string, found: Chunk): void {
-  const size = chunkSize(found);
-  if (size > CHUNK_CACHE_BYTES / 4) return;
+  if (chunkSize(found) > heldBudget() / 4) return;
+  hold(found);
   dropChunk(key);
   chunks.set(key, found);
-  chunkBytes += size;
-  while (chunks.size > CHUNK_CACHE_ENTRIES || chunkBytes > CHUNK_CACHE_BYTES) dropChunk(chunks.keys().next().value!);
+  while (chunks.size > CHUNK_CACHE_ENTRIES) dropChunk(chunks.keys().next().value!);
+  trim();
 }
 
 /** The newest `limit` messages before the server cursor `before`, oldest first; null when the session is gone. */
@@ -928,8 +1085,42 @@ const revertBoundary = (info: Row): string | null => {
 const tokens = new Map<string, Map<string, string>>();
 /** Per page asked for: the answer, while its signature holds, and the one a failed read answers with. */
 const answers = new Map<string, { signature: string; answer: Extract<OpencodeAnswer, { kind: "page" }> }>();
-/** Sessions read from the server in this process: a failed read of one answers from here, not the store. */
-const served = new Set<string>();
+/**
+ * Sessions read from the server in this process, and since when the server has failed each (null
+ * while it answers): a failed read of one answers from here, not the store, until the pin ends
+ * (`pinned`).
+ */
+const served = new Map<string, number | null>();
+
+function pin(sessionId: string): void {
+  served.delete(sessionId);
+  served.set(sessionId, null);
+  if (served.size > 256) served.delete(served.keys().next().value!);
+}
+
+/** A failed read of a pinned session: the first starts its clock. */
+function failedFor(sessionId: string): void {
+  if (served.get(sessionId) === null) served.set(sessionId, now());
+}
+
+/**
+ * Whether a session stays with the server: it was read from it, and the pin has not ended. It
+ * ends when the server answers as another version than OpenCode 1.x, has failed the session for
+ * longer than OPENCODE_V1_PIN_MS, or says it does not hold it; then the store answers again.
+ */
+function pinned(sessionId: string): boolean {
+  if (!served.has(sessionId)) return false;
+  if (sourceIncompatible()) {
+    served.clear();
+    return false;
+  }
+  const since = served.get(sessionId);
+  if (since !== null && since !== undefined && now() - since > OPENCODE_V1_PIN_MS) {
+    served.delete(sessionId);
+    return false;
+  }
+  return true;
+}
 
 /** What the caches here are keyed by, and what a pane's chat is remembered against (conversation.ts `rememberPaneRead`). */
 export const opencodeV1ReadKey = (sessionId: string): string => `opencode-http\0${sessionId}`;
@@ -940,22 +1131,23 @@ export function forgetOpencodeV1Read(key: string): void {
   tokens.delete(key);
   for (const entry of [...answers.keys()]) if (entry.startsWith(`${key}\0`)) answers.delete(entry);
   for (const entry of [...chunks.keys()]) if (entry.startsWith(`${sessionId}\0`)) dropChunk(entry);
-  spines.delete(sessionId);
+  dropSpine(sessionId);
 }
 
 export function forgetOpencodeV1State(): void {
   tokens.clear();
   answers.clear();
   chunks.clear();
-  chunkBytes = 0;
   spines.clear();
+  holders.clear();
+  heldBytes = 0;
   missing.clear();
   served.clear();
   loggedErrors.clear();
 }
 
-/** Whether this session was read from the server in this process: the monitor asks the server about it only then. */
-export const opencodeV1Serving = (sessionId: string): boolean => served.has(sessionId);
+/** Whether this session stays with the server (`pinned`): the monitor asks the server about it only then. */
+export const opencodeV1Serving = (sessionId: string): boolean => pinned(sessionId);
 
 function knownToken(key: string, id: string): string | undefined {
   return tokens.get(key)?.get(id);
@@ -1055,7 +1247,7 @@ async function walk(endpoint: OpencodeV1Endpoint, sessionId: string, options: { 
         const prompt = visible.findIndex((wired) => wired.role === "user");
         if (prompt > 0) chosen = prompt;
       }
-      if (fromNewest && fetched.reduce((sum, each) => sum + chunkSize(each), 0) <= 2 * OPENCODE_WINDOW_BYTES) remember(spines, sessionId, fetched, 8);
+      if (fromNewest && fetched.reduce((sum, each) => sum + chunkSize(each), 0) <= heldBudget() / 2) keepSpine(sessionId, fetched);
       return { chunks: fetched, visible, place, start: chosen, floor: floorAt >= 0 ? floorAt : null, beginning, boundarySeen };
     }
     before = oldest.next!;
@@ -1124,15 +1316,15 @@ export async function opencodeV1Conversation(sessionId: string, page: OpencodePa
   if (!opencodeV1Configured()) return null;
   if (knownMissing(sessionId)) return { kind: "unavailable", reason: "session_not_found" };
   const cacheKey = pageKey(sessionId, page);
-  const held = (): OpencodeAnswer | null => served.has(sessionId) ? answers.get(cacheKey)?.answer ?? { kind: "unavailable", reason: "store_busy" } : null;
+  const held = (): OpencodeAnswer | null => {
+    failedFor(sessionId);
+    return pinned(sessionId) ? answers.get(cacheKey)?.answer ?? { kind: "unavailable", reason: "store_busy" } : null;
+  };
   const endpoint = await opencodeV1Endpoint();
   if (endpoint === null) return held();
   try {
     const answer = await conversationAt(endpoint, sessionId, page, cacheKey);
-    if (answer.kind === "page") {
-      served.add(sessionId);
-      if (served.size > 256) served.delete(served.values().next().value!);
-    }
+    if (answer.kind === "page") pin(sessionId);
     return answer;
   } catch (error) {
     readFailed(error);
@@ -1229,9 +1421,12 @@ async function hiddenByRevert(endpoint: OpencodeV1Endpoint, sessionId: string, i
 async function refMessage(sessionId: string, id: string): Promise<Wire | null | undefined> {
   if (!OPENCODE_SESSION_ID.test(sessionId) || !OPENCODE_MESSAGE_ID.test(id)) return null;
   if (!opencodeV1Configured() || knownMissing(sessionId)) return undefined;
-  const fallback = served.has(sessionId) ? null : undefined;
+  const fallback = (): null | undefined => {
+    failedFor(sessionId);
+    return pinned(sessionId) ? null : undefined;
+  };
   const endpoint = await opencodeV1Endpoint();
-  if (endpoint === null) return fallback;
+  if (endpoint === null) return fallback();
   try {
     const info = await sessionInfo(endpoint, sessionId);
     if (info === null) return undefined;
@@ -1240,7 +1435,7 @@ async function refMessage(sessionId: string, id: string): Promise<Wire | null | 
     return await hiddenByRevert(endpoint, sessionId, info, found) ? null : found;
   } catch (error) {
     readFailed(error);
-    return fallback;
+    return fallback();
   }
 }
 
@@ -1268,12 +1463,19 @@ export async function opencodeV1Signature(sessionId: string): Promise<string | n
   if (!OPENCODE_SESSION_ID.test(sessionId) || knownMissing(sessionId)) return null;
   try {
     const endpoint = await opencodeV1Endpoint();
-    if (endpoint === null) return null;
+    if (endpoint === null) {
+      failedFor(sessionId);
+      return null;
+    }
     const [info, newest] = await Promise.all([
       opencodeV1Get(endpoint, `/session/${enc(sessionId)}`, 1024 * 1024),
       opencodeV1Get(endpoint, `/session/${enc(sessionId)}/message?limit=1`),
     ]);
-    if (info === null || newest === null) return null;
+    if (info === null || newest === null || info.status >= 500 || newest.status >= 500) {
+      failedFor(sessionId);
+      return null;
+    }
+    if (served.has(sessionId) && info.status === 200) served.set(sessionId, null);
     return createHash("sha256").update(`${info.status}\0${info.body}\0${newest.status}\0${newest.body}`).digest("base64url").slice(0, 22);
   } catch (error) {
     readFailed(error);
