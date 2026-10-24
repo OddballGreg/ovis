@@ -295,7 +295,7 @@ try {
     try {
       const finishCase = process.env["SIDEBAR_FINISH_CASE"];
       if (!finishCase || finishCase === "previous-answer") {
-        for (const source of ["claude-transcript", "codex-transcript", "pi-transcript", "omp-transcript", "omo-transcript", "gjc-transcript", "opencode-transcript", "grok-transcript", "devin-transcript", "hermes-transcript", "agy-transcript"] as const) {
+        for (const source of ["claude-transcript", "codex-transcript", "pi-transcript", "omp-transcript", "omo-transcript", "gjc-transcript", "opencode-transcript", "opencode-http", "grok-transcript", "devin-transcript", "hermes-transcript", "agy-transcript"] as const) {
           await withPage(browser, {}, async (page) => {
             await page.goto(`${url}?pane=${encodeURIComponent(panes.omp)}`);
             await page.evaluate((id) => window.sidebarFixture.finish(id, "working", 100), panes.omp);

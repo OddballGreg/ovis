@@ -25,7 +25,9 @@
  *   stream is projected onto the branch the leaf stands on before it is read.
  * - OpenCode: herdr's integration reports the session id, and OpenCode 2 keeps the
  *   session in its own SQLite store (opencode.ts), read by `seq` rather than by
- *   byte offset: its cursors name rows, and it pages and caches on its own.
+  *   byte offset: its cursors name rows, and it pages and caches on its own. When
+  *   OpenCode's own 1.x server is configured (opencode-v1.ts), the session is read
+  *   from it first, and the store only when it cannot answer.
  *
  * This module turns those files into the conversation the chat lens renders;
  * the pty stays the input path. Pure parsing lives in parseClaudeTranscript /
@@ -48,6 +50,7 @@ import { isOmoProcess, omoProcessIdentity, omoSessionForPane, processEnviron } f
 import { processStartedAt } from "./process-start.ts";
 import { ompHeldTranscript } from "./omp.ts";
 import { forgetOpencodeRead, forgetOpencodeState, OPENCODE_IMAGE_REF, opencodeConversation, opencodeDatabasePath, opencodeImage, opencodeReadKey, opencodeSessionId, opencodeToolOutput } from "./opencode.ts";
+import { forgetOpencodeV1Read, forgetOpencodeV1State, opencodeV1Conversation, opencodeV1Image, opencodeV1ReadKey, opencodeV1ToolOutput } from "./opencode-v1.ts";
 import { piTranscriptInStore, piTranscriptPath, unwrittenSession } from "./pi.ts";
 import { cmdTranscriptPath } from "./cmd.ts";
 import { defaultDevinDbPath, DevinHistoryUnavailable, devinConversation, forgetDevinState } from "./devin.ts";
@@ -541,7 +544,7 @@ export class HistoryChanged extends Error {
 /** What paneConversation resolved: which store the turns came from, and where they start. */
 export type RecognizedConversation = {
   activity?: "thinking" | "working" | "idle";
-  source: "grok-transcript" | "agy-transcript" | "claude-transcript" | "omp-transcript" | "omo-transcript" | "gjc-transcript" | "pi-transcript" | "cmd-transcript" | "codex-transcript" | "devin-transcript" | "opencode-transcript" | "hermes-transcript";
+  source: "grok-transcript" | "agy-transcript" | "claude-transcript" | "omp-transcript" | "omo-transcript" | "gjc-transcript" | "pi-transcript" | "cmd-transcript" | "codex-transcript" | "devin-transcript" | "opencode-transcript" | "opencode-http" | "hermes-transcript";
   turns: ConversationTurn[];
   metadata: ConversationMetadata;
   /** `metadata` was read off the agent's own screen (ConversationResponse.screen) */
@@ -559,8 +562,8 @@ export type RecognizedConversation = {
   version: string;
 };
 
-/** The stores read as one append-only file: OpenCode's and Devin's databases are paged by opencode.ts and devin.ts. */
-type StreamSource = Exclude<RecognizedConversation["source"], "opencode-transcript" | "devin-transcript" | "hermes-transcript">;
+/** The stores read as one append-only file: OpenCode's and Devin's databases are paged by opencode.ts, opencode-v1.ts and devin.ts. */
+type StreamSource = Exclude<RecognizedConversation["source"], "opencode-transcript" | "opencode-http" | "devin-transcript" | "hermes-transcript">;
 
 /** A restart may parse the same files differently: its answers never match an earlier ETag. */
 const PROCESS_VERSION = randomUUID();
@@ -1253,6 +1256,7 @@ export function forgetTranscriptState(): void {
   forgetGjcState();
   forgetSubagents();
   forgetOpencodeState();
+  forgetOpencodeV1State();
   liveScans.clear();
   settledTurns.clear();
   liveTranscriptTurns.clear();
@@ -1302,6 +1306,7 @@ export function forgetPaneTranscriptState(paneId: string): void {
     forgetAgyState(path);
     forgetClaudeSessionFile(path);
     forgetOpencodeRead(path);
+    forgetOpencodeV1Read(path);
     forgetHermesTranscriptState(path);
   }
 }
@@ -1805,6 +1810,16 @@ export async function paneConversation(paneId: string, codexHome?: string, page:
     }
   }
   if (resolved.source === "opencode-transcript") {
+    // a session OpenCode's own server serves (opencode-v1.ts) is read from it, not from a store
+    // file that may be another's or stale; when that server cannot answer, the store is read as before
+    const served = await opencodeV1Conversation(resolved.session, page);
+    if (served !== null && served.kind !== "unavailable") {
+      if (served.kind === "history_changed") throw new HistoryChanged();
+      rememberPaneRead(paneId, opencodeV1ReadKey(resolved.session));
+      const { kind: _kind, signature, ...conversation } = served;
+      const key = `opencode-http\0${resolved.session}\0${page.before ?? ""}\0${page.since ?? ""}\0${page.from ?? ""}`;
+      return { source: "opencode-http", ...conversation, version: answerVersion(key, signature) };
+    }
     // its caches are keyed by store and session, which is what the pane is remembered against
     rememberPaneRead(paneId, opencodeReadKey(resolved.path, resolved.session));
     const answer = opencodeConversation(resolved.path, resolved.session, page);
@@ -2045,8 +2060,12 @@ export async function conversationImage(paneId: string, ref: string, codexHome?:
   let resolved: ResolvedTranscript;
   try { resolved = await resolveTranscript(pane, pane.cwd, codexHome, snapshot.panes, opencodeDb); }
   catch (error) { if (error instanceof ConversationUnavailable) return null; throw error; }
-  // OpenCode's store is read per request and keeps nothing for the pane to release
-  if (resolved.source === "opencode-transcript") return opencodeImage(resolved.path, resolved.session, ref);
+  // OpenCode's store is read per request and keeps nothing for the pane to release; a session its
+  // own server serves is asked there first, as its conversation is
+  if (resolved.source === "opencode-transcript") {
+    const served = await opencodeV1Image(resolved.session, ref);
+    return served !== undefined ? served : opencodeImage(resolved.path, resolved.session, ref);
+  }
   rememberPaneRead(paneId, resolved.path);
   if (resolved.source === "codex-transcript") return codexTranscriptImage(codexHistorySegments(resolved.path, resolved.codexHome ?? codexHome), ref, pane.cwd);
   if (resolved.source === "pi-transcript" || resolved.source === "cmd-transcript") return piTranscriptImage(resolved.path, ref);
@@ -2092,7 +2111,8 @@ export async function toolOutput(paneId: string, ref: string, codexHome?: string
   try { resolved = await resolveTranscript(pane, pane.cwd, codexHome, snapshot.panes, opencodeDb, hermesHome, grokHome); }
   catch (error) { if (error instanceof ConversationUnavailable) return null; throw error; }
   if (resolved.source === "opencode-transcript") {
-    const output = opencodeToolOutput(resolved.path, resolved.session, ref);
+    const served = await opencodeV1ToolOutput(resolved.session, ref);
+    const output = served !== undefined ? served : opencodeToolOutput(resolved.path, resolved.session, ref);
     return output !== null && output.length > TOOL_OUTPUT_MAX ? `${output.slice(0, TOOL_OUTPUT_MAX)}\n… trimmed` : output;
   }
   rememberPaneRead(paneId, resolved.path);

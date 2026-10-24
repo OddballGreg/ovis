@@ -179,7 +179,9 @@ export type { Machine, MachineEvent, MachineRoster, PaneTarget, SetupJob, SetupR
  *  POST   /api/pane/input  { pane_id, text }   -> { ok: true }
  *  GET    /api/pane/conversation?pane_id=    -> ConversationResponse (structured agent
  *         transcript turns - claude, codex, omp, omo, gjc, pi, devin, OpenCode, hermes, grok or agy;
- *         source:"scrollback" when the pane has no recognized, readable store.
+ *         source:"scrollback" when the pane has no recognized, readable store; source:"opencode-http"
+ *         for an OpenCode 1.x session read from OpenCode's own server (OVIS_OPENCODE_URL or
+ *         OVIS_OPENCODE_SERVE=1), else its store is read as "opencode-transcript".
  *         Grok requires exact live process/session evidence, Agy live process/session evidence;
  *         rewinds invalidate cursors.
  *         Grok/Agy optional activity describes the latest native turn, independently of pane status.)
@@ -664,7 +666,7 @@ export interface ConversationResponse {
   activity?: "thinking" | "working" | "idle";
   /** Stable across appends; changes on transcript replacement or native context clear. */
   history_id?: string;
-  source: "grok-transcript" | "agy-transcript" | "claude-transcript" | "omp-transcript" | "omo-transcript" | "gjc-transcript" | "pi-transcript" | "cmd-transcript" | "codex-transcript" | "devin-transcript" | "opencode-transcript" | "hermes-transcript" | "scrollback";
+  source: "grok-transcript" | "agy-transcript" | "claude-transcript" | "omp-transcript" | "omo-transcript" | "gjc-transcript" | "pi-transcript" | "cmd-transcript" | "codex-transcript" | "devin-transcript" | "opencode-transcript" | "opencode-http" | "hermes-transcript" | "scrollback";
   turns: ConversationTurn[];
   metadata?: ConversationMetadata;
   /**
