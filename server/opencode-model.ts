@@ -450,17 +450,20 @@ export function footerModel(screen: string, providers: readonly OpencodeProvider
 /**
  * Whether a filtered row is this model: `<name>[ (Favorite)]` and the provider's name at the right.
  * "exact" when the name is whole; "prefix" when the pane's width cut it and what is left starts it.
+ * A row cut short (ending in `…`) whose visible part is at least as long as the name is a longer
+ * name's: it is not this model, so it is neither chosen nor counted as a second row alike.
  */
 export function rowMatch(row: string, name: string, provider: string): "exact" | "prefix" | null {
   if (!row.endsWith(` ${provider}`)) return null;
   const left = row.slice(0, row.length - provider.length - 1).trimEnd();
+  const cut = left.endsWith("…") ? left.slice(0, -1) : null;
+  if (cut !== null && cut.length >= name.length) return null;
   if (left.startsWith(name)) {
     const rest = left.slice(name.length);
-    if (rest === "" || " (Favorite)".startsWith(rest)) return "exact";
-    return null;
+    return rest === "" || " (Favorite)".startsWith(rest) ? "exact" : null;
   }
-  const cut = left.replace(/…$/u, "");
-  return cut.length >= 4 && name.startsWith(cut) ? "prefix" : null;
+  const shown = cut ?? left;
+  return shown.length >= 4 && name.startsWith(shown) ? "prefix" : null;
 }
 
 /* -------------------------------------------------------------------------------------------------
@@ -537,12 +540,15 @@ const quoted = (value: string): string => JSON.stringify(value.slice(0, OPENCODE
  * read once more, SETTLE_MS later, for a variant list that opened late. Refuses before any key when a
  * name holds a key or an invisible mark, any dialog is open, the prompt's footer is not on the screen
  * or names no model, or `signal` was aborted. More than one row that reads as the model (two cut
- * short by a narrow pane alike) is not chosen between. Once the first key is sent, every failure, a
- * pane that cannot be read or written included, sends one Escape when a dialog is drawn or the screen
- * cannot be read, and waits up to OPENCODE_MODEL_CLOSE_MS for the dialog to go; one still open is
- * said (`dialog_left_open`). After a write that failed, its keys may still land: the screen is
- * watched for OPENCODE_MODEL_LATE_MS for a dialog they open before none is said to be drawn, and an
- * Enter that failed but whose pick the footer then shows is a switch made. When ctrl+x m opened no
+ * short by a narrow pane alike) is not chosen between; only the rows in view are compared, so a row
+ * that reads alike but is scrolled out of view below the one chosen is not seen (a known limit).
+ * Once the first key is sent, every failure, a pane that cannot be read or written included, sends
+ * one Escape when a dialog is drawn or the screen cannot be read, and waits up to
+ * OPENCODE_MODEL_CLOSE_MS for the dialog to go; one still open is said (`dialog_left_open`). After a
+ * write that failed, its keys may still land: until OPENCODE_MODEL_LATE_MS after it (the budget
+ * permitting) nothing is said to be drawn and no Escape is sent, so they land in the dialog and not
+ * in the prompt, and an Enter that failed but whose pick the footer then shows is a switch made. At
+ * most two Escapes are sent in all: one for a variant list, one to close. When ctrl+x m opened no
  * dialog, an `m` it left at the end of the draft is taken back with one Backspace, and any other
  * change to the draft is said and left alone.
  */
@@ -560,16 +566,17 @@ export async function driveModelDialog(deps: DriveDeps, target: { name: string; 
   if (before.footer === "") return refuse("not_ready", "its footer names no model");
   if (signal?.aborted) return refuse("aborted");
 
-  /** set once a write to the pane failed: its keys may still land, so what they do is watched for */
-  let writeFailed = false;
-  const send = async (keys: string[]): Promise<void> => {
-    try { await deps.keys(keys, io()); } catch (error) { writeFailed = true; throw error; }
-  };
-  const typeText = async (text: string): Promise<void> => {
-    try { await deps.type(text, io()); } catch (error) { writeFailed = true; throw error; }
-  };
   /** how long the keys of a failed write are waited on: the budget left, at most LATE_MS, never less than LATE_MIN_MS */
   const lateMs = (): number => Math.max(LATE_MIN_MS, Math.min(OPENCODE_MODEL_LATE_MS, deadline - deps.now()));
+  /** until when the keys of a write that failed may still land, measured from that write; 0 while none failed */
+  let lateUntil = 0;
+  const failed = (): void => { lateUntil = Math.max(lateUntil, deps.now() + lateMs()); };
+  const send = async (keys: string[]): Promise<void> => {
+    try { await deps.keys(keys, io()); } catch (error) { failed(); throw error; }
+  };
+  const typeText = async (text: string): Promise<void> => {
+    try { await deps.type(text, io()); } catch (error) { failed(); throw error; }
+  };
   /** whether the screen shows no dialog within OPENCODE_MODEL_CLOSE_MS (the cleanup has a budget of its own) */
   const gone = async (): Promise<boolean> => {
     const end = deps.now() + OPENCODE_MODEL_CLOSE_MS;
@@ -583,26 +590,16 @@ export async function driveModelDialog(deps: DriveDeps, target: { name: string; 
   const STILL_OPEN = "a dialog is still open in OpenCode after Escape; close it in the terminal";
   /**
    * A dialog drawn, or a screen that cannot be read, gets one Escape, then is waited on: null when
-   * none is left open. After a failed write the screen is watched for lateMs() first, and again after
-   * a dialog closes, for one its keys open late; at most two Escapes are sent.
+   * none is left open. After a write that failed, its keys may land until lateUntil: that is waited
+   * out before the Escape, a dialog drawn or not, so they fall into the dialog, where they do no
+   * harm, and not into the prompt's draft once the dialog is closed (a late Enter would send it).
    */
   const close = async (): Promise<string | null> => {
-    const end = deps.now() + (writeFailed ? lateMs() : 0);
-    for (let escapes = 0; ;) {
-      let state: "dialog" | "unread" | "clear";
-      for (;;) {
-        const screen = await deps.read(IO_MS).catch(() => null);
-        state = screen === null ? "unread" : anyDialog(screen) ? "dialog" : "clear";
-        if (state === "dialog" || deps.now() >= end) break;
-        await deps.sleep(POLL_MS);
-      }
-      if (state === "clear") return null;
-      if (escapes === 2) return STILL_OPEN;
-      await deps.keys(["esc"], IO_MS).catch(() => undefined);
-      escapes += 1;
-      if (!await gone()) return STILL_OPEN;
-      if (deps.now() >= end) return null;
-    }
+    while (deps.now() < lateUntil) await deps.sleep(Math.min(POLL_MS, lateUntil - deps.now()));
+    const screen = await deps.read(IO_MS).catch(() => null);
+    if (screen !== null && !anyDialog(screen)) return null;
+    await deps.keys(["esc"], IO_MS).catch(() => undefined);
+    return await gone() ? null : STILL_OPEN;
   };
   const fail = async (code: OpencodeModelFailure, detail?: string): Promise<DriveResult> => {
     const left = await close();
@@ -658,7 +655,8 @@ export async function driveModelDialog(deps: DriveDeps, target: { name: string; 
       if (dialog.rows.length === 0) return await fail("model_not_found");
       const matches = dialog.rows.map((row) => rowMatch(row.text, target.name, target.provider));
       const found = matches.flatMap((match, index) => match !== null ? [index] : []);
-      // two rows that both read as it (a narrow pane cuts names short alike): neither is chosen
+      // two rows that both read as it (a narrow pane cuts names short alike): neither is chosen.
+      // Only the rows in view are compared: one alike scrolled out of view is not seen (a known limit)
       if (found.length > 1) return await fail("model_not_found", "more than one row reads as this model; choose it in the terminal");
       if (found[0] !== undefined && found[0] === dialog.highlighted) break;
       // the row is in view below the cursor: straight to it; otherwise one row on, which scrolls the list
@@ -681,7 +679,7 @@ export async function driveModelDialog(deps: DriveDeps, target: { name: string; 
     let enterError: unknown = null;
     let enterFailed = false;
     try { await send(["enter"]); } catch (error) { enterFailed = true; enterError = error; }
-    const end = enterFailed ? deps.now() + lateMs() : deadline;
+    const end = enterFailed ? lateUntil : deadline;
     let variantClosed = false;
     let shown: string | null = null;
     /** the footer shows the model: a variant list that opens a moment after it is closed too */

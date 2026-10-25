@@ -245,9 +245,10 @@ export type { Machine, MachineEvent, MachineRoster, PaneTarget, SetupJob, SetupR
  *         before any key; 422 unknown_model (a name with a control or format character is not
  *         listed) / ambiguous_model (another model has the same name and provider); 502 pane_error /
  *         dialog_not_opened / model_not_found (also: more than one row reads as the model) /
- *         not_confirmed / timeout after one Escape sent when a dialog is drawn or the screen cannot
- *         be read (after a write that failed, the screen is first watched about a second for a
- *         dialog its keys open late), with error.dialog_left_open: true when it did not close; 503
+ *         not_confirmed / timeout after an Escape sent when a dialog is drawn or the screen cannot
+ *         be read, at most two in all counting one for a variant list (after a write that failed,
+ *         no Escape is sent until about a second after it, so its keys land in the dialog and not
+ *         the draft), with error.dialog_left_open: true when it did not close; 503
  *         unavailable; 403 read_only for a watching device)
  *  GET    /api/pane/files?pane_id=&q=&limit=  -> { files: string[] } (paths relative to the pane
  *         cwd matching q, for @-mentions; git ls-files when the cwd is a repo, bounded walk otherwise)
