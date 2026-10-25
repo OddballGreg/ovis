@@ -69,6 +69,10 @@ describe("the OpenCode model chip", () => {
     const failed = render({ catalog, open: true, state: { kind: "failed", code: "model_not_found", detail: "row not found" } }, { terminal: true });
     expect(failed).toContain("Choose it in the terminal with ctrl+x m.");
     expect(failed).toContain('class="oc-model-terminal"');
+    const leftOpen = render({ catalog, open: true, state: { kind: "failed", code: "pane_error", detail: "left open", leftOpen: true } }, { terminal: true });
+    expect(leftOpen).toContain("Press Enter or Escape in the terminal.");
+    expect(leftOpen).not.toContain("ctrl+x m");
+    expect(leftOpen).toContain('class="oc-model-terminal"');
     const busy = render({ catalog, open: true, state: { kind: "failed", code: "busy", detail: "busy" } }, { terminal: true });
     expect(busy).not.toContain("oc-model-terminal");
     expect(render({ catalog, open: true, state: { kind: "failed", code: null, detail: "network down" } })).toContain("network down");

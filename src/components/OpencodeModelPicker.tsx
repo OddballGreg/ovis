@@ -10,7 +10,7 @@ import { opencodeModelMatches, opencodeModelName } from "../lib/opencodeModels.t
 import { usePhoneSheetBack } from "../lib/sheetHistory.ts";
 import type { OpencodeModelCatalog } from "../../shared/protocol.ts";
 
-export type Switch = { kind: "idle" } | { kind: "switching"; name: string } | { kind: "failed"; code: string | null; detail: string };
+export type Switch = { kind: "idle" } | { kind: "switching"; name: string } | { kind: "failed"; code: string | null; detail: string; leftOpen?: boolean };
 
 /** The failures that only a hand in the terminal can get past: the chip offers the terminal for them. */
 const TERMINAL_FAILURES = new Set(["not_ready", "pane_error", "dialog_not_opened", "model_not_found", "not_confirmed", "timeout", "dialog_open"]);
@@ -107,18 +107,20 @@ export function OpencodeModelPicker({ paneId, busy, disabled, onOpenTerminal, in
       setOpen(false);
       toggle.current?.focus({ preventScroll: true });
     } catch (error) {
-      setState({ kind: "failed", code: error instanceof ApiError ? error.code : null, detail: error instanceof ApiError ? error.detail : String(error) });
+      setState({ kind: "failed", code: error instanceof ApiError ? error.code : null, detail: error instanceof ApiError ? error.detail : String(error), leftOpen: error instanceof ApiError && error.dialogLeftOpen });
     } finally {
       setReload((count) => count + 1);
     }
   };
 
   const failure = state.kind !== "failed" ? null
+    // the switch stopped with a dialog still open in OpenCode, its model list maybe: ctrl+x m would type into it
+    : state.leftOpen ? t("A dialog was left open in OpenCode. Press Enter or Escape in the terminal.")
     : state.code === "busy" ? t("OpenCode is working. Switch the model once it is idle.")
     : state.code === "dialog_open" ? t("A dialog is open in OpenCode. Close it in the terminal first.")
     : state.code !== null && TERMINAL_FAILURES.has(state.code) ? t("Couldn't switch the model in OpenCode. Choose it in the terminal with ctrl+x m.")
     : state.detail;
-  const terminalOffered = state.kind === "failed" && onOpenTerminal !== undefined && state.code !== null && TERMINAL_FAILURES.has(state.code);
+  const terminalOffered = state.kind === "failed" && onOpenTerminal !== undefined && (state.leftOpen === true || (state.code !== null && TERMINAL_FAILURES.has(state.code)));
   const label = currentName ?? t("Model");
 
   return <span className="oc-model" ref={root}>

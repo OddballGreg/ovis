@@ -203,13 +203,16 @@ export class ApiError extends Error {
   readonly code: string | null;
   /** the server's own words, without the URL and status the message starts with */
   readonly detail: string;
+  /** the server left a dialog open in the pane on purpose or could not close it (error.dialog_left_open) */
+  readonly dialogLeftOpen: boolean;
 
-  constructor(url: string, status: number, detail: string, code: string | null) {
+  constructor(url: string, status: number, detail: string, code: string | null, dialogLeftOpen = false) {
     super(`${url} failed (${status}): ${detail}`);
     this.name = "ApiError";
     this.status = status;
     this.code = code;
     this.detail = detail;
+    this.dialogLeftOpen = dialogLeftOpen;
   }
 }
 
@@ -232,15 +235,17 @@ const UNUSABLE_ANSWER: Readonly<Record<string, () => string>> = {
 async function errorFrom(url: string, response: Response): Promise<ApiError> {
   let detail = response.statusText;
   let code: string | null = null;
+  let dialogLeftOpen = false;
   try {
-    const body = (await response.json()) as { error?: { code?: string; message?: string } };
+    const body = (await response.json()) as { error?: { code?: string; message?: string; dialog_left_open?: unknown } };
     if (body.error?.message) detail = body.error.message;
     if (body.error?.code) code = body.error.code;
+    dialogLeftOpen = body.error?.dialog_left_open === true;
   } catch {
     /* non-JSON error body */
   }
   if (code !== null && Object.hasOwn(UNUSABLE_ANSWER, code)) detail = UNUSABLE_ANSWER[code]!();
-  return new ApiError(url, response.status, detail, code);
+  return new ApiError(url, response.status, detail, code, dialogLeftOpen);
 }
 
 async function getJson<T>(url: string, init?: RequestInit): Promise<T> {

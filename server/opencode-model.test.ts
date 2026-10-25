@@ -266,6 +266,9 @@ class FakeTui {
   failKey: string | null = null;
   /** a write that herdr reports failed although its keys land `ms` later: one holding `key`, or the typed text when `key` is "type" */
   late: { key: string; ms: number } | null = null;
+  /** once a key in this set has been sent, every read fails, as a pane that has stopped answering */
+  readsFailAfter: string | null = null;
+  private readsFailing = false;
   private pending: { at: number; land: () => void } | null = null;
   /** the drafts an Enter in the prompt sent */
   submitted: string[] = [];
@@ -356,6 +359,7 @@ class FakeTui {
       read: async (timeoutMs: number) => {
         this.timeouts.push(timeoutMs);
         land();
+        if (this.readsFailing) throw new Error("pane.read timed out");
         if (this.variantIn !== null) {
           if (this.variantIn === 0) { this.dialog = "variant"; this.variantIn = null; }
           else this.variantIn -= 1;
@@ -365,6 +369,7 @@ class FakeTui {
       keys: async (keys: string[], timeoutMs: number) => {
         this.timeouts.push(timeoutMs);
         land();
+        if (this.readsFailAfter !== null && keys.includes(this.readsFailAfter)) this.readsFailing = true;
         if (this.late !== null && keys.includes(this.late.key)) {
           this.pending = { at: deps.time + this.late.ms, land: () => this.keys(keys) };
           this.late = null;
@@ -554,6 +559,16 @@ describe("driving OpenCode's model dialog", () => {
     expect(lost.current).toBe(MODELS[2]!);
     expect(lost.sent.includes("esc")).toBe(false);
     expect([lost.typedIntoPrompt, lost.submitted]).toEqual([draft, []]);
+    // the same, on a pane whose reads fail too once Enter was sent: still no Escape, and the user is told
+    const blind = new FakeTui(MODELS, MODELS[2]!);
+    blind.typedIntoPrompt = draft;
+    blind.late = { key: "enter", ms: 1_000_000_000 };
+    blind.readsFailAfter = "enter";
+    const unseen = await driveModelDialog(blind.deps(), { name: "Agentic Chat (Claude Sonnet 5)", provider: "GitLab Duo" });
+    expect(unseen).toMatchObject({ ok: false, code: "pane_error", dialog_left_open: true });
+    expect(unseen.ok === false && unseen.message).toContain("could not be read");
+    expect(blind.sent.includes("esc")).toBe(false);
+    expect([blind.typedIntoPrompt, blind.submitted]).toEqual([draft, []]);
   });
 
   it("sends no Escape while the keys of a failed write may still land, so none falls into the prompt's draft", async () => {

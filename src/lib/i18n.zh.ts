@@ -501,6 +501,7 @@ export const ZH: Record<string, string> = {
   "In use": "使用中",
   "OpenCode is working. Switch the model once it is idle.": "OpenCode 正在工作。请在它空闲后再切换模型。",
   "A dialog is open in OpenCode. Close it in the terminal first.": "OpenCode 中有一个对话框处于打开状态。请先在终端中关闭它。",
+  "A dialog was left open in OpenCode. Press Enter or Escape in the terminal.": "OpenCode 中仍有一个对话框处于打开状态。请在终端中按 Enter 或 Escape。",
   "Couldn't switch the model in OpenCode. Choose it in the terminal with ctrl+x m.": "无法在 OpenCode 中切换模型。请在终端中按 ctrl+x m 选择。",
   // the launch's model, effort, first message and skills (lib/agentLaunchMode.ts, lib/newSession.ts)
   "model, effort": "模型、推理强度",

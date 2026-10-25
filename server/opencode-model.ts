@@ -548,10 +548,10 @@ const quoted = (value: string): string => JSON.stringify(value.slice(0, OPENCODE
  * write that failed, its keys may still land: until OPENCODE_MODEL_LATE_MS after it (the budget
  * permitting) nothing is said to be drawn and no Escape is sent, so they land in the dialog and not
  * in the prompt, and an Enter that failed but whose pick the footer then shows is a switch made. An
- * Enter that failed and still has not landed then leaves the model list open on its target, with no
- * Escape (`dialog_left_open`): an Enter that lands even later only picks that row, where one after an
- * Escape would send the prompt's draft. At
- * most two Escapes are sent in all: one for a variant list, one to close. When ctrl+x m opened no
+ * Enter that failed and still has not landed then gets no Escape at all, whatever the screen shows or
+ * if it cannot be read (`dialog_left_open`): an Enter that lands even later only picks the model
+ * list's highlighted row, where one after an Escape would send the prompt's draft. At most two
+ * Escapes are sent in all: one for a variant list, one to close (or to a variant list that opened late). When ctrl+x m opened no
  * dialog, an `m` it left at the end of the draft is taken back with one Backspace, and any other
  * change to the draft is said and left alone.
  */
@@ -693,6 +693,23 @@ export async function driveModelDialog(deps: DriveDeps, target: { name: string; 
       await deps.keys(["esc"], IO_MS).catch(() => undefined);
       return await gone() ? { ok: true } : { ok: true, dialog_left_open: true };
     };
+    /**
+     * An Enter that failed and has not landed: no Escape is sent, whatever the screen shows, since an
+     * Enter landing after one would send the prompt's draft. What is left is said from one more read.
+     */
+    const leftOpen = async (detail: string): Promise<DriveResult> => {
+      const screen = await deps.read(IO_MS).catch(() => null);
+      if (screen !== null && !anyDialog(screen)) return refuse("pane_error", `${detail}; the model was not changed`);
+      const list = screen === null ? null : modelDialog(screen);
+      const row = list?.rows[list.highlighted];
+      const onTarget = row !== undefined && rowMatch(row.text, target.name, target.provider) !== null;
+      const what = screen === null
+        ? "the pane could not be read, and OpenCode's model list may still be open"
+        : list === null ? "a dialog is still open in OpenCode"
+        : onTarget ? `OpenCode's model list is still open on ${target.name}`
+        : "OpenCode's model list is still open, on another row";
+      return { ...refuse("pane_error", `${detail}; ${what}: press Enter or Escape in the terminal`), dialog_left_open: true };
+    };
     for (;;) {
       const screen = await deps.read(io()).catch((error: unknown) => {
         if (!enterFailed) throw error;
@@ -708,11 +725,11 @@ export async function driveModelDialog(deps: DriveDeps, target: { name: string; 
         shown = footer;
       }
       if (deps.now() >= end) {
-        // the model list is still drawn on its target: an Enter that lands later only picks that row,
-        // and an Escape it lands after would leave it to send the prompt's draft, so no Escape is sent
-        if (enterFailed && screen !== null && modelDialog(screen) !== null) {
-          return { ...refuse("pane_error", `${reason(enterError)}; the model list is left open on the model, press Enter or Escape in the terminal`), dialog_left_open: true };
-        }
+        // an Enter that failed and has shown no sign of landing (no variant list, no footer naming the
+        // model) may land later still: after an Escape it would send the prompt's draft, so none is sent.
+        // A model list it lands in later only picks the highlighted row; the screen is read once more to
+        // say what is left open
+        if (enterFailed && !variantClosed) return await leftOpen(reason(enterError));
         if (enterFailed) return await fail("pane_error", reason(enterError));
         return await fail("not_confirmed", shown ? `its footer shows ${quoted(shown)}` : undefined);
       }

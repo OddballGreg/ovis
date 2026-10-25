@@ -249,8 +249,9 @@ export type { Machine, MachineEvent, MachineRoster, PaneTarget, SetupJob, SetupR
  *         be read, at most two in all counting one for a variant list (after a write that failed,
  *         no Escape is sent until about a second after it, so its keys land in the dialog and not
  *         the draft), with error.dialog_left_open: true when it did not close; an Enter that
- *         failed and has not landed by then is a pane_error with the model list left open on the
- *         model and no Escape (dialog_left_open: true), so a later Enter only picks that row; 503
+ *         failed and has not landed by then is a pane_error with no Escape at all, even when the
+ *         screen cannot be read (dialog_left_open: true), so a later Enter only picks the list's
+ *         highlighted row and never sends the draft; 503
  *         unavailable; 403 read_only for a watching device)
  *  GET    /api/pane/files?pane_id=&q=&limit=  -> { files: string[] } (paths relative to the pane
  *         cwd matching q, for @-mentions; git ls-files when the cwd is a repo, bounded walk otherwise)
