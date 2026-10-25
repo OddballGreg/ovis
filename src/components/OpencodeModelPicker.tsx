@@ -15,6 +15,9 @@ export type Switch = { kind: "idle" } | { kind: "switching"; name: string } | { 
 /** The failures that only a hand in the terminal can get past: the chip offers the terminal for them. */
 const TERMINAL_FAILURES = new Set(["not_ready", "pane_error", "dialog_not_opened", "model_not_found", "not_confirmed", "timeout", "dialog_open"]);
 
+/** the model the TUI footer names, for the composer's pill: its id, its name and the reasoning level it shows (null: none) */
+export interface TuiModel { id: string; name: string; variant: string | null }
+
 /**
  * The model of an OpenCode 1.x pane, as a chip in the composer's row: it names the model the TUI's
  * footer shows and opens a list of the models OpenCode offers, grouped by provider, to search and
@@ -31,8 +34,8 @@ export function OpencodeModelPicker({ paneId, busy, disabled, onOpenTerminal, on
   busy: boolean;
   disabled: boolean;
   onOpenTerminal?: (() => void) | undefined;
-  /** the model the TUI's footer names now (its id and name), or null: the composer's pill draws it at once, not after the next reply */
-  onCurrent?: ((model: { id: string; name: string } | null) => void) | undefined;
+  /** the model the TUI's footer names now (its id, name and reasoning level), or null once the pane's models are no longer listed: the composer's pill draws it at once, not after the next reply; a read that names none reports nothing, so the last one stays */
+  onCurrent?: ((model: TuiModel | null) => void) | undefined;
   /** what the first render starts from, before any read (a test renders it without effects) */
   initial?: { catalog?: OpencodeModelCatalog; open?: boolean; query?: string; state?: Switch };
 }) {
@@ -103,9 +106,15 @@ export function OpencodeModelPicker({ paneId, busy, disabled, onOpenTerminal, on
 
   const shownName = catalog === null || !catalog.available ? null : opencodeModelName(catalog, catalog.current);
   const shownId = catalog?.available && catalog.current ? `${catalog.current.provider_id}/${catalog.current.model_id}` : null;
+  const shownVariant = catalog?.available ? catalog.current?.variant ?? null : null;
+  const available = catalog === null ? null : catalog.available;
+  // a read that names no model (the footer covered by a prompt, mid-switch, a slow read) keeps the last one
+  // shown, so the pill does not flip to the reply's model and back; a list no longer available clears it
   useEffect(() => {
-    onCurrent?.(shownName !== null && shownId !== null ? { id: shownId, name: shownName } : null);
-  }, [onCurrent, shownName, shownId]);
+    if (available === null) return;
+    if (!available) onCurrent?.(null);
+    else if (shownName !== null && shownId !== null) onCurrent?.({ id: shownId, name: shownName, variant: shownVariant });
+  }, [onCurrent, available, shownName, shownId, shownVariant]);
   useEffect(() => () => onCurrent?.(null), [onCurrent]);
 
   if (catalog === null || !catalog.available) return null;

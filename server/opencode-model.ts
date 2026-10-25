@@ -426,25 +426,28 @@ export const shownOnce = (providers: readonly OpencodeProvider[], name: string, 
  * The model the footer names, the longest name and provider when several fit; null when none does,
  * when two fit equally, or when the one that fits shares its name and provider with another model.
  */
-export function footerModel(screen: string, providers: readonly OpencodeProvider[]): { provider_id: string; model_id: string } | null {
+export function footerModel(screen: string, providers: readonly OpencodeProvider[]): { provider_id: string; model_id: string; variant?: string } | null {
   const footer = promptFooter(screen);
   if (!footer) return null;
   const counts = shownCounts(providers);
-  let best: { provider_id: string; model_id: string; key: string; length: number; whole: boolean }[] = [];
+  let best: { provider_id: string; model_id: string; key: string; length: number; whole: boolean; variant: string | null }[] = [];
   for (const provider of providers) {
     for (const model of provider.models) {
       if (!footerNames(footer, model.name, provider.name)) continue;
       const rest = footer.slice(model.name.length + 1);
       const whole = rest === provider.name || rest.startsWith(`${provider.name} · `);
       const length = model.name.length + provider.name.length;
-      const found = { provider_id: provider.id, model_id: model.id, key: shownAs(model.name, provider.name), length, whole };
+      // the reasoning level the footer draws after the provider's name (` · high`), when it draws one
+      const variant = rest.startsWith(`${provider.name} · `) ? rest.slice(provider.name.length + 3).trim() || null : null;
+      const found = { provider_id: provider.id, model_id: model.id, key: shownAs(model.name, provider.name), length, whole, variant };
       const top = best[0];
       if (top === undefined || (whole && !top.whole) || (whole === top.whole && length > top.length)) best = [found];
       else if (whole === top.whole && length === top.length) best.push(found);
     }
   }
   if (best.length !== 1 || counts.get(best[0]!.key) !== 1) return null;
-  return { provider_id: best[0]!.provider_id, model_id: best[0]!.model_id };
+  const { provider_id, model_id, variant } = best[0]!;
+  return variant === null ? { provider_id, model_id } : { provider_id, model_id, variant };
 }
 
 /**
@@ -840,7 +843,7 @@ export async function handleOpencodeModelRequest(request: Request, url: URL, pat
         if (!result.ok) {
           // one line per failed switch, to tell a real failure from one the footer did not confirm: the code
           // and the drive's own words (model and provider names, what the footer showed), never a draft
-          console.warn(`OpenCode model switch failed: ${result.code}${result.dialog_left_open ? " (dialog left open)" : ""}: ${result.message}`);
+          console.warn(`OpenCode model switch for ${paneId} failed or was refused: ${result.code}${result.dialog_left_open ? " (dialog left open)" : ""}: ${result.message}`);
           return failure(result.code, result.message, result.dialog_left_open ? { dialog_left_open: true } : {});
         }
         return jsonResponse({ ok: true, model: { provider_id: provider.id, model_id: model.id }, ...(result.dialog_left_open ? { dialog_left_open: true } : {}) });

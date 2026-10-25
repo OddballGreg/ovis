@@ -700,7 +700,8 @@ export interface OpencodeProvider {
 export interface OpencodeModelCatalog {
   available: boolean;
   providers: OpencodeProvider[];
-  current: { provider_id: string; model_id: string } | null;
+  /** the model the footer names; `variant` is the reasoning level it shows after the provider, when it shows one */
+  current: { provider_id: string; model_id: string; variant?: string } | null;
 }
 
 /** POST /api/pane/opencode-model: switch the model of an OpenCode 1.x pane through its TUI's own dialog. */

@@ -2,23 +2,41 @@ import { describe, expect, test } from "bun:test";
 import { composerModel, modelLabel } from "./modelName.ts";
 
 describe("composerModel", () => {
-  const tui = { id: "duo/opus-5", name: "Agentic Chat (Claude Opus 5)" };
+  const tui = { id: "duo/opus-5", name: "Agentic Chat (Claude Opus 5)", variant: null };
+  const OPUS = { id: "duo/opus-5", label: { text: "Agentic Chat (Claude Opus 5)", named: true } };
 
   test("draws an OpenCode pane's TUI model over the conversation's, at once", () => {
-    expect(composerModel("opencode", tui, "claude-sonnet-5")).toEqual({ id: "duo/opus-5", label: { text: "Agentic Chat (Claude Opus 5)", named: true } });
-    expect(composerModel("opencode", tui, undefined)).toEqual({ id: "duo/opus-5", label: { text: "Agentic Chat (Claude Opus 5)", named: true } });
+    expect(composerModel("opencode", tui, "claude-sonnet-5")).toEqual({ ...OPUS, reasoning: null });
+    expect(composerModel("opencode", tui, undefined)).toEqual({ ...OPUS, reasoning: null });
   });
 
   test("draws the conversation's model for an OpenCode pane whose footer was not read", () => {
-    expect(composerModel("opencode", null, "claude-sonnet-5")).toEqual({ id: "claude-sonnet-5", label: { text: "Sonnet 5", named: true } });
-    expect(composerModel("opencode", null, null)).toEqual({ id: null, label: null });
+    expect(composerModel("opencode", null, "claude-sonnet-5")).toEqual({ id: "claude-sonnet-5", label: { text: "Sonnet 5", named: true }, reasoning: null });
+    expect(composerModel("opencode", null, null)).toEqual({ id: null, label: null, reasoning: null });
   });
 
   test("draws the conversation's model for every other agent, even with a TUI model left over", () => {
     for (const agent of ["claude", "codex", "pi", "omo", null]) {
-      expect(composerModel(agent, tui, "gpt-5.6")).toEqual({ id: "gpt-5.6", label: { text: "GPT-5.6", named: true } });
-      expect(composerModel(agent, tui, "bedrock/x")).toEqual({ id: "bedrock/x", label: { text: "bedrock/x", named: false } });
-      expect(composerModel(agent, tui, undefined)).toEqual({ id: null, label: null });
+      expect(composerModel(agent, tui, "gpt-5.6")).toEqual({ id: "gpt-5.6", label: { text: "GPT-5.6", named: true }, reasoning: null });
+      expect(composerModel(agent, tui, "bedrock/x")).toEqual({ id: "bedrock/x", label: { text: "bedrock/x", named: false }, reasoning: null });
+      expect(composerModel(agent, tui, undefined)).toEqual({ id: null, label: null, reasoning: null });
+    }
+  });
+
+  test("draws the TUI's own reasoning level with the TUI's model, never the conversation's", () => {
+    expect(composerModel("opencode", { ...tui, variant: "high" }, "claude-sonnet-5", "low")).toEqual({ ...OPUS, reasoning: "high" });
+    // the footer shows no level: none is drawn, not the last reply's level for another model
+    expect(composerModel("opencode", tui, "claude-sonnet-5", "low")).toEqual({ ...OPUS, reasoning: null });
+    expect(composerModel("opencode", { id: tui.id, name: tui.name }, undefined, "low")).toEqual({ ...OPUS, reasoning: null });
+  });
+
+  test("draws the conversation's reasoning level with the conversation's model", () => {
+    expect(composerModel("opencode", null, "claude-sonnet-5", "medium")).toEqual({ id: "claude-sonnet-5", label: { text: "Sonnet 5", named: true }, reasoning: "medium" });
+    // a level with no model recorded is still drawn
+    expect(composerModel("opencode", null, undefined, "medium")).toEqual({ id: null, label: null, reasoning: "medium" });
+    for (const agent of ["claude", "codex", null]) {
+      expect(composerModel(agent, { ...tui, variant: "high" }, "gpt-5.6", "xhigh")).toEqual({ id: "gpt-5.6", label: { text: "GPT-5.6", named: true }, reasoning: "xhigh" });
+      expect(composerModel(agent, { ...tui, variant: "high" }, "gpt-5.6", null)).toEqual({ id: "gpt-5.6", label: { text: "GPT-5.6", named: true }, reasoning: null });
     }
   });
 });

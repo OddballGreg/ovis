@@ -4,17 +4,17 @@ import { act, create, type ReactTestInstance, type ReactTestRenderer } from "rea
 
 import type { OpencodeModelCatalog, OpencodeModelRequest } from "../../shared/protocol.ts";
 import { SettingsProvider } from "../lib/settings.ts";
-import { OpencodeModelPicker } from "./OpencodeModelPicker.tsx";
+import { OpencodeModelPicker, type TuiModel } from "./OpencodeModelPicker.tsx";
 
-type Shown = { id: string; name: string } | null;
+type Shown = TuiModel | null;
 
 const providers: OpencodeModelCatalog["providers"] = [
   { id: "go", name: "OpenCode Go", models: [{ id: "kimi-k3", name: "Kimi K3" }, { id: "haiku", name: "Claude Haiku 5.5" }] },
   { id: "duo", name: "GitLab Duo", models: [{ id: "opus-5", name: "Agentic Chat (Claude Opus 5)" }] },
 ];
-const OPUS: Shown = { id: "duo/opus-5", name: "Agentic Chat (Claude Opus 5)" };
-const KIMI: Shown = { id: "go/kimi-k3", name: "Kimi K3" };
-const HAIKU: Shown = { id: "go/haiku", name: "Claude Haiku 5.5" };
+const OPUS: Shown = { id: "duo/opus-5", name: "Agentic Chat (Claude Opus 5)", variant: null };
+const KIMI: Shown = { id: "go/kimi-k3", name: "Kimi K3", variant: null };
+const HAIKU: Shown = { id: "go/haiku", name: "Claude Haiku 5.5", variant: null };
 
 // React, the picker, useMachineApi and the API functions stay real: only the network (the bridge's
 // GET /api/pane/opencode-models and POST /api/pane/opencode-model) and the DOM globals are stand-ins
@@ -22,7 +22,9 @@ describe("the OpenCode model chip reports the TUI's model to the composer", () =
   const descriptors = new Map<string, PropertyDescriptor | undefined>();
   let renderers: ReactTestRenderer[];
   /** what the TUI's footer names now: a pick or the terminal changes it */
-  let footer: { provider_id: string; model_id: string } | null;
+  let footer: OpencodeModelCatalog["current"];
+  /** whether the bridge lists the pane's models: false as for a pane that is no longer OpenCode 1.x */
+  let available: boolean;
   let reads: number;
   let picks: OpencodeModelRequest[];
   /** while set, the next read waits for it: a read still on its way */
@@ -35,7 +37,7 @@ describe("the OpenCode model chip reports the TUI's model to the composer", () =
 
   beforeEach(() => {
     for (const key of ["window", "document", "navigator", "getComputedStyle", "IS_REACT_ACT_ENVIRONMENT"]) descriptors.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
-    renderers = []; footer = { provider_id: "duo", model_id: "opus-5" }; reads = 0; picks = []; holdRead = null; holdPick = null;
+    renderers = []; footer = { provider_id: "duo", model_id: "opus-5" }; available = true; reads = 0; picks = []; holdRead = null; holdPick = null;
     visibility = "visible"; intervals = new Map(); errors = [];
     let nextInterval = 1;
     const records = new Map<string, string>();
@@ -60,10 +62,10 @@ describe("the OpenCode model chip reports the TUI's model to the composer", () =
       if (url.includes("/pane/opencode-models?")) {
         reads++;
         // the footer as it was when the read was asked; a held read keeps it, and only the next read waits
-        const current = footer, hold = holdRead;
+        const current = footer, listed = available, hold = holdRead;
         holdRead = null;
         if (hold) await hold;
-        return Response.json({ available: true, providers, current } satisfies OpencodeModelCatalog);
+        return Response.json((listed ? { available: true, providers, current } : { available: false, providers: [], current: null }) satisfies OpencodeModelCatalog);
       }
       if (url.includes("/pane/opencode-model") && init?.method === "POST") {
         const request: OpencodeModelRequest = JSON.parse(String(init.body));
@@ -127,10 +129,57 @@ describe("the OpenCode model chip reports the TUI's model to the composer", () =
     await settle();
   }
 
-  it("reports the footer's model after the first read", async () => {
+  it("reports the footer's model after the first read, and nothing before it", async () => {
     const chip = await mount();
     expect(reads).toBe(1);
-    expect(chip.reports).toEqual([null, OPUS]);
+    expect(chip.reports).toEqual([OPUS]);
+  });
+
+  it("reports the reasoning level the footer shows with the model", async () => {
+    footer = { provider_id: "duo", model_id: "opus-5", variant: "high" };
+    const chip = await mount();
+    expect(chip.last).toEqual({ ...OPUS!, variant: "high" });
+    // a new level for the same model is reported, and so is the footer dropping it
+    footer = { provider_id: "duo", model_id: "opus-5", variant: "max" };
+    await chip.busy(true);
+    expect(chip.last).toEqual({ ...OPUS!, variant: "max" });
+    footer = { provider_id: "duo", model_id: "opus-5" };
+    await chip.busy(false);
+    expect(chip.reports).toEqual([{ ...OPUS!, variant: "high" }, { ...OPUS!, variant: "max" }, OPUS]);
+  });
+
+  it("a read with current null after a good one keeps the last model", async () => {
+    const chip = await mount();
+    // the footer covered by a prompt, or a read made mid-switch: the bridge lists the models but names none
+    footer = null;
+    await chip.busy(true);
+    expect(reads).toBe(2);
+    await tick();
+    expect(reads).toBe(3);
+    expect(chip.reports).toEqual([OPUS]);
+    // the next read that names one is reported as usual
+    footer = { provider_id: "go", model_id: "kimi-k3" };
+    await chip.busy(false);
+    expect(chip.reports).toEqual([OPUS, KIMI]);
+  });
+
+  it("a first read with current null reports nothing", async () => {
+    footer = null;
+    const chip = await mount();
+    expect(reads).toBe(1);
+    expect(chip.reports).toEqual([]);
+  });
+
+  it("available -> unavailable reports null", async () => {
+    const chip = await mount();
+    available = false;
+    await chip.busy(true);
+    expect(reads).toBe(2);
+    expect(chip.reports).toEqual([OPUS, null]);
+    // listed again: the footer's model is reported again
+    available = true;
+    await chip.busy(false);
+    expect(chip.reports).toEqual([OPUS, null, OPUS]);
   });
 
   it("reports the picked model from the read after a pick, with one read for it", async () => {
@@ -154,7 +203,7 @@ describe("the OpenCode model chip reports the TUI's model to the composer", () =
     await chip.busy(false);
     expect(reads).toBe(3);
     // the same model again is not reported again
-    expect(chip.reports).toEqual([null, OPUS, HAIKU]);
+    expect(chip.reports).toEqual([OPUS, HAIKU]);
   });
 
   it("does not let a slower earlier read put back the model a later read replaced", async () => {
@@ -169,7 +218,7 @@ describe("the OpenCode model chip reports the TUI's model to the composer", () =
     release();
     await settle();
     expect(chip.last).toEqual(KIMI);
-    expect(chip.reports).toEqual([null, OPUS, KIMI]);
+    expect(chip.reports).toEqual([OPUS, KIMI]);
   });
 
   it("reads again every 20 seconds while the page is shown, and not while it is hidden", async () => {
@@ -194,11 +243,11 @@ describe("the OpenCode model chip reports the TUI's model to the composer", () =
     await chip.busy(true);
     expect(reads).toBe(2);
     await chip.unmount();
-    expect(chip.reports).toEqual([null, OPUS, null]);
+    expect(chip.reports).toEqual([OPUS, null]);
     expect(intervals.size).toBe(0);
     release();
     await settle();
-    expect(chip.reports).toEqual([null, OPUS, null]);
+    expect(chip.reports).toEqual([OPUS, null]);
   });
 
   it("warns of nothing when it unmounts with a pick still on its way", async () => {

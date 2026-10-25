@@ -60,7 +60,7 @@ import { quickReplyButtons, useSettings } from "../lib/settings.ts";
 import { composerUsage, formatPercent, formatResetIn, HIGH_PERCENT, meterPercent, meterText, providerForAgent, statusWindows, usageName, useUsage, windowLabel } from "../lib/usage.ts";
 import { AgentMark } from "./AgentMark.tsx";
 import { BackgroundTasks } from "./BackgroundTasks.tsx";
-import { OpencodeModelPicker } from "./OpencodeModelPicker.tsx";
+import { OpencodeModelPicker, type TuiModel } from "./OpencodeModelPicker.tsx";
 import { MicButton, VoiceRecordingPill, useDictation } from "./VoiceInput.tsx";
 import { usePaneCommands } from "../lib/usePaneCommands.ts";
 import { useT } from "../lib/i18n.ts";
@@ -281,7 +281,7 @@ export function Composer({
   /** the card's own width: a narrow one shows the task chip's count */
   const [cardWidth, setCardWidth] = useState(0);
   /** an OpenCode 1.x pane's model as its TUI footer names it (OpencodeModelPicker), for the status pill */
-  const [tuiModel, setTuiModel] = useState<{ id: string; name: string } | null>(null);
+  const [tuiModel, setTuiModel] = useState<TuiModel | null>(null);
   const [contextShown, setContextShown] = useState(false);
   const composingRef = useRef(false);
   // the chat lens's input surface takes the keyboard when it appears (a pane switch remounts
@@ -1020,8 +1020,8 @@ export function Composer({
   const hint = composerStatusHint({ uploading, connected, text, noRoom: roomless !== undefined });
   // an OpenCode 1.x pane's model is the TUI's (its footer, read by the model chip): a pick shows at once,
   // where the conversation names a model only from its last reply
-  const { id: modelId, label: model } = composerModel(agent, tuiModel, metadata?.model);
-  const modelShown = Boolean(modelId || metadata?.reasoning_effort);
+  const { id: modelId, label: model, reasoning } = composerModel(agent, tuiModel, metadata?.model, metadata?.reasoning_effort);
+  const modelShown = Boolean(modelId || reasoning);
   const usageDetail = usageWindows.map((window) => {
     const reset = formatResetIn(window.resets_at, Date.now());
     return `${windowLabel(window)} ${meterText(window, settings.usageCount)}${reset ? ` · ${t("Resets in {time}", { time: reset })}` : ""}`;
@@ -1041,7 +1041,7 @@ export function Composer({
   const worktree = worktreeRepo !== null;
   // Fit only changes to drawn content. Streaming context usage is a fixed-size ring unless
   // its number is open on desktop; transcript/status refreshes need no measurement layout.
-  useLayoutEffect(fitStatus, [fitStatus, agent, modelId, model?.text, metadata?.reasoning_effort,
+  useLayoutEffect(fitStatus, [fitStatus, agent, modelId, model?.text, reasoning,
     metadata?.context?.window, contextShown && !mobile && metadata?.context ? contextLeftPercent(metadata.context) : null,
     contextShown, mobile, usageCaption, usage?.problem, hintText, dictation.shown, backgroundTasks,
     plan?.done, plan?.total, statusCompact, compactNow !== undefined, facesLoaded, t]);
@@ -1382,11 +1382,11 @@ export function Composer({
                 {/* behind a name the id as received is still read; a touch cannot reach the title */}
                 {model?.named && <span className="composer-model-id visually-hidden">{modelId}</span>}
                 {/* no level recorded: nothing is drawn for it, no dot and no dash; the sentence is still read */}
-                <span className={`composer-reasoning${metadata?.reasoning_effort ? "" : " visually-hidden"}`} title={metadata?.reasoning_effort ? t("Reasoning effort: {effort}", { effort: metadata.reasoning_effort }) : t("Reasoning effort not available")}>
-                  <span className="composer-reasoning-full visually-hidden">{t("Reasoning {effort}", { effort: metadata?.reasoning_effort ?? "—" })}</span>
-                  {metadata?.reasoning_effort && <>
+                <span className={`composer-reasoning${reasoning ? "" : " visually-hidden"}`} title={reasoning ? t("Reasoning effort: {effort}", { effort: reasoning }) : t("Reasoning effort not available")}>
+                  <span className="composer-reasoning-full visually-hidden">{t("Reasoning {effort}", { effort: reasoning ?? "—" })}</span>
+                  {reasoning && <>
                     <span className="composer-reasoning-dot" aria-hidden="true">·</span>
-                    <span className="composer-reasoning-short" aria-hidden="true">{metadata.reasoning_effort}</span>
+                    <span className="composer-reasoning-short" aria-hidden="true">{reasoning}</span>
                   </>}
                 </span>
               </span>}
