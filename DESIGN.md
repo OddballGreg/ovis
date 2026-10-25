@@ -2470,6 +2470,41 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
 - The mobile key bar starts with Esc, Tab and `^C`, then sticky Ctrl/Alt/Shift, Enter and arrows;
   it never steals typing focus. Modifiers remain highlighted until toggled off,
   leaving the pane/lens or disconnecting; each exposes `aria-pressed`.
+- A held modifier makes the next character typed a chord, in the grid and in the terminal input
+  line alike: key-bar Ctrl and a typed p is Ctrl+P (`heldChord`), whether the keyboard sends a
+  keydown, an `insertText` or an IME composition of that one letter. Gboard composes the word the
+  caret is in, so with the caret after "ab" a typed p is the composition "abp": the line compares
+  itself with the text it held as the composition began, or as a modifier took hold if the word
+  was already open then (Gboard keeps it open while Ctrl is tapped), and only that text plus one
+  printable ASCII character at the caret is a chord (`composedChordLetter`). The chord goes when the
+  composition commits, and the letter leaves the line through the field's own delete, which keeps
+  the browser's undo history (the removed letter is an undo step of its own, so an undo puts it
+  back); WebKit's input after the commit is checked again, and text typed
+  meanwhile is never overwritten. Gboard keeps a word open until a space and a composition's
+  input cannot be cancelled, so under a held modifier, and only then, a composition that is the
+  line plus one letter is committed with the focus change a Send tapped mid-word uses. With no
+  modifier held the line never blurs and typing is untouched. A romaji IME (Japanese) shows its
+  first Latin letter as the composition before the kana: with a modifier held that letter is the
+  chord, as on a Latin keyboard, while a kana or kanji it has already converted stays text. An
+  IME's other commits stay text (a syllable such as 한, a word, a revision), as does a paste or a
+  drop. The forced commit and the commit path are checked in Chromium with synthetic composition
+  events only: Gboard, Samsung Keyboard and iOS keyboards each need a manual check on a device.
+- A hardware Ctrl+letter in the line is the pane's too (`fieldKeyChord`), so Ctrl+P reaches the
+  agent's command palette instead of printing the page. The field keeps select all, the clipboard,
+  undo and redo (Ctrl+A, C, V, X, Y, Z); the line's own Ctrl letters (`fieldLineKey`), each
+  cancelled so the browser never opens History, Downloads, a bookmark or Save page over the line:
+  Ctrl+H deletes back and Ctrl+M sends, as Backspace and Enter do, Ctrl+J breaks the line as
+  Shift+Enter does, Ctrl+I (Tab) does nothing, Ctrl+D does nothing while the line holds text (on an
+  empty line it goes to the pane, the end of input a shell waits for), and Ctrl+S does nothing at
+  all, since XOFF would freeze the pane's output (key-bar Ctrl and S still sends it); Ctrl+Shift app
+  shortcuts,
+  AltGr and named keys such as Ctrl+Backspace; and every Ctrl+letter on a Mac, where they are the
+  field's Emacs editing keys and Cmd prints. Under key-bar Ctrl all of them are chords, since the
+  user armed Ctrl for one. This is how a terminal treats Ctrl+letter (Zed's sends what its own
+  bindings do not take to the pty); the line only keeps the keys any text box needs.
+- The chat composer writes messages and sends no keys to the pane, so a held modifier never makes
+  a one-letter message a control key there. Its Ctrl+P (outside a Mac) is blocked instead, so the
+  print dialog never opens over a message; Ctrl+P for the agent is typed in the terminal lens.
 - That is the default row. Settings → Terminal → Key bar can add, remove and reorder every
   terminal key and register exact combinations. Removing a held modifier clears it immediately.
   A deliberately empty row retains only the keyboard mode control on a touch screen.

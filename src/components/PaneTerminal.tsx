@@ -12,7 +12,7 @@ import { useMachineSessions } from "../lib/machineSessionContext.tsx";
 import { ViewportIntentGate } from "../lib/viewportIntent.ts";
 import { PaneCachedContext, PanePresentedContext, PaneFollowContext, PaneShownContext, PaneSubmitContext } from "../lib/paneSubmitContext.ts";
 import { disposeAfterPendingFrame } from "../lib/terminalDispose.ts";
-import { clipboardKey, hasModifiers, physicalKey, terminalChord, navigationSequence, keyFromData, ctrlEnterSequence, mirroredCtrlEnterKey, modifyOtherKeysLevel, NO_STICKY_MODIFIERS, type StickyModifiers } from "../lib/keys.ts";
+import { clipboardKey, hasModifiers, heldChord, physicalKey, terminalChord, navigationSequence, keyFromData, ctrlEnterSequence, mirroredCtrlEnterKey, modifyOtherKeysLevel, NO_STICKY_MODIFIERS, type StickyModifiers } from "../lib/keys.ts";
 import { keyBarInputSequence, type KeyBarKeyItem } from "../lib/keyBar.ts";
 import { keyBarFolded } from "../lib/compactInput.ts";
 import { EMPTY_DRAFT, applyToDraft, draftIsEmpty, restoreDraft, type InputDraft } from "../lib/draft.ts";
@@ -937,7 +937,8 @@ export function PaneTerminal({
     const compositionEnd = () => {
       if (compositionEndTimer !== null) window.clearTimeout(compositionEndTimer);
       // xterm's textarea listener queues its commit before this bubbling host listener.
-      // Keep that commit on the text path; a new composition cancels this clear.
+      // Keep that commit on the text path (onData lets one held-modifier letter through as a
+      // chord); a new composition cancels this clear.
       compositionCommitPendingRef.current = true;
       setComposing(false);
       compositionEndTimer = window.setTimeout(() => {
@@ -1823,10 +1824,12 @@ export function PaneTerminal({
       const secret = secretRef.current !== null;
       const input = data;
       const key = keyFromData(data);
-      const chord = enterChord ?? (!pasting && !composingRef.current && !compositionCommitPendingRef.current
-        ? barKey !== null ? barKey.chord
-          : physicalChord ?? (hasModifiers(modifiersRef.current) && key !== null ? terminalChord(key, modifiersRef.current) : null)
-        : null);
+      // an IME's commit is text, except one ASCII character under a held modifier: Gboard composes
+      // a lone letter too, so key-bar Ctrl and a typed p is Ctrl+P (heldChord)
+      const chord = enterChord ?? (pasting || composingRef.current ? null
+        : compositionCommitPendingRef.current ? heldChord(data, modifiersRef.current, "committed")
+        : barKey !== null ? barKey.chord
+        : physicalChord ?? (hasModifiers(modifiersRef.current) && key !== null ? terminalChord(key, modifiersRef.current) : null));
       if (draftHeldForRef.current === current) {
         // A chord or a modified Enter is never held, and never sent beside held text either
         // (Ctrl+J, or Ctrl+Enter under modifyOtherKeys, would run the line).
@@ -2866,6 +2869,12 @@ export function PaneTerminal({
     });
   }, [submitRetention]);
 
+  // a chord typed in the input line (a character under a held key-bar modifier, a hardware
+  // Ctrl+P) goes the way a key-bar key does, through onData's readiness, role and secret checks
+  const pressLineKey = useCallback((key: string, chordModifiers: StickyModifiers) => {
+    pressKey({ type: "key", key, modifiers: chordModifiers });
+  }, [pressKey]);
+
   // a tap into the input line is the user here: the grid is theirs again before they type
   const reassertGrid = useCallback(() => { reassertIfStaleRef.current(); }, []);
 
@@ -3661,7 +3670,7 @@ export function PaneTerminal({
           keeps it mounted: a remount would drop what was typed and a send still on its way */}
       {((!chatView && lineSlot) || secretInput) && <div ref={setInputSlot} className={`terminal-input-slot${!chatView && lineSlot ? "" : " is-empty"}${!chatView && lineSlot && compactInput ? " is-compact" : ""}${foldedKeyBar ? " is-folded" : ""}`}>
         {secretInput ?? (!chatView && lineSlot && !secretActive && <TerminalInput key={paneId} active={active} owner={paneStorageId(machineId, paneId)} onComposing={setLineComposing} connected={connected && !held} onSend={sendTerminalLine} onEnter={pressEnter} onFocus={reassertGrid}
-          compact={compactInput} keyBar={{ shown: !foldedKeyBar, onToggle: toggleKeyBar }} />)}
+          compact={compactInput} keyBar={{ shown: !foldedKeyBar, onToggle: toggleKeyBar }} modifiers={modifiers} onKey={pressLineKey} />)}
       </div>}
       {presented && paneId !== null && !secretActive && !observing && !chatView && !foldedKeyBar && <KeyBar disabled={composing || !connected || !inputReady || held || ended} onKey={pressKey}
         holdScope={`${paneStorageId(machineId, paneId)}:${view}`}

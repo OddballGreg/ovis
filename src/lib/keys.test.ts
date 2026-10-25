@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { altSequence, clipboardKey, physicalKey, controlCode, ctrlEnterSequence, mirroredCtrlEnterKey, isPrintable, keySequence, modifyOtherKeysLevel, sanitizeKeyBarExtras, navigationSequence, terminalChord, keyFromData } from "./keys.ts";
+import { altSequence, clipboardKey, composedChordLetter, fieldKeyChord, fieldLineKey, heldChord, isPrintKey, physicalKey, controlCode, ctrlEnterSequence, mirroredCtrlEnterKey, isPrintable, keySequence, modifyOtherKeysLevel, sanitizeKeyBarExtras, navigationSequence, terminalChord, keyFromData } from "./keys.ts";
 
 describe("clipboardKey", () => {
   it("recognizes native Ctrl+C/V on Korean and Russian layouts without replacing Latin layout letters", () => {
@@ -24,6 +24,139 @@ describe("physicalKey", () => {
     expect(physicalKey("!", "Digit1")).toBe("!");
     expect(physicalKey("ArrowLeft", "ArrowLeft")).toBe("ArrowLeft");
     expect(physicalKey("한", "KeyG")).toBe("g");
+  });
+});
+
+const NONE = { ctrl: false, alt: false, shift: false };
+const CTRL = { ctrl: true, alt: false, shift: false };
+const down = (key: string, extra: Partial<Parameters<typeof fieldKeyChord>[0]> = {}) => ({
+  key, code: /^[a-z]$/i.test(key) ? `Key${key.toUpperCase()}` : "", ctrlKey: false, altKey: false, metaKey: false, shiftKey: false, isComposing: false, keyCode: 0, ...extra,
+});
+
+describe("heldChord", () => {
+  it("makes one typed character a chord only under a held modifier", () => {
+    expect(heldChord("p", CTRL, "typed")).toBe("ctrl+p");
+    expect(heldChord("я", { ...NONE, alt: true }, "typed")).toBe("alt+я");
+    expect(heldChord(" ", CTRL, "typed")).toBe("ctrl+space");
+    expect(heldChord("p", NONE, "typed")).toBeNull();
+    expect(heldChord("pq", CTRL, "typed")).toBeNull();
+    expect(heldChord("", CTRL, "typed")).toBeNull();
+    expect(heldChord("\x03", CTRL, "typed")).toBeNull();
+  });
+  it("leaves an open composition as text", () => {
+    expect(heldChord("p", CTRL, "composing")).toBeNull();
+  });
+  it("takes a committed ASCII letter as a chord, and keeps an IME's syllables and words as text", () => {
+    expect(heldChord("p", CTRL, "committed")).toBe("ctrl+p");
+    expect(heldChord("/", CTRL, "committed")).toBe("ctrl+/");
+    for (const text of ["한", "한글", "я", "😀", " ", "pq"]) expect(heldChord(text, CTRL, "committed")).toBeNull();
+  });
+});
+
+describe("composedChordLetter", () => {
+  it("finds the one letter Gboard adds to the word at the caret", () => {
+    // Gboard composes the word the caret is in: after "ab", a typed p commits "abp"
+    expect(composedChordLetter("ab", 2, "abp", "abp", CTRL)).toBe("p");
+    expect(composedChordLetter("", 0, "p", "p", CTRL)).toBe("p");
+    expect(composedChordLetter("ab cd", 2, "abp cd", "abp", CTRL)).toBe("p");
+    expect(composedChordLetter("git ", 4, "git /", "/", CTRL)).toBe("/");
+  });
+  it("leaves the letter as text with no modifier held", () => {
+    expect(composedChordLetter("ab", 2, "abp", "abp", NONE)).toBeNull();
+  });
+  it("keeps syllables, converted and revised words, and more than one letter as text", () => {
+    expect(composedChordLetter("ab", 2, "ab한", "한", CTRL)).toBeNull();
+    expect(composedChordLetter("ab", 2, "abpq", "abpq", CTRL)).toBeNull();
+    expect(composedChordLetter("ab", 2, "Abp", "Abp", CTRL)).toBeNull();
+    expect(composedChordLetter("ab", 2, "ab ", "ab ", CTRL)).toBeNull();
+    expect(composedChordLetter("ab", 2, "ab", "ab", CTRL)).toBeNull();
+    // the field gained a letter the composition does not end with: not the keyboard's typed key
+    expect(composedChordLetter("ab", 2, "abp", "ab", CTRL)).toBeNull();
+    // a letter away from the caret is a revision, not a key
+    expect(composedChordLetter("ab", 2, "pab", "pab", CTRL)).toBeNull();
+    // the base is the line as Ctrl takes hold: a word open since before ("ab") is not the letter
+    expect(composedChordLetter("", 0, "abp", "abp", CTRL)).toBeNull();
+  });
+});
+
+describe("fieldKeyChord", () => {
+  it("sends a hardware Ctrl+letter that is not the field's own editing key", () => {
+    for (const letter of ["p", "r", "l", "k", "e", "u", "w", "b", "f"]) {
+      expect(fieldKeyChord(down(letter, { ctrlKey: true }), NONE, false)).toEqual({ key: letter, modifiers: CTRL });
+    }
+    // a non-Latin layout names the letter by its position
+    expect(fieldKeyChord(down("ㅔ", { code: "KeyP", ctrlKey: true }), NONE, false)).toEqual({ key: "p", modifiers: CTRL });
+  });
+  it("leaves select all, the clipboard, undo and redo to the field", () => {
+    for (const letter of ["a", "c", "v", "x", "y", "z"]) expect(fieldKeyChord(down(letter, { ctrlKey: true }), NONE, false)).toBeNull();
+    expect(fieldKeyChord(down("ㅍ", { code: "KeyV", ctrlKey: true }), NONE, false)).toBeNull();
+  });
+  it("leaves the line's own Ctrl letters to the field, and hands Ctrl+D to the pane only on an empty line", () => {
+    for (const letter of ["h", "i", "j", "m", "s"]) {
+      expect(fieldKeyChord(down(letter, { ctrlKey: true }), NONE, false)).toBeNull();
+      expect(fieldKeyChord(down(letter, { ctrlKey: true }), NONE, false, true)).toBeNull();
+    }
+    expect(fieldKeyChord(down("d", { ctrlKey: true }), NONE, false)).toBeNull();
+    expect(fieldKeyChord(down("d", { ctrlKey: true }), NONE, false, true)).toEqual({ key: "d", modifiers: CTRL });
+    // key-bar Ctrl armed the chord: all of them reach the pane
+    for (const letter of ["h", "i", "j", "m", "d", "s"]) expect(fieldKeyChord(down(letter), CTRL, false)).toEqual({ key: letter, modifiers: CTRL });
+  });
+  it("leaves named keys, plain typing, IME keys, Cmd, AltGr and Ctrl+Shift to the field", () => {
+    for (const key of ["Backspace", "Enter", "ArrowLeft", "Delete", "Home"]) expect(fieldKeyChord(down(key, { ctrlKey: true }), NONE, false)).toBeNull();
+    expect(fieldKeyChord(down("p"), NONE, false)).toBeNull();
+    expect(fieldKeyChord(down("p", { ctrlKey: true, isComposing: true }), NONE, false)).toBeNull();
+    expect(fieldKeyChord(down("p", { ctrlKey: true, keyCode: 229 }), NONE, false)).toBeNull();
+    expect(fieldKeyChord(down("p", { metaKey: true }), NONE, false)).toBeNull();
+    expect(fieldKeyChord(down("p", { ctrlKey: true, altKey: true }), NONE, false)).toBeNull();
+    expect(fieldKeyChord(down("P", { ctrlKey: true, shiftKey: true }), NONE, false)).toBeNull();
+  });
+  it("leaves a Mac's Ctrl+letter, its Emacs editing, to the field", () => {
+    expect(fieldKeyChord(down("p", { ctrlKey: true }), NONE, true)).toBeNull();
+    expect(fieldKeyChord(down("p"), CTRL, true)).toEqual({ key: "p", modifiers: CTRL });
+  });
+  it("combines held key-bar modifiers with the hardware ones for any one character", () => {
+    expect(fieldKeyChord(down("p"), CTRL, false)).toEqual({ key: "p", modifiers: CTRL });
+    expect(fieldKeyChord(down("D", { shiftKey: true }), { ...NONE, alt: true }, false)).toEqual({ key: "D", modifiers: { ctrl: false, alt: true, shift: true } });
+    expect(fieldKeyChord(down("ㅊ", { code: "KeyC" }), CTRL, false)).toEqual({ key: "c", modifiers: CTRL });
+    expect(fieldKeyChord(down("!"), CTRL, false)).toEqual({ key: "!", modifiers: CTRL });
+    // the field keeps its editing keys and a real clipboard chord even then
+    expect(fieldKeyChord(down("Backspace"), CTRL, false)).toBeNull();
+    expect(fieldKeyChord(down("Enter"), CTRL, false)).toBeNull();
+    expect(fieldKeyChord(down("v", { ctrlKey: true }), CTRL, false)).toBeNull();
+    expect(fieldKeyChord(down("p", { isComposing: true }), CTRL, false)).toBeNull();
+    expect(fieldKeyChord(down("Unidentified", { keyCode: 229 }), CTRL, false)).toBeNull();
+  });
+});
+
+describe("fieldLineKey", () => {
+  it("gives the line's own Ctrl letters their line edit, so none is left to the browser", () => {
+    expect(fieldLineKey(down("h", { ctrlKey: true }), NONE, false)).toBe("delete");
+    expect(fieldLineKey(down("j", { ctrlKey: true }), NONE, false)).toBe("newline");
+    expect(fieldLineKey(down("m", { ctrlKey: true }), NONE, false)).toBe("send");
+    for (const letter of ["i", "d", "s"]) expect(fieldLineKey(down(letter, { ctrlKey: true }), NONE, false)).toBe("ignore");
+    // XOFF would freeze the pane's output: the line keeps Ctrl+S even when empty
+    expect(fieldLineKey(down("s", { ctrlKey: true }), NONE, false, true)).toBe("ignore");
+    // an empty line's Ctrl+D is the pane's end of input
+    expect(fieldLineKey(down("d", { ctrlKey: true }), NONE, false, true)).toBeNull();
+  });
+  it("is null for other keys, key-bar Ctrl, a Mac and extra modifiers", () => {
+    for (const letter of ["p", "a", "c"]) expect(fieldLineKey(down(letter, { ctrlKey: true }), NONE, false)).toBeNull();
+    expect(fieldLineKey(down("h"), NONE, false)).toBeNull();
+    expect(fieldLineKey(down("h", { ctrlKey: true }), CTRL, false)).toBeNull();
+    expect(fieldLineKey(down("h", { ctrlKey: true }), NONE, true)).toBeNull();
+    expect(fieldLineKey(down("h", { ctrlKey: true, shiftKey: true }), NONE, false)).toBeNull();
+    expect(fieldLineKey(down("h", { ctrlKey: true, altKey: true }), NONE, false)).toBeNull();
+  });
+});
+
+describe("isPrintKey", () => {
+  it("is Ctrl+P outside a Mac, on any layout", () => {
+    expect(isPrintKey(down("p", { ctrlKey: true }), false)).toBe(true);
+    expect(isPrintKey(down("ㅔ", { code: "KeyP", ctrlKey: true }), false)).toBe(true);
+    expect(isPrintKey(down("p", { ctrlKey: true }), true)).toBe(false);
+    expect(isPrintKey(down("P", { ctrlKey: true, shiftKey: true }), false)).toBe(false);
+    expect(isPrintKey(down("p", { metaKey: true }), false)).toBe(false);
+    expect(isPrintKey(down("p"), false)).toBe(false);
   });
 });
 
