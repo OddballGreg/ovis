@@ -52,7 +52,7 @@ import { composerLabelDraw } from "../lib/composerLabelFit.ts";
 import { composerFull, formatChars, pasteOverflow } from "../lib/composerLength.ts";
 import { normalizeComposerImageFile } from "../lib/composerImageMime.ts";
 import { paneStatus } from "../lib/status.ts";
-import { modelLabel } from "../lib/modelName.ts";
+import { composerModel } from "../lib/modelName.ts";
 import { isPrintKey } from "../lib/keys.ts";
 import { isMacPlatform } from "../lib/shortcuts.ts";
 import { useFacesArrived } from "../lib/fontFaces.ts";
@@ -62,7 +62,7 @@ import { quickReplyButtons, useSettings } from "../lib/settings.ts";
 import { composerUsage, formatPercent, formatResetIn, HIGH_PERCENT, meterPercent, meterText, providerForAgent, statusWindows, usageName, useUsage, windowLabel } from "../lib/usage.ts";
 import { AgentMark } from "./AgentMark.tsx";
 import { BackgroundTasks } from "./BackgroundTasks.tsx";
-import { OpencodeModelPicker } from "./OpencodeModelPicker.tsx";
+import { OpencodeModelPicker, type TuiModel } from "./OpencodeModelPicker.tsx";
 import { MicButton, VoiceRecordingPill, useDictation } from "./VoiceInput.tsx";
 import { usePaneCommands } from "../lib/usePaneCommands.ts";
 import { useT } from "../lib/i18n.ts";
@@ -282,6 +282,8 @@ export function Composer({
   const hintRef = useRef<HTMLSpanElement | null>(null);
   /** the card's own width: a narrow one shows the task chip's count */
   const [cardWidth, setCardWidth] = useState(0);
+  /** an OpenCode 1.x pane's model as its TUI footer names it (OpencodeModelPicker), for the status pill */
+  const [tuiModel, setTuiModel] = useState<TuiModel | null>(null);
   const [contextShown, setContextShown] = useState(false);
   const composingRef = useRef(false);
   // the chat lens's input surface takes the keyboard when it appears (a pane switch remounts
@@ -1022,8 +1024,10 @@ export function Composer({
   const statusCompact = composerStatusCompact(cardWidth);
   const sendShown = sending || composerSendShown({ working: isWorking, text });
   const hint = composerStatusHint({ uploading, connected, text, noRoom: roomless !== undefined });
-  const model = metadata?.model ? modelLabel(metadata.model) : null;
-  const modelShown = Boolean(metadata?.model || metadata?.reasoning_effort);
+  // an OpenCode 1.x pane's model is the TUI's (its footer, read by the model chip): a pick shows at once,
+  // where the conversation names a model only from its last reply
+  const { id: modelId, label: model, reasoning } = composerModel(agent, tuiModel, metadata?.model, metadata?.reasoning_effort);
+  const modelShown = Boolean(modelId || reasoning);
   const usageDetail = usageWindows.map((window) => {
     const reset = formatResetIn(window.resets_at, Date.now());
     return `${windowLabel(window)} ${meterText(window, settings.usageCount)}${reset ? ` · ${t("Resets in {time}", { time: reset })}` : ""}`;
@@ -1043,7 +1047,7 @@ export function Composer({
   const worktree = worktreeRepo !== null;
   // Fit only changes to drawn content. Streaming context usage is a fixed-size ring unless
   // its number is open on desktop; transcript/status refreshes need no measurement layout.
-  useLayoutEffect(fitStatus, [fitStatus, agent, metadata?.model, metadata?.reasoning_effort,
+  useLayoutEffect(fitStatus, [fitStatus, agent, modelId, model?.text, reasoning,
     metadata?.context?.window, contextShown && !mobile && metadata?.context ? contextLeftPercent(metadata.context) : null,
     contextShown, mobile, usageCaption, usage?.problem, hintText, dictation.shown, backgroundTasks,
     plan?.done, plan?.total, statusCompact, compactNow !== undefined, facesLoaded, t]);
@@ -1360,7 +1364,7 @@ export function Composer({
           )}
           <BackgroundTasks paneId={paneId} count={backgroundTasks} omo={agent === "omo"} claude={agent === "claude"} plan={plan} />
           {/* OpenCode 1.x keeps its model in the TUI: the chip lists the models and picks one there (server/opencode-model.ts) */}
-          {agent === "opencode" && <OpencodeModelPicker key={paneId} paneId={paneId} busy={isWorking || agentStatus === "blocked"} disabled={!connected || role === "observe"} onOpenTerminal={onOpenTerminal} />}
+          {agent === "opencode" && <OpencodeModelPicker key={paneId} paneId={paneId} busy={isWorking || agentStatus === "blocked"} disabled={!connected || role === "observe"} onOpenTerminal={onOpenTerminal} onCurrent={setTuiModel} />}
         </div>
         {/* between the two control groups of the card's last row. The agent's name, its separator and the
             state word are read, not drawn: the mark and the header name the agent, and Stop, the live row and
@@ -1376,19 +1380,19 @@ export function Composer({
             {/* the mark, the model, the level and the context ring as one quiet pill. It only shows: no role,
                 no focus, nothing to press but the ring inside it. A pane that names no model draws no pill
                 (.is-bare): the mark, a level if it has one, and the ring stand in the row as they are */}
-            <span className={`composer-pill${metadata?.model ? "" : " is-bare"}`}>
+            <span className={`composer-pill${modelId ? "" : " is-bare"}`}>
               {agent && <AgentMark agent={agent} size={14} />}
               {modelShown && <span className="composer-model-info" aria-label={t("Model and reasoning")}>
                 {/* a name only for an id modelLabel can name for certain; any other id is drawn as received, in the identifier face */}
-                <span className={`composer-model${model ? model.named ? "" : " is-id" : " is-none"}`} title={metadata?.model ?? t("Model not available")}>{model?.text ?? t("Model —")}</span>
+                <span className={`composer-model${model ? model.named ? "" : " is-id" : " is-none"}`} title={modelId ?? t("Model not available")}>{model?.text ?? t("Model —")}</span>
                 {/* behind a name the id as received is still read; a touch cannot reach the title */}
-                {model?.named && <span className="composer-model-id visually-hidden">{metadata?.model}</span>}
+                {model?.named && <span className="composer-model-id visually-hidden">{modelId}</span>}
                 {/* no level recorded: nothing is drawn for it, no dot and no dash; the sentence is still read */}
-                <span className={`composer-reasoning${metadata?.reasoning_effort ? "" : " visually-hidden"}`} title={metadata?.reasoning_effort ? t("Reasoning effort: {effort}", { effort: metadata.reasoning_effort }) : t("Reasoning effort not available")}>
-                  <span className="composer-reasoning-full visually-hidden">{t("Reasoning {effort}", { effort: metadata?.reasoning_effort ?? "—" })}</span>
-                  {metadata?.reasoning_effort && <>
+                <span className={`composer-reasoning${reasoning ? "" : " visually-hidden"}`} title={reasoning ? t("Reasoning effort: {effort}", { effort: reasoning }) : t("Reasoning effort not available")}>
+                  <span className="composer-reasoning-full visually-hidden">{t("Reasoning {effort}", { effort: reasoning ?? "—" })}</span>
+                  {reasoning && <>
                     <span className="composer-reasoning-dot" aria-hidden="true">·</span>
-                    <span className="composer-reasoning-short" aria-hidden="true">{metadata.reasoning_effort}</span>
+                    <span className="composer-reasoning-short" aria-hidden="true">{reasoning}</span>
                   </>}
                 </span>
               </span>}

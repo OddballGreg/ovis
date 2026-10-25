@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
@@ -9,6 +9,7 @@ import {
   ansiCells,
   dialogOnScreen,
   driveModelDialog,
+  cutListedModel,
   footerModel,
   footerNames,
   forgetOpencodeModels,
@@ -53,6 +54,17 @@ describe("OpenCode's provider list", () => {
       { id: "alpha", name: "Alpha Cloud", models: [{ id: "kept", name: "kept" }] },
       { id: "zeta", name: "Zeta", models: [{ id: "a", name: "Alpha" }, { id: "c", name: "Charlie" }, { id: "b", name: "Bravo" }] },
     ]);
+  });
+
+  it("keeps a model's reasoning levels, its variants' keys, dropping any that could not be drawn as one", () => {
+    const providers = opencodeProviders({
+      providers: [{ id: "p", name: "P", models: {
+        m: { name: "M", variants: { low: {}, high: {}, "x\u001b": {}, "two words": {}, [" "]: {}, [`${"z".repeat(41)}`]: {} } },
+        none: { name: "None", variants: {} },
+        odd: { name: "Odd", variants: "high" },
+      } }],
+    });
+    expect(providers?.[0]?.models).toEqual([{ id: "m", name: "M", variants: ["low", "high"] }, { id: "none", name: "None" }, { id: "odd", name: "Odd" }]);
   });
 
   it("lists no provider or model whose id or name holds a key or an invisible mark, or is too long: names are typed into the pane", () => {
@@ -163,6 +175,43 @@ describe("OpenCode's model dialog on the screen", () => {
     // the dialog covers the footer's model: the prompt is there, its model is not read
     expect(promptFooter(fixture("claude-first"))).toBe("");
     expect(footerModel(fixture("claude-first"), providers)).toBeNull();
+  });
+
+  it("tells a footer a narrow pane cut inside a listed model from one naming a model the list lacks", () => {
+    const providers: OpencodeProvider[] = [
+      { id: "gitlab", name: "GitLab Duo", models: [{ id: "opus-5-5", name: "Agentic Chat (Claude Opus 5.5)" }] },
+    ];
+    // cut inside the name, inside the provider, and at a space: a listed model, drawn short
+    expect(cutListedModel("Agentic Chat (Claude Op", providers)).toBe(true);
+    expect(cutListedModel("Agentic Chat (Claude Opus 5.5) GitLab", providers)).toBe(true);
+    expect(cutListedModel("Agentic  Chat", providers)).toBe(true);
+    // whole, or naming another model: not a cut listed one
+    expect(cutListedModel("Agentic Chat (Claude Opus 5.5) GitLab Duo", providers)).toBe(false);
+    expect(cutListedModel("Local Llama Ollama", providers)).toBe(false);
+  });
+
+  it("reads the reasoning level the footer shows after the whole provider name, and none otherwise", () => {
+    const providers: OpencodeProvider[] = [
+      { id: "gitlab", name: "GitLab Duo", models: [{ id: "opus-5-5", name: "Agentic Chat (Claude Opus 5.5)", variants: ["low", "medium", "high", "xhigh"] }, { id: "opus-5", name: "Agentic Chat (Claude Opus 5)" }] },
+    ];
+    const DIM = "\u001b[38;2;128;128;128m\u001b[48;2;30;30;30m";
+    // the closed fixture's footer with its provider drawn as `shown`: ` · <level>` after it, or cut short
+    const footer = (shown: string): string => fixture("closed").replace(`${DIM}GitLab Duo\u001b[0m`, `${DIM}${shown}\u001b[0m`);
+    const OPUS = { provider_id: "gitlab", model_id: "opus-5-5" };
+    expect(promptFooter(footer("GitLab Duo · high"))).toBe("Agentic Chat (Claude Opus 5.5) GitLab Duo · high");
+    expect(footerModel(footer("GitLab Duo · high"), providers)).toEqual({ ...OPUS, variant: "high" });
+    expect(footerModel(footer("GitLab Duo · xhigh"), providers)).toEqual({ ...OPUS, variant: "xhigh" });
+    // a level the pane's edge cut, or one the model does not offer, is no level: the model is still read
+    expect(footerModel(footer("GitLab Duo · hi"), providers)).toStrictEqual(OPUS);
+    expect(footerModel(footer("GitLab Duo · max"), providers)).toStrictEqual(OPUS);
+    expect(footerModel(footer("GitLab Duo · high"), [{ ...providers[0]!, models: providers[0]!.models.map(({ id, name }) => ({ id, name })) }])).toStrictEqual(OPUS);
+    // no level drawn: no `variant` key at all, not an empty or null one
+    expect(footerModel(fixture("closed"), providers)).toStrictEqual(OPUS);
+    // a provider cut short leaves no room for a level: the model is still read, no level with it
+    expect(promptFooter(footer("GitLab D"))).toBe("Agentic Chat (Claude Opus 5.5) GitLab D");
+    expect(footerModel(footer("GitLab D"), providers)).toStrictEqual(OPUS);
+    // a word after the provider with no ` · ` is no level
+    expect(footerModel(footer("GitLab Duo high"), providers)).toBeNull();
   });
 
   it("reads the prompt box of a session by where it is drawn: its draft, and its footer under it", () => {
@@ -725,6 +774,7 @@ describe("the model routes", () => {
       expect(answer.available).toBe(true);
       expect(answer.providers.map((provider) => provider.id)).toEqual(["gitlab", "go"]);
       expect(answer.current).toEqual({ provider_id: "gitlab", model_id: "opus-5-5" });
+      expect(answer.footer).toBe("model");
     });
     await withHerdr(tui, { agent: "claude", agent_status: "idle" }, async () => {
       expect(await (await call("/api/pane/opencode-models?pane_id=w1:p1")).json()).toEqual({ available: false, providers: [], current: null });
@@ -777,8 +827,49 @@ describe("the model routes", () => {
       const response = await call("/api/pane/opencode-model", { pane_id: "w1:p1", provider_id: "gitlab", model_id: "opus-5-5-again" });
       expect([response.status, ((await response.json()) as { error: { code: string } }).error.code]).toEqual([422, "ambiguous_model"]);
       expect(tui.sent).toEqual([]);
-      expect(((await (await call("/api/pane/opencode-models?pane_id=w1:p1")).json()) as OpencodeModelCatalog).current).toBeNull();
+      const listed = (await (await call("/api/pane/opencode-models?pane_id=w1:p1")).json()) as OpencodeModelCatalog;
+      // the footer names a model, one this list cannot tell apart: unmatched, not unreadable
+      expect([listed.current, listed.footer]).toEqual([null, "unmatched"]);
     });
+  });
+
+  it("logs one line for a failed or refused switch, with the pane, its code and the drive's words, and none for a done one", async () => {
+    configure();
+    const warned: unknown[][] = [];
+    const warn = spyOn(console, "warn").mockImplementation((...args: unknown[]) => { warned.push(args); });
+    try {
+      const done = new FakeTui(MODELS, MODELS[2]!);
+      await withHerdr(done, { agent: "opencode", agent_status: "idle" }, async () => {
+        expect((await call("/api/pane/opencode-model", { pane_id: "w1:p1", provider_id: "gitlab", model_id: "sonnet-5" })).status).toBe(200);
+      });
+      expect(warned).toEqual([]);
+      const missing = new FakeTui(MODELS.filter((model) => model.name !== "Agentic Chat (Claude Sonnet 5)"), MODELS[2]!);
+      await withHerdr(missing, { agent: "opencode", agent_status: "idle" }, async () => {
+        const response = await call("/api/pane/opencode-model", { pane_id: "w1:p1", provider_id: "gitlab", model_id: "sonnet-5" });
+        const { error } = (await response.json()) as { error: { code: string; message: string } };
+        expect(warned).toHaveLength(1);
+        expect(warned[0]).toHaveLength(1);
+        expect(String(warned[0]![0])).toStartWith(`OpenCode model switch for w1:p1 failed or was refused: ${error.code}`);
+        expect(String(warned[0]![0])).toContain(error.message);
+      });
+      // the drive refusing before any key (a dialog already open) is logged too: the switch asked for did not happen
+      const covered = new FakeTui(MODELS, MODELS[2]!);
+      covered.dialog = "other";
+      await withHerdr(covered, { agent: "opencode", agent_status: "idle" }, async () => {
+        const response = await call("/api/pane/opencode-model", { pane_id: "w1:p1", provider_id: "gitlab", model_id: "sonnet-5" });
+        expect(((await response.json()) as { error: { code: string } }).error.code).toBe("dialog_open");
+        expect(covered.sent).toEqual([]);
+        expect(warned).toHaveLength(2);
+        expect(String(warned[1]![0])).toStartWith("OpenCode model switch for w1:p1 failed or was refused: dialog_open: ");
+      });
+      // the route's own answer for a busy pane, before the drive is asked, is not logged
+      await withHerdr(done, { agent: "opencode", agent_status: "working" }, async () => {
+        expect((await call("/api/pane/opencode-model", { pane_id: "w1:p1", provider_id: "gitlab", model_id: "sonnet-5" })).status).toBe(409);
+      });
+      expect(warned).toHaveLength(2);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("sends nothing for a request given up while it waited its turn", async () => {

@@ -681,6 +681,8 @@ export interface OpencodeModel {
   id: string;
   /** the name the TUI's dialog and prompt footer show */
   name: string;
+  /** the reasoning levels the model offers (its `variants` keys), when it offers any: the footer's level is read only when it is one of them */
+  variants?: string[];
 }
 
 /** One provider of an OpenCode 1.x server, with its models in the order the TUI's dialog lists them. */
@@ -700,7 +702,15 @@ export interface OpencodeProvider {
 export interface OpencodeModelCatalog {
   available: boolean;
   providers: OpencodeProvider[];
-  current: { provider_id: string; model_id: string } | null;
+  /** the model the footer names; `variant` is the reasoning level it shows after the provider, when it shows one */
+  current: { provider_id: string; model_id: string; variant?: string } | null;
+  /**
+   * What the pane's footer gave: "model" when `current` is read from it, "unmatched" when it names a
+   * model this list does not have or cannot tell apart, "unreadable" when the pane could not be read,
+   * shows no prompt, its footer names no model, or a narrow pane cut the footer inside a listed model's
+   * name and provider. Absent without a pane and from older bridges: read it as "unreadable".
+   */
+  footer?: "model" | "unmatched" | "unreadable";
 }
 
 /** POST /api/pane/opencode-model: switch the model of an OpenCode 1.x pane through its TUI's own dialog. */

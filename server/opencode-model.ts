@@ -53,6 +53,10 @@ const UNTYPEABLE = /[\p{Cc}\p{Cf}\u2028\u2029]/u;
 /** Whether `value` can be typed into the pane's TUI and compared with what it draws: short, and no key or invisible mark in it. */
 export const typeableName = (value: string): boolean => value.length > 0 && value.length <= OPENCODE_MODEL_MAX_NAME && !UNTYPEABLE.test(value);
 
+/** A model's reasoning levels kept from the list: at most this many, each at most this long. */
+const OPENCODE_MODEL_MAX_VARIANTS = 16;
+const OPENCODE_MODEL_MAX_VARIANT = 40;
+
 /** a string field as the list keeps it, trimmed; null when absent, empty, or not typeable */
 const listedText = (value: unknown): string | null | undefined => {
   if (typeof value !== "string" || value.trim() === "") return undefined;
@@ -80,10 +84,15 @@ export function opencodeProviders(value: unknown): OpencodeProvider[] | null {
       const modelId = listedText(key);
       const name = listedText(model.name);
       if (typeof modelId !== "string" || name === null || model.status === "deprecated" || (id === "opencode" && modelId.includes("-nano"))) return [];
-      return [{ id: modelId, name: name ?? modelId, release: typeof model.release_date === "string" ? model.release_date : "" }];
+      // the reasoning levels it offers, as the footer draws one: typeable keys only, a short list
+      const variants = Object.keys(record(model.variants)).flatMap((key) => {
+        const level = listedText(key);
+        return typeof level === "string" && level.length <= OPENCODE_MODEL_MAX_VARIANT && !level.includes(" ") ? [level] : [];
+      }).slice(0, OPENCODE_MODEL_MAX_VARIANTS);
+      return [{ id: modelId, name: name ?? modelId, release: typeof model.release_date === "string" ? model.release_date : "", variants }];
     });
     models.sort((a, b) => a.release !== b.release ? (a.release < b.release ? 1 : -1) : a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
-    if (models.length > 0) providers.push({ id, name: providerName ?? id, models: models.map(({ id: modelId, name }) => ({ id: modelId, name })) });
+    if (models.length > 0) providers.push({ id, name: providerName ?? id, models: models.map(({ id: modelId, name, variants }) => variants.length > 0 ? { id: modelId, name, variants } : { id: modelId, name }) });
   }
   providers.sort((a, b) => (a.id === "opencode") !== (b.id === "opencode") ? (a.id === "opencode" ? -1 : 1) : a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
   return providers;
@@ -406,6 +415,15 @@ export function footerNames(footer: string, name: string, provider: string): boo
   return rest.length > 0 && !rest.includes(" · ") && provider.startsWith(rest);
 }
 
+/** Whether a footer is the start of a listed model's name and provider as the footer draws them: a pane's edge cut it. */
+export function cutListedModel(footer: string, providers: readonly OpencodeProvider[]): boolean {
+  const words = collapse(footer);
+  return providers.some((provider) => provider.models.some((model) => {
+    const drawn = `${collapse(model.name)} ${collapse(provider.name)}`;
+    return drawn.length > words.length && drawn.startsWith(words);
+  }));
+}
+
 /** How a model is told apart on the screen: its name and its provider's, as the TUI draws them. */
 const shownAs = (name: string, provider: string): string => `${collapse(name)}\0${collapse(provider)}`;
 
@@ -426,25 +444,30 @@ export const shownOnce = (providers: readonly OpencodeProvider[], name: string, 
  * The model the footer names, the longest name and provider when several fit; null when none does,
  * when two fit equally, or when the one that fits shares its name and provider with another model.
  */
-export function footerModel(screen: string, providers: readonly OpencodeProvider[]): { provider_id: string; model_id: string } | null {
+export function footerModel(screen: string, providers: readonly OpencodeProvider[]): { provider_id: string; model_id: string; variant?: string } | null {
   const footer = promptFooter(screen);
   if (!footer) return null;
   const counts = shownCounts(providers);
-  let best: { provider_id: string; model_id: string; key: string; length: number; whole: boolean }[] = [];
+  let best: { provider_id: string; model_id: string; key: string; length: number; whole: boolean; variant: string | null }[] = [];
   for (const provider of providers) {
     for (const model of provider.models) {
       if (!footerNames(footer, model.name, provider.name)) continue;
       const rest = footer.slice(model.name.length + 1);
       const whole = rest === provider.name || rest.startsWith(`${provider.name} · `);
       const length = model.name.length + provider.name.length;
-      const found = { provider_id: provider.id, model_id: model.id, key: shownAs(model.name, provider.name), length, whole };
+      // the reasoning level the footer draws after the provider's name (` · high`), when it draws one and
+      // the model offers it: a level the pane's edge cut (`· hi`) is not one, so no level is read
+      const drawn = rest.startsWith(`${provider.name} · `) ? rest.slice(provider.name.length + 3).trim() || null : null;
+      const variant = drawn !== null && model.variants?.includes(drawn) ? drawn : null;
+      const found = { provider_id: provider.id, model_id: model.id, key: shownAs(model.name, provider.name), length, whole, variant };
       const top = best[0];
       if (top === undefined || (whole && !top.whole) || (whole === top.whole && length > top.length)) best = [found];
       else if (whole === top.whole && length === top.length) best.push(found);
     }
   }
   if (best.length !== 1 || counts.get(best[0]!.key) !== 1) return null;
-  return { provider_id: best[0]!.provider_id, model_id: best[0]!.model_id };
+  const { provider_id, model_id, variant } = best[0]!;
+  return variant === null ? { provider_id, model_id } : { provider_id, model_id, variant };
 }
 
 /**
@@ -804,7 +827,12 @@ export async function handleOpencodeModelRequest(request: Request, url: URL, pat
       const providers = await opencodeModelCatalog();
       if (providers === null) return jsonResponse(NONE);
       const screen = await paneRead({ paneId, source: "visible", format: "text", timeoutMs: READ_MS }).then((read) => read.text, () => null);
-      return jsonResponse({ available: true, providers, current: screen === null ? null : footerModel(screen, providers) } satisfies OpencodeModelCatalog);
+      const current = screen === null ? null : footerModel(screen, providers);
+      const words = screen === null ? null : promptFooter(screen);
+      // "unmatched" only when the footer names a model the list lacks: then the pill must not keep the last
+      // one read. A footer a narrow pane cut inside a listed model's name and provider is only unreadable
+      const footer = current !== null ? "model" : words && !cutListedModel(words, providers) ? "unmatched" : "unreadable";
+      return jsonResponse({ available: true, providers, current, footer } satisfies OpencodeModelCatalog);
     } catch (error) {
       return errorResponse(error);
     }
@@ -837,7 +865,13 @@ export async function handleOpencodeModelRequest(request: Request, url: URL, pat
         if (resolveAgent(pane).agent !== "opencode") return failure("not_opencode");
         if (pane.agent_status === "working" || pane.agent_status === "blocked") return failure("busy");
         const result = await driveModelDialog((options.deps ?? paneDeps)(paneId), { name: model.name, provider: provider.name }, OPENCODE_MODEL_DRIVE_MS, request.signal);
-        if (!result.ok) return failure(result.code, result.message, result.dialog_left_open ? { dialog_left_open: true } : {});
+        if (!result.ok) {
+          // one line per switch that failed or was refused, so a refusal, a failed drive and a switch the footer
+          // did not confirm can be told apart: the code and the drive's own words (model and provider names,
+          // what the footer showed), never a draft
+          console.warn(`OpenCode model switch for ${paneId} failed or was refused: ${result.code}${result.dialog_left_open ? " (dialog left open)" : ""}: ${result.message}`);
+          return failure(result.code, result.message, result.dialog_left_open ? { dialog_left_open: true } : {});
+        }
         return jsonResponse({ ok: true, model: { provider_id: provider.id, model_id: model.id }, ...(result.dialog_left_open ? { dialog_left_open: true } : {}) });
       });
     } catch (error) {

@@ -15,6 +15,9 @@ export type Switch = { kind: "idle" } | { kind: "switching"; name: string } | { 
 /** The failures that only a hand in the terminal can get past: the chip offers the terminal for them. */
 const TERMINAL_FAILURES = new Set(["not_ready", "pane_error", "dialog_not_opened", "model_not_found", "not_confirmed", "timeout", "dialog_open"]);
 
+/** the model the TUI footer names, for the composer's pill: its id, its name and the reasoning level it shows (null: none) */
+export interface TuiModel { id: string; name: string; variant: string | null }
+
 /**
  * The model of an OpenCode 1.x pane, as a chip in the composer's row: it names the model the TUI's
  * footer shows and opens a list of the models OpenCode offers, grouped by provider, to search and
@@ -23,11 +26,16 @@ const TERMINAL_FAILURES = new Set(["not_ready", "pane_error", "dialog_not_opened
  * not be done there is said, with the terminal one tap away. Drawn only while the bridge lists the
  * pane's models (OpenCode's 1.x HTTP source is configured, server/opencode-model.ts).
  */
-export function OpencodeModelPicker({ paneId, busy, disabled, onOpenTerminal, initial }: {
+/** how often the shown model is read again, for a pick made in the terminal */
+const REREAD_MS = 20_000;
+
+export function OpencodeModelPicker({ paneId, busy, disabled, onOpenTerminal, onCurrent, initial }: {
   paneId: string;
   busy: boolean;
   disabled: boolean;
   onOpenTerminal?: (() => void) | undefined;
+  /** the model the TUI's footer names now (its id, name and reasoning level), or null once the pane's models are no longer listed: the composer's pill draws it at once, not after the next reply; a read that cannot see the footer's model reports nothing, so the last one stays; a footer naming a model the list lacks reports null */
+  onCurrent?: ((model: TuiModel | null) => void) | undefined;
   /** what the first render starts from, before any read (a test renders it without effects) */
   initial?: { catalog?: OpencodeModelCatalog; open?: boolean; query?: string; state?: Switch };
 }) {
@@ -45,12 +53,17 @@ export function OpencodeModelPicker({ paneId, busy, disabled, onOpenTerminal, in
   const id = useId();
   usePhoneSheetBack(() => setOpen(false), open);
 
-  // read when the pane shows, each time the list opens (the model may have changed in the terminal), and after a pick
+  // read when the pane shows, each time the list opens (the model may have changed in the terminal), after a pick,
+  // when a turn starts or ends, and every REREAD_MS while the page is shown: the composer's pill draws the model it names
   useEffect(() => {
     let alive = true;
     fetchPaneOpencodeModels(paneId).then((found) => { if (alive) setCatalog(found); }, () => undefined);
     return () => { alive = false; };
-  }, [paneId, open, reload, fetchPaneOpencodeModels]);
+  }, [paneId, open, reload, busy, fetchPaneOpencodeModels]);
+  useEffect(() => {
+    const timer = window.setInterval(() => { if (document.visibilityState === "visible") setReload((count) => count + 1); }, REREAD_MS);
+    return () => window.clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     if (!open) return;
@@ -90,6 +103,22 @@ export function OpencodeModelPicker({ paneId, busy, disabled, onOpenTerminal, in
     provider,
     models: provider.models.filter((model) => opencodeModelMatches(query, provider, model)),
   })).filter((group) => group.models.length > 0), [catalog, query]);
+
+  const shownName = catalog === null || !catalog.available ? null : opencodeModelName(catalog, catalog.current);
+  const shownId = catalog?.available && catalog.current ? `${catalog.current.provider_id}/${catalog.current.model_id}` : null;
+  const shownVariant = catalog?.available ? catalog.current?.variant ?? null : null;
+  const available = catalog === null ? null : catalog.available;
+  // a footer that names a model the list lacks or cannot tell apart: the last one read is not the TUI's now
+  const unmatched = catalog?.available === true && catalog.current === null && catalog.footer === "unmatched";
+  // a read that could not see the footer's model (the footer covered by a prompt, mid-switch, a slow read, or
+  // an older bridge that does not say) keeps the last one shown, so the pill does not flip to the reply's model
+  // and back; a footer naming a model the list lacks, or a list no longer available, clears it
+  useEffect(() => {
+    if (available === null) return;
+    if (!available || unmatched) onCurrent?.(null);
+    else if (shownName !== null && shownId !== null) onCurrent?.({ id: shownId, name: shownName, variant: shownVariant });
+  }, [onCurrent, available, unmatched, shownName, shownId, shownVariant]);
+  useEffect(() => () => onCurrent?.(null), [onCurrent]);
 
   if (catalog === null || !catalog.available) return null;
 
