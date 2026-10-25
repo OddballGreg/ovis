@@ -5,7 +5,7 @@ import "./TerminalInput.css";
 import { readTerminalDraft, writeTerminalDraft, TERMINAL_LINE_LIMIT, subscribeTerminalDraft, terminalDraftSending, setTerminalDraftSending, acknowledgeTerminalDraft } from "../lib/terminalDraft.ts";
 
 import { useT } from "../lib/i18n.ts";
-import { fieldKeyChord, heldChord, NO_STICKY_MODIFIERS, type StickyModifiers } from "../lib/keys.ts";
+import { composedChordLetter, fieldKeyChord, hasModifiers, heldChord, NO_STICKY_MODIFIERS, type StickyModifiers } from "../lib/keys.ts";
 import { useSettings } from "../lib/settings.ts";
 import { isAppShortcut, isMacPlatform } from "../lib/shortcuts.ts";
 import { MicButton, VoiceRecordingPill, useDictation } from "./VoiceInput.tsx";
@@ -72,13 +72,28 @@ export function TerminalInput({ owner, active = true, connected, onSend, onEnter
   heldRef.current = modifiers;
   const keyRef = useRef(onKey);
   keyRef.current = onKey;
-  /** the open composition: begun on nothing (a word typed afresh, not one picked up again), and the line before it */
-  const typedComposition = useRef<{ fresh: boolean; value: string; start: number; end: number } | null>(null);
-  // a soft keyboard's letter arrives without a keydown, as insertText: React's onBeforeInput is a
-  // keypress polyfill, so the native event is the one to cancel
+  /** the line and its caret as the open composition began (null with a selection): the one letter
+   * a keyboard adds to it is the chord */
+  const compositionBase = useRef<{ value: string; caret: number } | null>(null);
+
+  const [note, setNote] = useState<string | null>(null);
+  const sending = useSyncExternalStore(subscribeTerminalDraft, () => terminalDraftSending(owner));
+  const box = useRef<HTMLTextAreaElement>(null);
+  const textRef = useRef(text);
+  textRef.current = text;
+
+  /** The letter a composition begun on `base` added to the line, if that is a chord under the held modifiers. */
+  const composedLetter = useCallback((base: { value: string; caret: number } | null, data: string): string | null => {
+    const element = box.current;
+    if (base === null || element === null) return null;
+    return composedChordLetter(base.value, base.caret, element.value, data, heldRef.current);
+  }, []);
+
   useEffect(() => {
     const element = box.current;
     if (!element) return;
+    // a soft keyboard's letter arrives without a keydown, as insertText: React's onBeforeInput is a
+    // keypress polyfill, so the native event is the one to cancel
     const onBeforeInput = (event: InputEvent): void => {
       const send = keyRef.current;
       if (!send || event.inputType !== "insertText" || event.data === null || event.isComposing || composing.current) return;
@@ -86,15 +101,31 @@ export function TerminalInput({ owner, active = true, connected, onSend, onEnter
       event.preventDefault();
       send(event.data, heldRef.current);
     };
+    // Gboard keeps the word it composes open until a space, and a composition's input cannot be
+    // cancelled, so only a commit hands the letter over. Under a held modifier, once the
+    // composition is the line plus that one letter, a focus change commits it (Chrome ends a
+    // composition on blur and fires compositionend there), as a Send tapped mid-word does. With no
+    // modifier held, or any other composition, the field is left alone.
+    const onInput = (event: Event): void => {
+      const { inputType, data } = event as InputEvent;
+      if (!keyRef.current || inputType !== "insertCompositionText" || !composing.current || !hasModifiers(heldRef.current)) return;
+      const base = compositionBase.current;
+      if (composedLetter(base, data ?? "") === null) return;
+      // after the keyboard's own input is done; still the same letter, still composing, still focused
+      setTimeout(() => {
+        if (!composing.current || compositionBase.current !== base || document.activeElement !== element || composedLetter(base, data ?? "") === null) return;
+        element.blur();
+        element.focus({ preventScroll: true });
+      });
+    };
     element.addEventListener("beforeinput", onBeforeInput);
-    return () => element.removeEventListener("beforeinput", onBeforeInput);
-  }, []);
+    element.addEventListener("input", onInput);
+    return () => {
+      element.removeEventListener("beforeinput", onBeforeInput);
+      element.removeEventListener("input", onInput);
+    };
+  }, [composedLetter]);
 
-  const [note, setNote] = useState<string | null>(null);
-  const sending = useSyncExternalStore(subscribeTerminalDraft, () => terminalDraftSending(owner));
-  const box = useRef<HTMLTextAreaElement>(null);
-  const textRef = useRef(text);
-  textRef.current = text;
   const { settings } = useSettings();
   const dictation = useDictation({
     mode: "terminal",
@@ -215,7 +246,7 @@ export function TerminalInput({ owner, active = true, connected, onSend, onEnter
     // browser's print dialog), goes to the pane as a chord; the field keeps its editing keys
     const native = event.nativeEvent;
     if (onKey && !composing.current && !isAppShortcut(native, settings.shortcutOverrides)) {
-      const typed = fieldKeyChord(native, modifiers, isMacPlatform());
+      const typed = fieldKeyChord(native, modifiers, isMacPlatform(), event.currentTarget.value.length === 0);
       if (typed !== null) {
         event.preventDefault();
         onKey(typed.key, typed.modifiers);
@@ -229,34 +260,38 @@ export function TerminalInput({ owner, active = true, connected, onSend, onEnter
     send();
   };
 
-  // Gboard composes every word, a lone letter too, and keeps it open until a space: under a held
-  // modifier that letter is a chord now, so a focus change commits it at once (Chrome ends a
-  // composition on blur and fires compositionend there), as a Send tapped mid-word does
-  const commitTypedLetter = (data: string): void => {
-    const typed = typedComposition.current;
-    const element = box.current;
-    if (!onKey || typed === null || !typed.fresh || heldChord(data, heldRef.current, "committed") === null) return;
-    if (element === null || document.activeElement !== element) return;
-    element.blur();
-    element.focus({ preventScroll: true });
+  /** Takes the chord's letter back out of the line with the field's own delete, which keeps it on the undo stack where the browser allows. */
+  const removeLetter = (element: HTMLTextAreaElement, at: number): void => {
+    element.setSelectionRange(at, at + 1);
+    const deleted = document.activeElement === element && document.execCommand("delete");
+    if (!deleted) element.setRangeText("", at, at + 1, "end");
+    element.setSelectionRange(at, at);
+    // the draft store, not the next render: a Send waiting on this commit reads it next
+    setText(element.value);
   };
 
-  /** A composition that committed one character under a held modifier: the pane gets the chord, the line keeps what it held. */
-  const takeTypedLetter = (data: string): void => {
-    const typed = typedComposition.current;
-    typedComposition.current = null;
-    if (!onKey || typed === null || !typed.fresh || heldChord(data, heldRef.current, "committed") === null) return;
-    onKey(data, heldRef.current);
-    const restore = (): void => {
-      setText(typed.value);
+  /** A composition that committed the line plus one letter under a held modifier: the pane gets the chord, the line loses the letter. */
+  const takeComposedLetter = (data: string): void => {
+    const base = compositionBase.current;
+    compositionBase.current = null;
+    if (!onKey || base === null) return;
+    let composed: string | null = null;
+    const take = (): void => {
       const element = box.current;
-      if (element === null) return;
-      element.value = typed.value;
-      element.setSelectionRange(typed.start, typed.end);
+      // a new composition owns the line now
+      if (element === null || composing.current) return;
+      if (composed === null) {
+        const letter = composedLetter(base, data);
+        if (letter === null) return;
+        composed = element.value;
+        keyRef.current?.(letter, heldRef.current);
+      }
+      // only the line as it committed loses the letter: text typed since stays as it is
+      if (element.value === composed) removeLetter(element, base.caret);
     };
-    restore();
-    // WebKit updates the value with an input event after compositionend: put the line back after it too
-    setTimeout(restore);
+    take();
+    // WebKit updates the value with an input event after compositionend: look again after it
+    setTimeout(take);
   };
 
   // wrapped lines count too: a dictated sentence is one long line, and its end must stay readable
@@ -286,13 +321,12 @@ export function TerminalInput({ owner, active = true, connected, onSend, onEnter
           composing.current = true;
           onComposing?.(true);
           const element = event.currentTarget;
-          typedComposition.current = { fresh: event.data === "", value: element.value, start: element.selectionStart, end: element.selectionEnd };
+          compositionBase.current = element.selectionStart === element.selectionEnd ? { value: element.value, caret: element.selectionStart } : null;
         }}
-        onCompositionUpdate={(event) => commitTypedLetter(event.data)}
         onCompositionEnd={(event) => {
           composing.current = false;
           onComposing?.(false);
-          takeTypedLetter(event.data);
+          takeComposedLetter(event.data);
           const current = attempt.current;
           if (current === null) return;
           if (current.timer !== null) clearTimeout(current.timer);

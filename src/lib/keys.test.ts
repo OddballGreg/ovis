@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { altSequence, clipboardKey, fieldKeyChord, heldChord, isPrintKey, physicalKey, controlCode, ctrlEnterSequence, mirroredCtrlEnterKey, isPrintable, keySequence, modifyOtherKeysLevel, sanitizeKeyBarExtras, navigationSequence, terminalChord, keyFromData } from "./keys.ts";
+import { altSequence, clipboardKey, composedChordLetter, fieldKeyChord, heldChord, isPrintKey, physicalKey, controlCode, ctrlEnterSequence, mirroredCtrlEnterKey, isPrintable, keySequence, modifyOtherKeysLevel, sanitizeKeyBarExtras, navigationSequence, terminalChord, keyFromData } from "./keys.ts";
 
 describe("clipboardKey", () => {
   it("recognizes native Ctrl+C/V on Korean and Russian layouts without replacing Latin layout letters", () => {
@@ -53,6 +53,30 @@ describe("heldChord", () => {
   });
 });
 
+describe("composedChordLetter", () => {
+  it("finds the one letter Gboard adds to the word at the caret", () => {
+    // Gboard composes the word the caret is in: after "ab", a typed p commits "abp"
+    expect(composedChordLetter("ab", 2, "abp", "abp", CTRL)).toBe("p");
+    expect(composedChordLetter("", 0, "p", "p", CTRL)).toBe("p");
+    expect(composedChordLetter("ab cd", 2, "abp cd", "abp", CTRL)).toBe("p");
+    expect(composedChordLetter("git ", 4, "git /", "/", CTRL)).toBe("/");
+  });
+  it("leaves the letter as text with no modifier held", () => {
+    expect(composedChordLetter("ab", 2, "abp", "abp", NONE)).toBeNull();
+  });
+  it("keeps syllables, converted and revised words, and more than one letter as text", () => {
+    expect(composedChordLetter("ab", 2, "ab한", "한", CTRL)).toBeNull();
+    expect(composedChordLetter("ab", 2, "abpq", "abpq", CTRL)).toBeNull();
+    expect(composedChordLetter("ab", 2, "Abp", "Abp", CTRL)).toBeNull();
+    expect(composedChordLetter("ab", 2, "ab ", "ab ", CTRL)).toBeNull();
+    expect(composedChordLetter("ab", 2, "ab", "ab", CTRL)).toBeNull();
+    // the field gained a letter the composition does not end with: not the keyboard's typed key
+    expect(composedChordLetter("ab", 2, "abp", "ab", CTRL)).toBeNull();
+    // a letter away from the caret is a revision, not a key
+    expect(composedChordLetter("ab", 2, "pab", "pab", CTRL)).toBeNull();
+  });
+});
+
 describe("fieldKeyChord", () => {
   it("sends a hardware Ctrl+letter that is not the field's own editing key", () => {
     for (const letter of ["p", "r", "l", "k", "e", "u", "w", "b", "f"]) {
@@ -64,6 +88,18 @@ describe("fieldKeyChord", () => {
   it("leaves select all, the clipboard, undo and redo to the field", () => {
     for (const letter of ["a", "c", "v", "x", "y", "z"]) expect(fieldKeyChord(down(letter, { ctrlKey: true }), NONE, false)).toBeNull();
     expect(fieldKeyChord(down("ㅍ", { code: "KeyV", ctrlKey: true }), NONE, false)).toBeNull();
+  });
+  it("leaves the line's Backspace, Tab, newline and Enter letters to the field, and Ctrl+D and Ctrl+S unless the line is empty", () => {
+    for (const letter of ["h", "i", "j", "m"]) {
+      expect(fieldKeyChord(down(letter, { ctrlKey: true }), NONE, false)).toBeNull();
+      expect(fieldKeyChord(down(letter, { ctrlKey: true }), NONE, false, true)).toBeNull();
+    }
+    for (const letter of ["d", "s"]) {
+      expect(fieldKeyChord(down(letter, { ctrlKey: true }), NONE, false)).toBeNull();
+      expect(fieldKeyChord(down(letter, { ctrlKey: true }), NONE, false, true)).toEqual({ key: letter, modifiers: CTRL });
+    }
+    // key-bar Ctrl armed the chord: all of them reach the pane
+    for (const letter of ["h", "i", "j", "m", "d", "s"]) expect(fieldKeyChord(down(letter), CTRL, false)).toEqual({ key: letter, modifiers: CTRL });
   });
   it("leaves named keys, plain typing, IME keys, Cmd, AltGr and Ctrl+Shift to the field", () => {
     for (const key of ["Backspace", "Enter", "ArrowLeft", "Delete", "Home"]) expect(fieldKeyChord(down(key, { ctrlKey: true }), NONE, false)).toBeNull();

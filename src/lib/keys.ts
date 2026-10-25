@@ -104,6 +104,21 @@ export function heldChord(text: string, modifiers: StickyModifiers, state: "type
   return terminalChord(text, modifiers);
 }
 
+/**
+ * The one character a composition added to a text field, when that is a chord under the key bar's
+ * held modifiers, or null. `before` and `caret` are the field as the composition began, `after` the
+ * field as it commits. Gboard composes the word at the caret (with the caret after "ab" a typed p
+ * is the composition "abp"), so the composition's text says little: the field's own text must be
+ * the line before it plus exactly one printable ASCII character at the caret, and the composition
+ * must end with it. A syllable, a converted word or a revision of the word stays text.
+ */
+export function composedChordLetter(before: string, caret: number, after: string, data: string, modifiers: StickyModifiers): string | null {
+  if (after.length !== before.length + 1) return null;
+  const letter = after.charAt(caret);
+  if (after !== before.slice(0, caret) + letter + before.slice(caret) || !data.endsWith(letter)) return null;
+  return heldChord(letter, modifiers, "committed") === null ? null : letter;
+}
+
 /** What a key on a text field's keydown says about itself, as KeyboardEvent has it. */
 export interface FieldKeyLike {
   key: string;
@@ -118,6 +133,10 @@ export interface FieldKeyLike {
 
 /** Ctrl+letter chords a text field keeps: select all, the clipboard, undo and redo. */
 const FIELD_CONTROL_LETTERS = /^[acvxyz]$/;
+/** Ctrl+letters a terminal reads as the line's own keys (Backspace, Tab, newline, Enter): the field types them itself. */
+const FIELD_LINE_LETTERS = /^[hijm]$/;
+/** Ctrl+D (end of input) and Ctrl+S (stop output) act on a whole line: only an empty one hands them to the pane. */
+const FIELD_EMPTY_LINE_LETTERS = /^[ds]$/;
 
 /**
  * A keydown in a text field that writes for the terminal (the input line) that the terminal takes
@@ -125,10 +144,13 @@ const FIELD_CONTROL_LETTERS = /^[acvxyz]$/;
  * with the hardware ones, or a hardware Ctrl+letter (Ctrl+P, Ctrl+R) that would otherwise print
  * the page or reload it. Null leaves the key to the field: named keys (Enter, Backspace, arrows,
  * Ctrl+Backspace), an IME's keys, Cmd chords, Ctrl+Alt (AltGr), Ctrl+Shift (app shortcuts) and
- * select all, the clipboard, undo and redo. On a Mac, where Ctrl+letter is the field's own Emacs
- * editing (Ctrl+A, Ctrl+E, Ctrl+K) and Cmd prints, a hardware Ctrl+letter stays the field's.
+ * select all, the clipboard, undo and redo. A hardware Ctrl+H, I, J or M is the line's Backspace,
+ * Tab, newline or Enter and stays the field's too, and Ctrl+D and Ctrl+S do unless the line is
+ * empty (`lineEmpty`); under key-bar Ctrl they are chords, since the user armed Ctrl for one. On a
+ * Mac, where Ctrl+letter is the field's own Emacs editing (Ctrl+A, Ctrl+E, Ctrl+K) and Cmd prints,
+ * a hardware Ctrl+letter stays the field's.
  */
-export function fieldKeyChord(event: FieldKeyLike, held: StickyModifiers, mac: boolean): { key: string; modifiers: StickyModifiers } | null {
+export function fieldKeyChord(event: FieldKeyLike, held: StickyModifiers, mac: boolean, lineEmpty = false): { key: string; modifiers: StickyModifiers } | null {
   if (event.isComposing || event.keyCode === 229 || event.metaKey) return null;
   const letter = clipboardKey(event.key, event.code);
   if (hasModifiers(held)) {
@@ -138,6 +160,7 @@ export function fieldKeyChord(event: FieldKeyLike, held: StickyModifiers, mac: b
     return terminalChord(key, modifiers) === null ? null : { key, modifiers };
   }
   if (mac || !event.ctrlKey || event.altKey || event.shiftKey || !/^[a-z]$/.test(letter) || FIELD_CONTROL_LETTERS.test(letter)) return null;
+  if (FIELD_LINE_LETTERS.test(letter) || (!lineEmpty && FIELD_EMPTY_LINE_LETTERS.test(letter))) return null;
   return { key: letter, modifiers: { ctrl: true, alt: false, shift: false } };
 }
 
