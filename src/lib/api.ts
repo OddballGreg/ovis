@@ -6,6 +6,8 @@ import { machinePath, type BridgeHealth, type HerdrIdentity, type Machine, type 
 import type {
   WorkspaceMoved,
   AgentKind,
+  OpencodeModelCatalog,
+  OpencodeModelRequest,
   AgentRenameRequest,
   CommandOutcome,
   ConversationResponse,
@@ -201,13 +203,16 @@ export class ApiError extends Error {
   readonly code: string | null;
   /** the server's own words, without the URL and status the message starts with */
   readonly detail: string;
+  /** the server left a dialog open in the pane on purpose or could not close it (error.dialog_left_open) */
+  readonly dialogLeftOpen: boolean;
 
-  constructor(url: string, status: number, detail: string, code: string | null) {
+  constructor(url: string, status: number, detail: string, code: string | null, dialogLeftOpen = false) {
     super(`${url} failed (${status}): ${detail}`);
     this.name = "ApiError";
     this.status = status;
     this.code = code;
     this.detail = detail;
+    this.dialogLeftOpen = dialogLeftOpen;
   }
 }
 
@@ -230,15 +235,17 @@ const UNUSABLE_ANSWER: Readonly<Record<string, () => string>> = {
 async function errorFrom(url: string, response: Response): Promise<ApiError> {
   let detail = response.statusText;
   let code: string | null = null;
+  let dialogLeftOpen = false;
   try {
-    const body = (await response.json()) as { error?: { code?: string; message?: string } };
+    const body = (await response.json()) as { error?: { code?: string; message?: string; dialog_left_open?: unknown } };
     if (body.error?.message) detail = body.error.message;
     if (body.error?.code) code = body.error.code;
+    dialogLeftOpen = body.error?.dialog_left_open === true;
   } catch {
     /* non-JSON error body */
   }
   if (code !== null && Object.hasOwn(UNUSABLE_ANSWER, code)) detail = UNUSABLE_ANSWER[code]!();
-  return new ApiError(url, response.status, detail, code);
+  return new ApiError(url, response.status, detail, code, dialogLeftOpen);
 }
 
 async function getJson<T>(url: string, init?: RequestInit): Promise<T> {
@@ -809,6 +816,34 @@ export async function fetchPaneOmoActivity(paneId: string, machineId = "local"):
 export async function fetchPanePlan(paneId: string, machineId = "local"): Promise<{ steps: PlanStep[] | null; serverTime: string | null }> {
   const answer = await getJson<Partial<PanePlan>>(machinePath(machineId, `pane/plan?pane_id=${encodeURIComponent(paneId)}`));
   return { steps: answer.plan?.steps ?? null, serverTime: answer.server_time ?? null };
+}
+
+/** An answer from a bridge from before the model routes, or one that cannot list OpenCode's models. */
+const NO_MODELS: OpencodeModelCatalog = { available: false, providers: [], current: null };
+
+/** GET /api/pane/opencode-models: the models an OpenCode 1.x pane can switch to and the one it uses; none from an older bridge. */
+export async function fetchPaneOpencodeModels(paneId: string, machineId = "local"): Promise<OpencodeModelCatalog> {
+  try {
+    return await getJson<OpencodeModelCatalog>(machinePath(machineId, `pane/opencode-models?pane_id=${encodeURIComponent(paneId)}`));
+  } catch (error) {
+    if (routeMissing(error)) return NO_MODELS;
+    throw error;
+  }
+}
+
+/** GET /api/agent/models?agent=: the models a new session of `agent` may start with (`--model`); none from an older bridge. */
+export async function fetchAgentModels(agent: string, machineId = "local"): Promise<OpencodeModelCatalog> {
+  try {
+    return await getJson<OpencodeModelCatalog>(`${machinePath(machineId, "agent/models")}?${new URLSearchParams({ agent }).toString()}`);
+  } catch (error) {
+    if (routeMissing(error)) return NO_MODELS;
+    throw error;
+  }
+}
+
+/** POST /api/pane/opencode-model: picks the model in the pane's OpenCode TUI; an ApiError's `code` says why it did not (OpencodeModelFailure). */
+export async function selectPaneOpencodeModel(request: OpencodeModelRequest, machineId = "local"): Promise<void> {
+  await sendJson(machinePath(machineId, "pane/opencode-model"), "POST", request);
 }
 
 /** GET /api/pane/files: paths under the pane's cwd matching `query`, for @-mentions. */

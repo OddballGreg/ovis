@@ -499,6 +499,17 @@ export const KO: Record<string, string> = {
   "Starting {agent}… up to 60s": "{agent} 시작 중… 최대 60초",
   "Starting shell…": "셸 시작 중…",
   "Directory not found": "폴더를 찾을 수 없습니다",
+  // the composer's OpenCode model chip (components/OpencodeModelPicker.tsx)
+  "Choose the OpenCode model": "OpenCode 모델 선택",
+  "Model: {model}": "모델: {model}",
+  "Search models": "모델 검색",
+  "Switching to {model}…": "{model}(으)로 바꾸는 중…",
+  "No models match": "일치하는 모델이 없습니다",
+  "In use": "사용 중",
+  "OpenCode is working. Switch the model once it is idle.": "OpenCode가 작업 중입니다. 작업이 끝난 뒤 모델을 바꾸세요.",
+  "A dialog is open in OpenCode. Close it in the terminal first.": "OpenCode에 대화상자가 열려 있습니다. 먼저 터미널에서 닫으세요.",
+  "A dialog was left open in OpenCode.": "OpenCode에 대화상자가 열린 채로 남았습니다.",
+  "Couldn't switch the model in OpenCode. Choose it in the terminal with ctrl+x m.": "OpenCode에서 모델을 바꾸지 못했습니다. 터미널에서 ctrl+x m으로 고르세요.",
   // the launch's model, effort, first message and skills (lib/agentLaunchMode.ts, lib/newSession.ts)
   "model, effort": "모델, 노력 수준",
   "Model": "모델",

@@ -23,6 +23,17 @@ export const CODEX_EFFORTS = ["low", "medium", "high", "xhigh", "max", "ultra"] 
  */
 export const MODEL_NAME = /^[A-Za-z0-9][\w.:/-]*(?:\[[A-Za-z0-9]+\])?$/;
 
+/**
+ * OpenCode 1.x's `--model`: `provider/model`, a provider id that never reads as a flag, then the
+ * model's id as its server lists it, which may hold `@`, `:` or more slashes (a Vertex id such as
+ * `claude-opus-4@20250514`), but no space, control or format character (bidi overrides, zero-width
+ * marks), as the model names typed into a pane hold none (server/opencode-model.ts typeableName).
+ */
+export const OPENCODE_MODEL_NAME = /^[A-Za-z0-9][\w.-]*\/[^\s\p{Cc}\p{Cf}]+$/u;
+
+/** The rule a model name for `kind`'s `--model` follows. */
+export const modelNameRule = (kind: string): RegExp => kind === "opencode" ? OPENCODE_MODEL_NAME : MODEL_NAME;
+
 /** the most a first message (and a queued chat message, server/core/composer.ts pendingText) may hold */
 export const MAX_FIRST_MESSAGE_CHARS = 20_000;
 
@@ -46,9 +57,11 @@ export function firstMessageFault(value: unknown, agent: unknown): string | null
 
 type LaunchFlag = "model" | "effort" | "config";
 /** the flags whose values are checked, by agent: Codex's `-c`/`--config` sets `model` and `model_reasoning_effort` too */
-const LAUNCH_FLAGS: Record<"claude" | "codex", Record<string, LaunchFlag>> = {
+const LAUNCH_FLAGS: Record<"claude" | "codex" | "opencode", Record<string, LaunchFlag>> = {
   claude: { "--model": "model", "--effort": "effort" },
   codex: { "--model": "model", "-m": "model", "--config": "config", "-c": "config" },
+  // OpenCode 1.x: "-m, --model  model to use in the format of provider/model" (`opencode --help`, 1.19)
+  opencode: { "--model": "model", "-m": "model" },
 };
 
 /**
@@ -75,13 +88,13 @@ const configValue = (value: string): string => {
 /**
  * What is wrong with an agent's launch arguments, in the API's words; null when they can be passed. No
  * argument may hold a control character. Claude Code's and Codex's model and effort flags take only
- * the values the dialog offers, in every spelling their CLIs accept, and Codex's prompt after `--`
+ * the values the dialog offers, in every spelling their CLIs accept (OpenCode's model flag too), and Codex's prompt after `--`
  * follows a first message's rules.
  */
 export function launchArgsFault(kind: string, args: readonly string[]): string | null {
   if (!args.every(argumentText)) return "agent.args must not contain control characters (a tab or a line break included)";
-  if (kind !== "claude" && kind !== "codex") return null;
-  const efforts: readonly string[] = kind === "claude" ? CLAUDE_EFFORTS : CODEX_EFFORTS;
+  if (kind !== "claude" && kind !== "codex" && kind !== "opencode") return null;
+  const efforts: readonly string[] = kind === "claude" ? CLAUDE_EFFORTS : kind === "codex" ? CODEX_EFFORTS : [];
   for (let at = 0; at < args.length; at++) {
     const arg = args[at]!;
     if (arg === "--") {
@@ -104,7 +117,7 @@ export function launchArgsFault(kind: string, args: readonly string[]): string |
       if (key === "model") model = setting;
       if (key === "model_reasoning_effort") effort = setting;
     }
-    if (model !== null && !MODEL_NAME.test(model)) return "agent.args --model must name one model";
+    if (model !== null && !modelNameRule(kind).test(model)) return "agent.args --model must name one model";
     if (effort !== null && !efforts.includes(effort)) {
       return kind === "claude" ? `agent.args --effort must be one of ${efforts.join(", ")}` : `agent.args model_reasoning_effort must be one of ${efforts.join(", ")}`;
     }

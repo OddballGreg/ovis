@@ -33,7 +33,9 @@ it("names a model and an effort for the agents whose CLI documents them, and a p
   expect(launchCapabilities("claude")).toEqual({ model: true, efforts: CLAUDE_EFFORTS, positionalPrompt: false });
   // clap takes everything after `--` as the PROMPT positional (codex -- logout started the TUI)
   expect(launchCapabilities("codex")).toEqual({ model: true, efforts: CODEX_EFFORTS, positionalPrompt: true });
-  for (const kind of ["omp", "pi", "gemini", "opencode", ""]) expect(launchCapabilities(kind)).toEqual({ model: false, efforts: [], positionalPrompt: false });
+  // OpenCode 1.x documents `-m, --model provider/model`, no effort and no prompt it is safe to pass
+  expect(launchCapabilities("opencode")).toEqual({ model: true, efforts: [], positionalPrompt: false });
+  for (const kind of ["omp", "pi", "gemini", ""]) expect(launchCapabilities(kind)).toEqual({ model: false, efforts: [], positionalPrompt: false });
   expect(modelSuggestions("claude")).toEqual(["sonnet", "opus", "haiku"]);
   expect(modelSuggestions("codex")).toEqual([]);
 });
@@ -48,6 +50,8 @@ it("puts the model, the effort and then the prompt after the mode, each in the a
   expect(launchAgent("codex", plain, { prompt: "$review-pr" })).toEqual({ kind: "codex", args: ["--", "$review-pr"] });
   // a message that names a subcommand or a flag is still the prompt behind the separator
   for (const prompt of ["logout", "update", "--help", "-p x"]) expect(launchArgs("codex", plain, { prompt })).toEqual(["--", prompt]);
+  // OpenCode's model is `provider/model`; its first message waits for the bridge
+  expect(launchArgs("opencode", plain, { model: "opencode-go/kimi-k3", prompt: "Fix it" })).toEqual(["--model", "opencode-go/kimi-k3"]);
   // nothing chosen adds nothing
   expect(launchArgs("codex", plain, { model: "  ", effort: "", prompt: "" })).toBeUndefined();
 });
@@ -58,6 +62,12 @@ it("refuses a choice the launch does not take, and a model that would read as a 
   expect(launchChoiceFault("omp", { model: "gpt-5" })).toBe("model");
   expect(launchChoiceFault("omp", { effort: "high" })).toBe("effort");
   expect(launchChoiceFault("codex", { effort: "ultracode" })).toBe("effort");
+  expect(launchChoiceFault("opencode", { effort: "high" })).toBe("effort");
+  // OpenCode's model is `provider/model`, a Vertex id's `@` included; Claude Code's aliases are not
+  expect(launchChoiceFault("opencode", { model: "google-vertex-anthropic/claude-opus-4@20250514" })).toBeNull();
+  expect(launchChoiceFault("opencode", { model: "opus" })).toBe("model");
+  expect(launchChoiceFault("opencode", { model: "-x/model" })).toBe("model");
+  expect(launchChoiceFault("claude", { model: "vertex/claude@1" })).toBe("model");
   expect(launchChoiceFault("claude", { model: "--dangerously-skip-permissions" })).toBe("model");
   expect(launchChoiceFault("claude", { model: "two words" })).toBe("model");
   expect(launchChoiceFault("", { prompt: "a shell takes none" })).toBe("prompt");

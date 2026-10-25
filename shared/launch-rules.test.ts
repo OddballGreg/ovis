@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 
-import { firstMessageFault, launchArgsFault, MODEL_NAME } from "./launch-rules.ts";
+import { firstMessageFault, launchArgsFault, MODEL_NAME, OPENCODE_MODEL_NAME } from "./launch-rules.ts";
 
 describe("an agent's launch arguments", () => {
   it("refuses a control character in any argument, a tab and a line break included", () => {
@@ -21,6 +21,13 @@ describe("an agent's launch arguments", () => {
     expect(launchArgsFault("claude", ["--effort", "ultra"])).toContain("--effort");
     expect(launchArgsFault("codex", ["-c", "model_reasoning_effort=ultra", "-m", "gpt-6.1"])).toBeNull();
     expect(launchArgsFault("codex", ["-c", "model_reasoning_effort=ultracode"])).toContain("model_reasoning_effort");
+    // OpenCode 1.x's model is `provider/model`, in either spelling
+    expect(launchArgsFault("opencode", ["--model", "opencode-go/kimi-k3.1-pro"])).toBeNull();
+    expect(launchArgsFault("opencode", ["-m", "two words"])).toContain("--model");
+    expect(launchArgsFault("opencode", ["--model=--help"])).toContain("--model");
+    // a Vertex id keeps its `@`; a bare name is no `provider/model`
+    expect(launchArgsFault("opencode", ["-m", "google-vertex-anthropic/claude-opus-4@20250514"])).toBeNull();
+    expect(launchArgsFault("opencode", ["--model", "opus"])).toContain("--model");
     // other agents' arguments are theirs: only control characters are refused there
     expect(launchArgsFault("omp", ["--model", "two words"])).toBeNull();
   });
@@ -55,6 +62,13 @@ describe("a model name", () => {
   it("is one word, with an optional bracketed variant such as Claude Code's [1m]", () => {
     for (const name of ["opus", "claude-opus-4-5", "opus[1m]", "sonnet[1m]", "gpt-6.1", "openrouter/qwen:free"]) expect(MODEL_NAME.test(name), name).toBeTrue();
     for (const name of ["--model", "two words", "opus[1m", "opus[]", "[1m]"]) expect(MODEL_NAME.test(name), name).toBeFalse();
+  });
+});
+
+describe("an OpenCode model name", () => {
+  it("is provider/model: a provider id that is no flag, then any id without a space or a control character", () => {
+    for (const name of ["opencode-go/kimi-k3.1-pro", "google-vertex-anthropic/claude-opus-4@20250514", "openrouter/qwen/qwen3:free", "my.provider/model.v2", "a/b"]) expect(OPENCODE_MODEL_NAME.test(name), name).toBeTrue();
+    for (const name of ["opus", "-x/model", "--model/x", "/model", "provider/", "pro vider/m", "provider/two words", "provider/m\u0085x", "provider/m\u001bx", "provider/m\u200bx", "provider/m\u202ex", "provider/m\ufeffx", "provider/m\u2028x", "pro@vider/m"]) expect(OPENCODE_MODEL_NAME.test(name), name).toBeFalse();
   });
 });
 

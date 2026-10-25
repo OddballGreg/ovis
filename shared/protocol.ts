@@ -231,6 +231,28 @@ export type { Machine, MachineEvent, MachineRoster, PaneTarget, SetupJob, SetupR
  *         known yet. server_time: that PC's clock, which the times are on)
  *  GET    /api/pane/plan?pane_id=       -> PanePlan (the plan the pane's Claude Code, Codex or OmO session
  *         keeps: its task list or checklist, read from the transcript; null when it keeps none)
+ *  GET    /api/pane/opencode-models?pane_id= -> OpencodeModelCatalog (the models an OpenCode 1.x pane can
+ *         switch to, from the OpenCode HTTP source's GET /config/providers, and the one its prompt
+ *         footer shows; available:false when that source is not configured or the pane is not OpenCode)
+ *  GET    /api/agent/models?agent=opencode -> OpencodeModelCatalog (the same list for a new session's
+ *         `--model`, without a pane: current is null)
+ *  POST   /api/pane/opencode-model { pane_id, provider_id, model_id } -> { ok: true, model }
+ *         (picks the model in the pane's OpenCode 1.x TUI through its own "Select model" dialog, as a
+ *         person would: ctrl+x m, the name typed, the row chosen, Enter; then reads the prompt footer
+ *         back, and once more a moment later for a variant list to close, with dialog_left_open: true
+ *         when Escape did not close it. An Enter that could not be written but whose pick the footer
+ *         then shows is a switch made. 409 busy / dialog_open (any dialog) / not_ready / aborted
+ *         before any key; 422 unknown_model (a name with a control or format character is not
+ *         listed) / ambiguous_model (another model has the same name and provider); 502 pane_error /
+ *         dialog_not_opened / model_not_found (also: more than one row reads as the model) /
+ *         not_confirmed / timeout after an Escape sent when a dialog is drawn or the screen cannot
+ *         be read, at most two in all counting one for a variant list (after a write that failed,
+ *         no Escape is sent until about a second after it, so its keys land in the dialog and not
+ *         the draft), with error.dialog_left_open: true when it did not close; an Enter that
+ *         failed and has not landed by then is a pane_error with no Escape at all, even when the
+ *         screen cannot be read (dialog_left_open: true), so a later Enter only picks the list's
+ *         highlighted row and never sends the draft; 503
+ *         unavailable; 403 read_only for a watching device)
  *  GET    /api/pane/files?pane_id=&q=&limit=  -> { files: string[] } (paths relative to the pane
  *         cwd matching q, for @-mentions; git ls-files when the cwd is a repo, bounded walk otherwise)
  *  GET    /api/workspace/diff/files?pane_id=&directory=&scope=&base=&head= -> RepoDiffFileList
@@ -652,6 +674,46 @@ export interface PanePlan {
   /** the PC's clock, which the times are on */
   server_time: string;
 }
+
+/** One model an OpenCode 1.x server offers (its GET /config/providers), as its TUI's model dialog names it. */
+export interface OpencodeModel {
+  /** the model's id within its provider: `--model <provider_id>/<id>` */
+  id: string;
+  /** the name the TUI's dialog and prompt footer show */
+  name: string;
+}
+
+/** One provider of an OpenCode 1.x server, with its models in the order the TUI's dialog lists them. */
+export interface OpencodeProvider {
+  id: string;
+  name: string;
+  models: OpencodeModel[];
+}
+
+/**
+ * GET /api/pane/opencode-models?pane_id= and GET /api/agent/models?agent=opencode: the models an
+ * OpenCode 1.x pane can switch to. `available` is false when the OpenCode HTTP source is not
+ * configured or does not answer, or the pane is not OpenCode; `current` is the model the pane's
+ * prompt footer shows, null when it shows none this list knows or one it cannot tell apart from
+ * another of the same name and provider (and always null without a pane).
+ */
+export interface OpencodeModelCatalog {
+  available: boolean;
+  providers: OpencodeProvider[];
+  current: { provider_id: string; model_id: string } | null;
+}
+
+/** POST /api/pane/opencode-model: switch the model of an OpenCode 1.x pane through its TUI's own dialog. */
+export interface OpencodeModelRequest {
+  pane_id: string;
+  provider_id: string;
+  model_id: string;
+}
+
+/** Why a model switch did not happen; `terminal`: what the user can still do in the terminal by hand. */
+export type OpencodeModelFailure =
+  | "unavailable" | "not_opencode" | "busy" | "dialog_open" | "not_ready" | "aborted" | "unknown_model" | "ambiguous_model"
+  | "pane_error" | "dialog_not_opened" | "model_not_found" | "not_confirmed" | "timeout";
 
 /** How far a pane's plan has got, for the sidebar: `current` names the step in progress. */
 export interface PlanSummary {
