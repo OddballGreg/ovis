@@ -5,7 +5,7 @@ import "./TerminalInput.css";
 import { readTerminalDraft, writeTerminalDraft, TERMINAL_LINE_LIMIT, subscribeTerminalDraft, terminalDraftSending, setTerminalDraftSending, acknowledgeTerminalDraft } from "../lib/terminalDraft.ts";
 
 import { useT } from "../lib/i18n.ts";
-import { composedChordLetter, fieldKeyChord, hasModifiers, heldChord, NO_STICKY_MODIFIERS, type StickyModifiers } from "../lib/keys.ts";
+import { composedChordLetter, fieldKeyChord, fieldLineKey, hasModifiers, heldChord, NO_STICKY_MODIFIERS, type StickyModifiers } from "../lib/keys.ts";
 import { useSettings } from "../lib/settings.ts";
 import { isAppShortcut, isMacPlatform } from "../lib/shortcuts.ts";
 import { MicButton, VoiceRecordingPill, useDictation } from "./VoiceInput.tsx";
@@ -75,6 +75,19 @@ export function TerminalInput({ owner, active = true, connected, onSend, onEnter
   /** the line and its caret as the open composition began (null with a selection): the one letter
    * a keyboard adds to it is the chord */
   const compositionBase = useRef<{ value: string; caret: number } | null>(null);
+  /** the open composition's text as its last input had it */
+  const compositionData = useRef("");
+  // Gboard keeps a word open while Ctrl is tapped (the key bar keeps the focus), so a composition
+  // can begin before any modifier is held: the line as Ctrl takes hold is the base the next letter
+  // adds to, or "ab", Ctrl and a p would compare "abp" with "" and stay text.
+  const heldBefore = useRef(modifiers);
+  useEffect(() => {
+    const before = heldBefore.current;
+    heldBefore.current = modifiers;
+    const element = box.current;
+    if (hasModifiers(before) || !hasModifiers(modifiers) || !composing.current || element === null || element.selectionStart !== element.selectionEnd) return;
+    compositionBase.current = { value: element.value, caret: element.selectionStart };
+  }, [modifiers]);
 
   const [note, setNote] = useState<string | null>(null);
   const sending = useSyncExternalStore(subscribeTerminalDraft, () => terminalDraftSending(owner));
@@ -108,12 +121,14 @@ export function TerminalInput({ owner, active = true, connected, onSend, onEnter
     // modifier held, or any other composition, the field is left alone.
     const onInput = (event: Event): void => {
       const { inputType, data } = event as InputEvent;
-      if (!keyRef.current || inputType !== "insertCompositionText" || !composing.current || !hasModifiers(heldRef.current)) return;
+      if (!keyRef.current || inputType !== "insertCompositionText" || !composing.current) return;
+      compositionData.current = data ?? "";
+      if (!hasModifiers(heldRef.current)) return;
       const base = compositionBase.current;
-      if (composedLetter(base, data ?? "") === null) return;
+      if (composedLetter(base, compositionData.current) === null) return;
       // after the keyboard's own input is done; still the same letter, still composing, still focused
       setTimeout(() => {
-        if (!composing.current || compositionBase.current !== base || document.activeElement !== element || composedLetter(base, data ?? "") === null) return;
+        if (!composing.current || compositionBase.current !== base || document.activeElement !== element || composedLetter(base, compositionData.current) === null) return;
         element.blur();
         element.focus({ preventScroll: true });
       });
@@ -243,15 +258,32 @@ export function TerminalInput({ owner, active = true, connected, onSend, onEnter
 
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>): void => {
     // a held key-bar modifier, or a hardware Ctrl+letter such as Ctrl+P (the agent's, not the
-    // browser's print dialog), goes to the pane as a chord; the field keeps its editing keys
+    // browser's print dialog), goes to the pane as a chord; the field keeps its editing keys, and
+    // does the line's own Ctrl letters itself
     const native = event.nativeEvent;
-    if (onKey && !composing.current && !isAppShortcut(native, settings.shortcutOverrides)) {
-      const typed = fieldKeyChord(native, modifiers, isMacPlatform(), event.currentTarget.value.length === 0);
+    const field = event.currentTarget;
+    const appShortcut = !composing.current && isAppShortcut(native, settings.shortcutOverrides);
+    if (onKey && !composing.current && !appShortcut) {
+      const typed = fieldKeyChord(native, modifiers, isMacPlatform(), field.value.length === 0);
       if (typed !== null) {
         event.preventDefault();
         onKey(typed.key, typed.modifiers);
         return;
       }
+    }
+    // the line's own Ctrl+H, I, J, M, D and S: never the browser's History, Downloads, bookmark or Save page
+    const line = composing.current || appShortcut ? null : fieldLineKey(native, modifiers, isMacPlatform(), field.value.length === 0);
+    if (line !== null) {
+      event.preventDefault();
+      if (line === "send") send();
+      else if (line === "newline") document.execCommand("insertText", false, "\n");
+      else if (line === "delete" && !document.execCommand("delete") && field.selectionEnd > 0) {
+        const end = field.selectionEnd;
+        const start = field.selectionStart === end ? end - 1 : field.selectionStart;
+        field.setRangeText("", start, end, "end");
+        setText(field.value);
+      }
+      return;
     }
     // Enter sends; Shift+Enter breaks the line; an IME keeps its Enter, including the committing
     // one WebKit can send after compositionend as key code 229

@@ -2453,10 +2453,12 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
   line alike: key-bar Ctrl and a typed p is Ctrl+P (`heldChord`), whether the keyboard sends a
   keydown, an `insertText` or an IME composition of that one letter. Gboard composes the word the
   caret is in, so with the caret after "ab" a typed p is the composition "abp": the line compares
-  itself with the text it held as the composition began, and only that text plus one printable
-  ASCII character at the caret is a chord (`composedChordLetter`). The chord goes when the
+  itself with the text it held as the composition began, or as a modifier took hold if the word
+  was already open then (Gboard keeps it open while Ctrl is tapped), and only that text plus one
+  printable ASCII character at the caret is a chord (`composedChordLetter`). The chord goes when the
   composition commits, and the letter leaves the line through the field's own delete, which keeps
-  the browser's undo history; WebKit's input after the commit is checked again, and text typed
+  the browser's undo history (the removed letter is an undo step of its own, so an undo puts it
+  back); WebKit's input after the commit is checked again, and text typed
   meanwhile is never overwritten. Gboard keeps a word open until a space and a composition's
   input cannot be cancelled, so under a held modifier, and only then, a composition that is the
   line plus one letter is committed with the focus change a Send tapped mid-word uses. With no
@@ -2468,9 +2470,13 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
   events only: Gboard, Samsung Keyboard and iOS keyboards each need a manual check on a device.
 - A hardware Ctrl+letter in the line is the pane's too (`fieldKeyChord`), so Ctrl+P reaches the
   agent's command palette instead of printing the page. The field keeps select all, the clipboard,
-  undo and redo (Ctrl+A, C, V, X, Y, Z); Ctrl+H, I, J and M, which a terminal reads as Backspace,
-  Tab, newline and Enter, the line's own keys; Ctrl+D and Ctrl+S while the line holds text (on an
-  empty line they go to the pane, the end of input a shell waits for); Ctrl+Shift app shortcuts,
+  undo and redo (Ctrl+A, C, V, X, Y, Z); the line's own Ctrl letters (`fieldLineKey`), each
+  cancelled so the browser never opens History, Downloads, a bookmark or Save page over the line:
+  Ctrl+H deletes back and Ctrl+M sends, as Backspace and Enter do, Ctrl+J breaks the line as
+  Shift+Enter does, Ctrl+I (Tab) does nothing, Ctrl+D does nothing while the line holds text (on an
+  empty line it goes to the pane, the end of input a shell waits for), and Ctrl+S does nothing at
+  all, since XOFF would freeze the pane's output (key-bar Ctrl and S still sends it); Ctrl+Shift app
+  shortcuts,
   AltGr and named keys such as Ctrl+Backspace; and every Ctrl+letter on a Mac, where they are the
   field's Emacs editing keys and Cmd prints. Under key-bar Ctrl all of them are chords, since the
   user armed Ctrl for one. This is how a terminal treats Ctrl+letter (Zed's sends what its own

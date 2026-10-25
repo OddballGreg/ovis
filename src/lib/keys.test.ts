@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { altSequence, clipboardKey, composedChordLetter, fieldKeyChord, heldChord, isPrintKey, physicalKey, controlCode, ctrlEnterSequence, mirroredCtrlEnterKey, isPrintable, keySequence, modifyOtherKeysLevel, sanitizeKeyBarExtras, navigationSequence, terminalChord, keyFromData } from "./keys.ts";
+import { altSequence, clipboardKey, composedChordLetter, fieldKeyChord, fieldLineKey, heldChord, isPrintKey, physicalKey, controlCode, ctrlEnterSequence, mirroredCtrlEnterKey, isPrintable, keySequence, modifyOtherKeysLevel, sanitizeKeyBarExtras, navigationSequence, terminalChord, keyFromData } from "./keys.ts";
 
 describe("clipboardKey", () => {
   it("recognizes native Ctrl+C/V on Korean and Russian layouts without replacing Latin layout letters", () => {
@@ -74,6 +74,8 @@ describe("composedChordLetter", () => {
     expect(composedChordLetter("ab", 2, "abp", "ab", CTRL)).toBeNull();
     // a letter away from the caret is a revision, not a key
     expect(composedChordLetter("ab", 2, "pab", "pab", CTRL)).toBeNull();
+    // the base is the line as Ctrl takes hold: a word open since before ("ab") is not the letter
+    expect(composedChordLetter("", 0, "abp", "abp", CTRL)).toBeNull();
   });
 });
 
@@ -89,15 +91,13 @@ describe("fieldKeyChord", () => {
     for (const letter of ["a", "c", "v", "x", "y", "z"]) expect(fieldKeyChord(down(letter, { ctrlKey: true }), NONE, false)).toBeNull();
     expect(fieldKeyChord(down("ㅍ", { code: "KeyV", ctrlKey: true }), NONE, false)).toBeNull();
   });
-  it("leaves the line's Backspace, Tab, newline and Enter letters to the field, and Ctrl+D and Ctrl+S unless the line is empty", () => {
-    for (const letter of ["h", "i", "j", "m"]) {
+  it("leaves the line's own Ctrl letters to the field, and hands Ctrl+D to the pane only on an empty line", () => {
+    for (const letter of ["h", "i", "j", "m", "s"]) {
       expect(fieldKeyChord(down(letter, { ctrlKey: true }), NONE, false)).toBeNull();
       expect(fieldKeyChord(down(letter, { ctrlKey: true }), NONE, false, true)).toBeNull();
     }
-    for (const letter of ["d", "s"]) {
-      expect(fieldKeyChord(down(letter, { ctrlKey: true }), NONE, false)).toBeNull();
-      expect(fieldKeyChord(down(letter, { ctrlKey: true }), NONE, false, true)).toEqual({ key: letter, modifiers: CTRL });
-    }
+    expect(fieldKeyChord(down("d", { ctrlKey: true }), NONE, false)).toBeNull();
+    expect(fieldKeyChord(down("d", { ctrlKey: true }), NONE, false, true)).toEqual({ key: "d", modifiers: CTRL });
     // key-bar Ctrl armed the chord: all of them reach the pane
     for (const letter of ["h", "i", "j", "m", "d", "s"]) expect(fieldKeyChord(down(letter), CTRL, false)).toEqual({ key: letter, modifiers: CTRL });
   });
@@ -125,6 +125,27 @@ describe("fieldKeyChord", () => {
     expect(fieldKeyChord(down("v", { ctrlKey: true }), CTRL, false)).toBeNull();
     expect(fieldKeyChord(down("p", { isComposing: true }), CTRL, false)).toBeNull();
     expect(fieldKeyChord(down("Unidentified", { keyCode: 229 }), CTRL, false)).toBeNull();
+  });
+});
+
+describe("fieldLineKey", () => {
+  it("gives the line's own Ctrl letters their line edit, so none is left to the browser", () => {
+    expect(fieldLineKey(down("h", { ctrlKey: true }), NONE, false)).toBe("delete");
+    expect(fieldLineKey(down("j", { ctrlKey: true }), NONE, false)).toBe("newline");
+    expect(fieldLineKey(down("m", { ctrlKey: true }), NONE, false)).toBe("send");
+    for (const letter of ["i", "d", "s"]) expect(fieldLineKey(down(letter, { ctrlKey: true }), NONE, false)).toBe("ignore");
+    // XOFF would freeze the pane's output: the line keeps Ctrl+S even when empty
+    expect(fieldLineKey(down("s", { ctrlKey: true }), NONE, false, true)).toBe("ignore");
+    // an empty line's Ctrl+D is the pane's end of input
+    expect(fieldLineKey(down("d", { ctrlKey: true }), NONE, false, true)).toBeNull();
+  });
+  it("is null for other keys, key-bar Ctrl, a Mac and extra modifiers", () => {
+    for (const letter of ["p", "a", "c"]) expect(fieldLineKey(down(letter, { ctrlKey: true }), NONE, false)).toBeNull();
+    expect(fieldLineKey(down("h"), NONE, false)).toBeNull();
+    expect(fieldLineKey(down("h", { ctrlKey: true }), CTRL, false)).toBeNull();
+    expect(fieldLineKey(down("h", { ctrlKey: true }), NONE, true)).toBeNull();
+    expect(fieldLineKey(down("h", { ctrlKey: true, shiftKey: true }), NONE, false)).toBeNull();
+    expect(fieldLineKey(down("h", { ctrlKey: true, altKey: true }), NONE, false)).toBeNull();
   });
 });
 

@@ -133,10 +133,30 @@ export interface FieldKeyLike {
 
 /** Ctrl+letter chords a text field keeps: select all, the clipboard, undo and redo. */
 const FIELD_CONTROL_LETTERS = /^[acvxyz]$/;
-/** Ctrl+letters a terminal reads as the line's own keys (Backspace, Tab, newline, Enter): the field types them itself. */
-const FIELD_LINE_LETTERS = /^[hijm]$/;
-/** Ctrl+D (end of input) and Ctrl+S (stop output) act on a whole line: only an empty one hands them to the pane. */
-const FIELD_EMPTY_LINE_LETTERS = /^[ds]$/;
+/** What the line does itself with a hardware Ctrl+letter it keeps from the pane and the browser. */
+export type FieldLineKey = "delete" | "newline" | "send" | "ignore";
+
+/**
+ * Ctrl+letters the line keeps, each with what it does there. A terminal reads Ctrl+H, I, J and M
+ * as Backspace, Tab, newline and Enter: the line deletes backward, ignores Tab, breaks the line and
+ * sends, as Backspace, Shift+Enter and Enter do there. Ctrl+D (end of input) acts on a whole line,
+ * so the line ignores it while it holds text and an empty line hands it to the pane. Ctrl+S (XOFF)
+ * would freeze the pane's output, so the line always ignores it; key-bar Ctrl still sends it.
+ * Every one is cancelled, or Chrome would open History, Downloads, a bookmark or Save page.
+ */
+const FIELD_LINE_KEYS: Readonly<Record<string, FieldLineKey>> = { h: "delete", i: "ignore", j: "newline", m: "send", d: "ignore", s: "ignore" };
+
+/**
+ * A hardware Ctrl+letter the input line keeps from the pane, and what it does with it there (see
+ * FIELD_LINE_KEYS), or null for any other key. Under key-bar Ctrl, or on a Mac, it is null:
+ * key-bar Ctrl makes them chords, and a Mac's Ctrl+letters are the field's own Emacs editing.
+ */
+export function fieldLineKey(event: FieldKeyLike, held: StickyModifiers, mac: boolean, lineEmpty = false): FieldLineKey | null {
+  if (event.isComposing || event.keyCode === 229 || event.metaKey || hasModifiers(held) || mac || !event.ctrlKey || event.altKey || event.shiftKey) return null;
+  const letter = clipboardKey(event.key, event.code);
+  if (!/^[a-z]$/.test(letter) || (letter === "d" && lineEmpty)) return null;
+  return FIELD_LINE_KEYS[letter] ?? null;
+}
 
 /**
  * A keydown in a text field that writes for the terminal (the input line) that the terminal takes
@@ -144,9 +164,9 @@ const FIELD_EMPTY_LINE_LETTERS = /^[ds]$/;
  * with the hardware ones, or a hardware Ctrl+letter (Ctrl+P, Ctrl+R) that would otherwise print
  * the page or reload it. Null leaves the key to the field: named keys (Enter, Backspace, arrows,
  * Ctrl+Backspace), an IME's keys, Cmd chords, Ctrl+Alt (AltGr), Ctrl+Shift (app shortcuts) and
- * select all, the clipboard, undo and redo. A hardware Ctrl+H, I, J or M is the line's Backspace,
- * Tab, newline or Enter and stays the field's too, and Ctrl+D and Ctrl+S do unless the line is
- * empty (`lineEmpty`); under key-bar Ctrl they are chords, since the user armed Ctrl for one. On a
+ * select all, the clipboard, undo and redo. A hardware Ctrl+H, I, J, M or S, and Ctrl+D unless the
+ * line is empty (`lineEmpty`), is the line's own (`fieldLineKey`), which must still cancel it;
+ * under key-bar Ctrl they are chords, since the user armed Ctrl for one. On a
  * Mac, where Ctrl+letter is the field's own Emacs editing (Ctrl+A, Ctrl+E, Ctrl+K) and Cmd prints,
  * a hardware Ctrl+letter stays the field's.
  */
@@ -160,7 +180,7 @@ export function fieldKeyChord(event: FieldKeyLike, held: StickyModifiers, mac: b
     return terminalChord(key, modifiers) === null ? null : { key, modifiers };
   }
   if (mac || !event.ctrlKey || event.altKey || event.shiftKey || !/^[a-z]$/.test(letter) || FIELD_CONTROL_LETTERS.test(letter)) return null;
-  if (FIELD_LINE_LETTERS.test(letter) || (!lineEmpty && FIELD_EMPTY_LINE_LETTERS.test(letter))) return null;
+  if (fieldLineKey(event, held, mac, lineEmpty) !== null) return null;
   return { key: letter, modifiers: { ctrl: true, alt: false, shift: false } };
 }
 

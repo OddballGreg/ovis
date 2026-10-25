@@ -63,14 +63,17 @@ async function checkInputLine(browser: Browser, mode: "legacy" | "kitty", pane: 
   // the line as Gboard writes it: the composition replaces [from, caret) of the line with `composed`,
   // the field's value set past React's tracker, as a keyboard's own edit is
   // "webkit" commits as WebKit does, writing the committed word again with an input event in the same task
-  const compose = (phase: "open" | "commit" | "webkit", from: number, caret: number, composed: string) => line.evaluate((element, { phase, from, caret, composed }) => {
+  // "update" grows the open composition, as a letter Gboard adds to a word it still composes
+  const compose = (phase: "open" | "update" | "commit" | "webkit", from: number, caret: number, composed: string) => line.evaluate((element, { phase, from, caret, composed }) => {
     const box = element as HTMLTextAreaElement;
     const setValue = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!;
     const base = (window as any).__base as string | undefined;
-    if (phase === "open") {
-      (window as any).__base = box.value;
-      box.setSelectionRange(caret, caret);
-      box.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true, data: "" }));
+    if (phase === "open" || phase === "update") {
+      if (phase === "open") {
+        (window as any).__base = box.value;
+        box.setSelectionRange(caret, caret);
+        box.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true, data: "" }));
+      }
       box.dispatchEvent(new CompositionEvent("compositionupdate", { bubbles: true, data: composed }));
       setValue.call(box, box.value.slice(0, from) + composed + box.value.slice(caret));
       box.setSelectionRange(from + composed.length, from + composed.length);
@@ -144,15 +147,36 @@ async function checkInputLine(browser: Browser, mode: "legacy" | "kitty", pane: 
   await until(async () => (await line.inputValue()) === "abp", "a composed letter with nothing held stays in the line");
   assert.equal(await blurs(), blursBefore, "plain typing is never forced to commit");
   assert.equal(sentSince(plainStart).length, 0, "plain composed typing sends nothing");
+  await line.fill("");
+  // word open, Ctrl tapped, letter added: Gboard composes "ab", Ctrl is tapped with the word still
+  // open (the key bar keeps the focus and commits nothing), and the p joins the same composition
+  await compose("open", 0, 0, "ab");
+  await ctrl.tap();
+  assert.equal(await ctrl.getAttribute("aria-pressed"), "true");
+  const openBlurs = await blurs();
+  await expectChord("word open, Ctrl tapped, letter added", async () => {
+    await compose("update", 0, 2, "abp");
+    await until(async () => (await blurs()) === openBlurs + 1, "the letter added under Ctrl forces the commit");
+    await compose("webkit", 0, 0, "abp");
+  });
+  await ctrl.tap();
+  assert.equal(await ctrl.getAttribute("aria-pressed"), "false");
   await line.fill("ab");
   // a hardware Ctrl+P is the pane's, not the print dialog; select all stays the field's
   await expectChord("hardware Ctrl+p", () => line.press("Control+p"));
   const selectStart = frames.length;
-  // the line's Backspace, Tab, newline and Enter letters, and Ctrl+D and Ctrl+S on a line with text, stay the field's
-  for (const letter of ["h", "i", "j", "m", "d", "s"]) {
+  // the line's own Ctrl letters never reach the pane, and the browser never gets them either
+  // (History, Downloads, a bookmark, Save page): Ctrl+H deletes back, Ctrl+J breaks the line,
+  // Ctrl+I, Ctrl+D on a line with text and Ctrl+S, empty or not, do nothing
+  await page.evaluate(() => window.addEventListener("keydown", (event) => { (window as any).__prevented = event.defaultPrevented; }));
+  const prevented = () => page.evaluate(() => (window as any).__prevented as boolean);
+  for (const [letter, value, expected] of [["h", "ab", "a"], ["j", "ab", "ab\n"], ["i", "ab", "ab"], ["d", "ab", "ab"], ["s", "ab", "ab"], ["s", "", ""]] as const) {
+    await line.fill(value);
     await line.press(`Control+${letter}`);
-    await line.fill("ab");
+    assert.equal(await prevented(), true, `Ctrl+${letter} on "${value}" is cancelled`);
+    assert.equal(await line.inputValue(), expected, `Ctrl+${letter} on "${value}"`);
   }
+  await line.fill("ab");
   await line.press("Control+a");
   assert.deepEqual(await line.evaluate((element) => [(element as HTMLTextAreaElement).selectionStart, (element as HTMLTextAreaElement).selectionEnd]), [0, 2], "Ctrl+A selects the line");
   assert.equal(sentSince(selectStart).length, 0, "Ctrl+A and the field's own Ctrl letters send nothing");
@@ -165,6 +189,14 @@ async function checkInputLine(browser: Browser, mode: "legacy" | "kitty", pane: 
   await line.fill("");
   // an empty line hands Ctrl+D to the pane: the end of input a shell or a REPL waits for
   await expectChord("hardware Ctrl+d on an empty line", () => line.press("Control+d"), { key: "ctrl+d", bytes: mode === "kitty" ? "\x1b[100;5u" : "\x04", text: "" });
+  // Ctrl+M is the line's Enter: it sends the line, as Enter does
+  await line.fill("ab");
+  const enterStart = frames.length;
+  await line.press("Control+m");
+  assert.equal(await prevented(), true, "Ctrl+m is cancelled");
+  await until(() => sentSince(enterStart).some((frame) => frame.type === "submit"), "Ctrl+m sends the line");
+  assert.deepEqual(sentSince(enterStart).map((frame) => frame.type), ["submit"], "Ctrl+m sends the line and nothing else");
+  await until(async () => (await line.inputValue()) === "", "Ctrl+m clears the sent line");
   await context.close();
 }
 
