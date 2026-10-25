@@ -23,11 +23,16 @@ const TERMINAL_FAILURES = new Set(["not_ready", "pane_error", "dialog_not_opened
  * not be done there is said, with the terminal one tap away. Drawn only while the bridge lists the
  * pane's models (OpenCode's 1.x HTTP source is configured, server/opencode-model.ts).
  */
-export function OpencodeModelPicker({ paneId, busy, disabled, onOpenTerminal, initial }: {
+/** how often the shown model is read again, for a pick made in the terminal */
+const REREAD_MS = 20_000;
+
+export function OpencodeModelPicker({ paneId, busy, disabled, onOpenTerminal, onCurrent, initial }: {
   paneId: string;
   busy: boolean;
   disabled: boolean;
   onOpenTerminal?: (() => void) | undefined;
+  /** the model the TUI's footer names now (its id and name), or null: the composer's pill draws it at once, not after the next reply */
+  onCurrent?: ((model: { id: string; name: string } | null) => void) | undefined;
   /** what the first render starts from, before any read (a test renders it without effects) */
   initial?: { catalog?: OpencodeModelCatalog; open?: boolean; query?: string; state?: Switch };
 }) {
@@ -45,12 +50,17 @@ export function OpencodeModelPicker({ paneId, busy, disabled, onOpenTerminal, in
   const id = useId();
   usePhoneSheetBack(() => setOpen(false), open);
 
-  // read when the pane shows, each time the list opens (the model may have changed in the terminal), and after a pick
+  // read when the pane shows, each time the list opens (the model may have changed in the terminal), after a pick,
+  // when a turn starts or ends, and every REREAD_MS while the page is shown: the composer's pill draws the model it names
   useEffect(() => {
     let alive = true;
     fetchPaneOpencodeModels(paneId).then((found) => { if (alive) setCatalog(found); }, () => undefined);
     return () => { alive = false; };
-  }, [paneId, open, reload, fetchPaneOpencodeModels]);
+  }, [paneId, open, reload, busy, fetchPaneOpencodeModels]);
+  useEffect(() => {
+    const timer = window.setInterval(() => { if (document.visibilityState === "visible") setReload((count) => count + 1); }, REREAD_MS);
+    return () => window.clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     if (!open) return;
@@ -90,6 +100,13 @@ export function OpencodeModelPicker({ paneId, busy, disabled, onOpenTerminal, in
     provider,
     models: provider.models.filter((model) => opencodeModelMatches(query, provider, model)),
   })).filter((group) => group.models.length > 0), [catalog, query]);
+
+  const shownName = catalog === null || !catalog.available ? null : opencodeModelName(catalog, catalog.current);
+  const shownId = catalog?.available && catalog.current ? `${catalog.current.provider_id}/${catalog.current.model_id}` : null;
+  useEffect(() => {
+    onCurrent?.(shownName !== null && shownId !== null ? { id: shownId, name: shownName } : null);
+  }, [onCurrent, shownName, shownId]);
+  useEffect(() => () => onCurrent?.(null), [onCurrent]);
 
   if (catalog === null || !catalog.available) return null;
 

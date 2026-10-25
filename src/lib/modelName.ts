@@ -55,3 +55,15 @@ export function modelLabel(id: string): ModelLabel {
   if (glm) return { text: `GLM-${glm[1]}`, named: true };
   return { text: id, named: false };
 }
+
+/**
+ * The model the composer's pill draws: its id as received and its label. An OpenCode 1.x pane's
+ * is the TUI's (its footer, read by the model chip), so a pick shows at once; the conversation names
+ * a model only from its last reply. Any other agent's, and an OpenCode pane whose footer was not
+ * read, is the conversation's.
+ */
+export function composerModel(agent: string | null, tuiModel: { id: string; name: string } | null, metadataModel: string | null | undefined): { id: string | null; label: ModelLabel | null } {
+  const tui = agent === "opencode" ? tuiModel : null;
+  if (tui) return { id: tui.id, label: { text: tui.name, named: true } };
+  return metadataModel ? { id: metadataModel, label: modelLabel(metadataModel) } : { id: null, label: null };
+}

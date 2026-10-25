@@ -1,5 +1,27 @@
 import { describe, expect, test } from "bun:test";
-import { modelLabel } from "./modelName.ts";
+import { composerModel, modelLabel } from "./modelName.ts";
+
+describe("composerModel", () => {
+  const tui = { id: "duo/opus-5", name: "Agentic Chat (Claude Opus 5)" };
+
+  test("draws an OpenCode pane's TUI model over the conversation's, at once", () => {
+    expect(composerModel("opencode", tui, "claude-sonnet-5")).toEqual({ id: "duo/opus-5", label: { text: "Agentic Chat (Claude Opus 5)", named: true } });
+    expect(composerModel("opencode", tui, undefined)).toEqual({ id: "duo/opus-5", label: { text: "Agentic Chat (Claude Opus 5)", named: true } });
+  });
+
+  test("draws the conversation's model for an OpenCode pane whose footer was not read", () => {
+    expect(composerModel("opencode", null, "claude-sonnet-5")).toEqual({ id: "claude-sonnet-5", label: { text: "Sonnet 5", named: true } });
+    expect(composerModel("opencode", null, null)).toEqual({ id: null, label: null });
+  });
+
+  test("draws the conversation's model for every other agent, even with a TUI model left over", () => {
+    for (const agent of ["claude", "codex", "pi", "omo", null]) {
+      expect(composerModel(agent, tui, "gpt-5.6")).toEqual({ id: "gpt-5.6", label: { text: "GPT-5.6", named: true } });
+      expect(composerModel(agent, tui, "bedrock/x")).toEqual({ id: "bedrock/x", label: { text: "bedrock/x", named: false } });
+      expect(composerModel(agent, tui, undefined)).toEqual({ id: null, label: null });
+    }
+  });
+});
 
 describe("modelLabel", () => {
   test("names a Claude id by the vendor's family and version", () => {

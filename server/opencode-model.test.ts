@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
@@ -779,6 +779,35 @@ describe("the model routes", () => {
       expect(tui.sent).toEqual([]);
       expect(((await (await call("/api/pane/opencode-models?pane_id=w1:p1")).json()) as OpencodeModelCatalog).current).toBeNull();
     });
+  });
+
+  it("logs one line for a failed switch, with its code and the drive's words, and none for a done one", async () => {
+    configure();
+    const warned: unknown[][] = [];
+    const warn = spyOn(console, "warn").mockImplementation((...args: unknown[]) => { warned.push(args); });
+    try {
+      const done = new FakeTui(MODELS, MODELS[2]!);
+      await withHerdr(done, { agent: "opencode", agent_status: "idle" }, async () => {
+        expect((await call("/api/pane/opencode-model", { pane_id: "w1:p1", provider_id: "gitlab", model_id: "sonnet-5" })).status).toBe(200);
+      });
+      expect(warned).toEqual([]);
+      const missing = new FakeTui(MODELS.filter((model) => model.name !== "Agentic Chat (Claude Sonnet 5)"), MODELS[2]!);
+      await withHerdr(missing, { agent: "opencode", agent_status: "idle" }, async () => {
+        const response = await call("/api/pane/opencode-model", { pane_id: "w1:p1", provider_id: "gitlab", model_id: "sonnet-5" });
+        const { error } = (await response.json()) as { error: { code: string; message: string } };
+        expect(warned).toHaveLength(1);
+        expect(warned[0]).toHaveLength(1);
+        expect(String(warned[0]![0])).toStartWith(`OpenCode model switch failed: ${error.code}`);
+        expect(String(warned[0]![0])).toContain(error.message);
+      });
+      // a refusal before any key is not a failed switch
+      await withHerdr(done, { agent: "opencode", agent_status: "working" }, async () => {
+        expect((await call("/api/pane/opencode-model", { pane_id: "w1:p1", provider_id: "gitlab", model_id: "sonnet-5" })).status).toBe(409);
+      });
+      expect(warned).toHaveLength(1);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("sends nothing for a request given up while it waited its turn", async () => {

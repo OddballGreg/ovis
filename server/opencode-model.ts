@@ -837,7 +837,12 @@ export async function handleOpencodeModelRequest(request: Request, url: URL, pat
         if (resolveAgent(pane).agent !== "opencode") return failure("not_opencode");
         if (pane.agent_status === "working" || pane.agent_status === "blocked") return failure("busy");
         const result = await driveModelDialog((options.deps ?? paneDeps)(paneId), { name: model.name, provider: provider.name }, OPENCODE_MODEL_DRIVE_MS, request.signal);
-        if (!result.ok) return failure(result.code, result.message, result.dialog_left_open ? { dialog_left_open: true } : {});
+        if (!result.ok) {
+          // one line per failed switch, to tell a real failure from one the footer did not confirm: the code
+          // and the drive's own words (model and provider names, what the footer showed), never a draft
+          console.warn(`OpenCode model switch failed: ${result.code}${result.dialog_left_open ? " (dialog left open)" : ""}: ${result.message}`);
+          return failure(result.code, result.message, result.dialog_left_open ? { dialog_left_open: true } : {});
+        }
         return jsonResponse({ ok: true, model: { provider_id: provider.id, model_id: model.id }, ...(result.dialog_left_open ? { dialog_left_open: true } : {}) });
       });
     } catch (error) {
