@@ -23,6 +23,8 @@ describe("the OpenCode model chip reports the TUI's model to the composer", () =
   let renderers: ReactTestRenderer[];
   /** what the TUI's footer names now: a pick or the terminal changes it */
   let footer: OpencodeModelCatalog["current"];
+  /** what the bridge says of the footer: unset as from an older bridge */
+  let footerSays: OpencodeModelCatalog["footer"];
   /** whether the bridge lists the pane's models: false as for a pane that is no longer OpenCode 1.x */
   let available: boolean;
   let reads: number;
@@ -37,7 +39,7 @@ describe("the OpenCode model chip reports the TUI's model to the composer", () =
 
   beforeEach(() => {
     for (const key of ["window", "document", "navigator", "getComputedStyle", "IS_REACT_ACT_ENVIRONMENT"]) descriptors.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
-    renderers = []; footer = { provider_id: "duo", model_id: "opus-5" }; available = true; reads = 0; picks = []; holdRead = null; holdPick = null;
+    renderers = []; footer = { provider_id: "duo", model_id: "opus-5" }; footerSays = undefined; available = true; reads = 0; picks = []; holdRead = null; holdPick = null;
     visibility = "visible"; intervals = new Map(); errors = [];
     let nextInterval = 1;
     const records = new Map<string, string>();
@@ -62,10 +64,10 @@ describe("the OpenCode model chip reports the TUI's model to the composer", () =
       if (url.includes("/pane/opencode-models?")) {
         reads++;
         // the footer as it was when the read was asked; a held read keeps it, and only the next read waits
-        const current = footer, listed = available, hold = holdRead;
+        const current = footer, listed = available, hold = holdRead, said = footerSays;
         holdRead = null;
         if (hold) await hold;
-        return Response.json((listed ? { available: true, providers, current } : { available: false, providers: [], current: null }) satisfies OpencodeModelCatalog);
+        return Response.json((listed ? { available: true, providers, current, ...(said ? { footer: said } : {}) } : { available: false, providers: [], current: null }) satisfies OpencodeModelCatalog);
       }
       if (url.includes("/pane/opencode-model") && init?.method === "POST") {
         const request: OpencodeModelRequest = JSON.parse(String(init.body));
@@ -161,6 +163,21 @@ describe("the OpenCode model chip reports the TUI's model to the composer", () =
     footer = { provider_id: "go", model_id: "kimi-k3" };
     await chip.busy(false);
     expect(chip.reports).toEqual([OPUS, KIMI]);
+  });
+
+  it("a read whose footer was unreadable keeps the last model; one naming an unlisted model reports null", async () => {
+    const chip = await mount();
+    footer = null; footerSays = "unreadable";
+    await chip.busy(true);
+    expect(chip.reports).toEqual([OPUS]);
+    // the footer names a model the list does not have: the pill falls back to the reply's model
+    footerSays = "unmatched";
+    await chip.busy(false);
+    expect(chip.reports).toEqual([OPUS, null]);
+    // a footer the list knows again is reported as usual
+    footer = { provider_id: "go", model_id: "kimi-k3" }; footerSays = "model";
+    await chip.busy(true);
+    expect(chip.reports).toEqual([OPUS, null, KIMI]);
   });
 
   it("a first read with current null reports nothing", async () => {

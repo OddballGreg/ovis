@@ -55,6 +55,17 @@ describe("OpenCode's provider list", () => {
     ]);
   });
 
+  it("keeps a model's reasoning levels, its variants' keys, dropping any that could not be drawn as one", () => {
+    const providers = opencodeProviders({
+      providers: [{ id: "p", name: "P", models: {
+        m: { name: "M", variants: { low: {}, high: {}, "x\u001b": {}, "two words": {}, [" "]: {}, [`${"z".repeat(41)}`]: {} } },
+        none: { name: "None", variants: {} },
+        odd: { name: "Odd", variants: "high" },
+      } }],
+    });
+    expect(providers?.[0]?.models).toEqual([{ id: "m", name: "M", variants: ["low", "high"] }, { id: "none", name: "None" }, { id: "odd", name: "Odd" }]);
+  });
+
   it("lists no provider or model whose id or name holds a key or an invisible mark, or is too long: names are typed into the pane", () => {
     const providers = opencodeProviders({
       providers: [
@@ -167,7 +178,7 @@ describe("OpenCode's model dialog on the screen", () => {
 
   it("reads the reasoning level the footer shows after the whole provider name, and none otherwise", () => {
     const providers: OpencodeProvider[] = [
-      { id: "gitlab", name: "GitLab Duo", models: [{ id: "opus-5-5", name: "Agentic Chat (Claude Opus 5.5)" }, { id: "opus-5", name: "Agentic Chat (Claude Opus 5)" }] },
+      { id: "gitlab", name: "GitLab Duo", models: [{ id: "opus-5-5", name: "Agentic Chat (Claude Opus 5.5)", variants: ["low", "medium", "high", "xhigh"] }, { id: "opus-5", name: "Agentic Chat (Claude Opus 5)" }] },
     ];
     const DIM = "\u001b[38;2;128;128;128m\u001b[48;2;30;30;30m";
     // the closed fixture's footer with its provider drawn as `shown`: ` · <level>` after it, or cut short
@@ -176,6 +187,10 @@ describe("OpenCode's model dialog on the screen", () => {
     expect(promptFooter(footer("GitLab Duo · high"))).toBe("Agentic Chat (Claude Opus 5.5) GitLab Duo · high");
     expect(footerModel(footer("GitLab Duo · high"), providers)).toEqual({ ...OPUS, variant: "high" });
     expect(footerModel(footer("GitLab Duo · xhigh"), providers)).toEqual({ ...OPUS, variant: "xhigh" });
+    // a level the pane's edge cut, or one the model does not offer, is no level: the model is still read
+    expect(footerModel(footer("GitLab Duo · hi"), providers)).toStrictEqual(OPUS);
+    expect(footerModel(footer("GitLab Duo · max"), providers)).toStrictEqual(OPUS);
+    expect(footerModel(footer("GitLab Duo · high"), [{ ...providers[0]!, models: providers[0]!.models.map(({ id, name }) => ({ id, name })) }])).toStrictEqual(OPUS);
     // no level drawn: no `variant` key at all, not an empty or null one
     expect(footerModel(fixture("closed"), providers)).toStrictEqual(OPUS);
     // a provider cut short leaves no room for a level: the model is still read, no level with it
@@ -745,6 +760,7 @@ describe("the model routes", () => {
       expect(answer.available).toBe(true);
       expect(answer.providers.map((provider) => provider.id)).toEqual(["gitlab", "go"]);
       expect(answer.current).toEqual({ provider_id: "gitlab", model_id: "opus-5-5" });
+      expect(answer.footer).toBe("model");
     });
     await withHerdr(tui, { agent: "claude", agent_status: "idle" }, async () => {
       expect(await (await call("/api/pane/opencode-models?pane_id=w1:p1")).json()).toEqual({ available: false, providers: [], current: null });
@@ -797,7 +813,9 @@ describe("the model routes", () => {
       const response = await call("/api/pane/opencode-model", { pane_id: "w1:p1", provider_id: "gitlab", model_id: "opus-5-5-again" });
       expect([response.status, ((await response.json()) as { error: { code: string } }).error.code]).toEqual([422, "ambiguous_model"]);
       expect(tui.sent).toEqual([]);
-      expect(((await (await call("/api/pane/opencode-models?pane_id=w1:p1")).json()) as OpencodeModelCatalog).current).toBeNull();
+      const listed = (await (await call("/api/pane/opencode-models?pane_id=w1:p1")).json()) as OpencodeModelCatalog;
+      // the footer names a model, one this list cannot tell apart: unmatched, not unreadable
+      expect([listed.current, listed.footer]).toEqual([null, "unmatched"]);
     });
   });
 
