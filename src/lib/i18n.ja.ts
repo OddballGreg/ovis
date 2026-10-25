@@ -499,7 +499,7 @@ export const JA: Record<string, string> = {
   "In use": "使用中",
   "OpenCode is working. Switch the model once it is idle.": "OpenCode が作業中です。作業が終わってからモデルを切り替えてください。",
   "A dialog is open in OpenCode. Close it in the terminal first.": "OpenCode でダイアログが開いています。先にターミナルで閉じてください。",
-  "A dialog was left open in OpenCode. Press Enter or Escape in the terminal.": "OpenCode でダイアログが開いたままです。ターミナルで Enter か Escape を押してください。",
+  "A dialog was left open in OpenCode.": "OpenCode でダイアログが開いたままです。",
   "Couldn't switch the model in OpenCode. Choose it in the terminal with ctrl+x m.": "OpenCode でモデルを切り替えられませんでした。ターミナルで ctrl+x m を押して選んでください。",
   // the launch's model, effort, first message and skills (lib/agentLaunchMode.ts, lib/newSession.ts)
   "model, effort": "モデル、推論レベル",

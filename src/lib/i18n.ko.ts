@@ -497,7 +497,7 @@ export const KO: Record<string, string> = {
   "In use": "사용 중",
   "OpenCode is working. Switch the model once it is idle.": "OpenCode가 작업 중입니다. 작업이 끝난 뒤 모델을 바꾸세요.",
   "A dialog is open in OpenCode. Close it in the terminal first.": "OpenCode에 대화상자가 열려 있습니다. 먼저 터미널에서 닫으세요.",
-  "A dialog was left open in OpenCode. Press Enter or Escape in the terminal.": "OpenCode에 대화 상자가 열린 채로 남았습니다. 터미널에서 Enter 또는 Escape를 누르세요.",
+  "A dialog was left open in OpenCode.": "OpenCode에 대화상자가 열린 채로 남았습니다.",
   "Couldn't switch the model in OpenCode. Choose it in the terminal with ctrl+x m.": "OpenCode에서 모델을 바꾸지 못했습니다. 터미널에서 ctrl+x m으로 고르세요.",
   // the launch's model, effort, first message and skills (lib/agentLaunchMode.ts, lib/newSession.ts)
   "model, effort": "모델, 노력 수준",

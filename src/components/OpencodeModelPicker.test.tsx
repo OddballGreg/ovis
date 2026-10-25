@@ -69,8 +69,9 @@ describe("the OpenCode model chip", () => {
     const failed = render({ catalog, open: true, state: { kind: "failed", code: "model_not_found", detail: "row not found" } }, { terminal: true });
     expect(failed).toContain("Choose it in the terminal with ctrl+x m.");
     expect(failed).toContain('class="oc-model-terminal"');
-    const leftOpen = render({ catalog, open: true, state: { kind: "failed", code: "pane_error", detail: "left open", leftOpen: true } }, { terminal: true });
-    expect(leftOpen).toContain("Press Enter or Escape in the terminal.");
+    const leftOpen = render({ catalog, open: true, state: { kind: "failed", code: "pane_error", detail: "timed out; OpenCode's model list is still open, on another row: press Escape there", leftOpen: true } }, { terminal: true });
+    expect(leftOpen).toContain("A dialog was left open in OpenCode.");
+    expect(leftOpen).toContain("press Escape there");
     expect(leftOpen).not.toContain("ctrl+x m");
     expect(leftOpen).toContain('class="oc-model-terminal"');
     const busy = render({ catalog, open: true, state: { kind: "failed", code: "busy", detail: "busy" } }, { terminal: true });

@@ -548,10 +548,11 @@ const quoted = (value: string): string => JSON.stringify(value.slice(0, OPENCODE
  * write that failed, its keys may still land: until OPENCODE_MODEL_LATE_MS after it (the budget
  * permitting) nothing is said to be drawn and no Escape is sent, so they land in the dialog and not
  * in the prompt, and an Enter that failed but whose pick the footer then shows is a switch made. An
- * Enter that failed and still has not landed then gets no Escape at all, whatever the screen shows or
- * if it cannot be read (`dialog_left_open`): an Enter that lands even later only picks the model
+ * Enter that failed and still has not landed then gets no Escape at all, whatever the screen shows
+ * or if it cannot be read (`dialog_left_open`): an Enter that lands even later only picks the model
  * list's highlighted row, where one after an Escape would send the prompt's draft. At most two
- * Escapes are sent in all: one for a variant list, one to close (or to a variant list that opened late). When ctrl+x m opened no
+ * Escapes are sent in all: one for a variant list, one to close (or to a variant list that opened
+ * late). When ctrl+x m opened no
  * dialog, an `m` it left at the end of the draft is taken back with one Backspace, and any other
  * change to the draft is said and left alone.
  */
@@ -699,16 +700,21 @@ export async function driveModelDialog(deps: DriveDeps, target: { name: string; 
      */
     const leftOpen = async (detail: string): Promise<DriveResult> => {
       const screen = await deps.read(IO_MS).catch(() => null);
-      if (screen !== null && !anyDialog(screen)) return refuse("pane_error", `${detail}; the model was not changed`);
+      if (screen !== null && !anyDialog(screen)) {
+        // the Enter landed in this last moment: the footer says whether it switched
+        const footer = promptFooter(screen);
+        if (footer !== null && footerNames(footer, target.name, target.provider)) return await settled();
+        return refuse("pane_error", `${detail}; the model was not changed`);
+      }
       const list = screen === null ? null : modelDialog(screen);
       const row = list?.rows[list.highlighted];
       const onTarget = row !== undefined && rowMatch(row.text, target.name, target.provider) !== null;
       const what = screen === null
-        ? "the pane could not be read, and OpenCode's model list may still be open"
-        : list === null ? "a dialog is still open in OpenCode"
-        : onTarget ? `OpenCode's model list is still open on ${target.name}`
-        : "OpenCode's model list is still open, on another row";
-      return { ...refuse("pane_error", `${detail}; ${what}: press Enter or Escape in the terminal`), dialog_left_open: true };
+        ? "the pane could not be read, and OpenCode's model list may still be open: check it in the terminal"
+        : list === null ? "a dialog is still open in OpenCode: close it in the terminal with Escape"
+        : onTarget ? `OpenCode's model list is still open on ${target.name}: press Enter there to pick it, or Escape`
+        : "OpenCode's model list is still open, on another row: press Escape there";
+      return { ...refuse("pane_error", `${detail}; ${what}`), dialog_left_open: true };
     };
     for (;;) {
       const screen = await deps.read(io()).catch((error: unknown) => {

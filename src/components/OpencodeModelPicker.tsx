@@ -115,7 +115,8 @@ export function OpencodeModelPicker({ paneId, busy, disabled, onOpenTerminal, in
 
   const failure = state.kind !== "failed" ? null
     // the switch stopped with a dialog still open in OpenCode, its model list maybe: ctrl+x m would type into it
-    : state.leftOpen ? t("A dialog was left open in OpenCode. Press Enter or Escape in the terminal.")
+    // the server says which dialog and which key: Escape when its list is not on the model asked for
+    : state.leftOpen ? `${t("A dialog was left open in OpenCode.")} ${state.detail}`
     : state.code === "busy" ? t("OpenCode is working. Switch the model once it is idle.")
     : state.code === "dialog_open" ? t("A dialog is open in OpenCode. Close it in the terminal first.")
     : state.code !== null && TERMINAL_FAILURES.has(state.code) ? t("Couldn't switch the model in OpenCode. Choose it in the terminal with ctrl+x m.")
