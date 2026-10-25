@@ -60,6 +60,7 @@ import { quickReplyButtons, useSettings } from "../lib/settings.ts";
 import { composerUsage, formatPercent, formatResetIn, HIGH_PERCENT, meterPercent, meterText, providerForAgent, statusWindows, usageName, useUsage, windowLabel } from "../lib/usage.ts";
 import { AgentMark } from "./AgentMark.tsx";
 import { BackgroundTasks } from "./BackgroundTasks.tsx";
+import { OpencodeModelPicker } from "./OpencodeModelPicker.tsx";
 import { MicButton, VoiceRecordingPill, useDictation } from "./VoiceInput.tsx";
 import { usePaneCommands } from "../lib/usePaneCommands.ts";
 import { useT } from "../lib/i18n.ts";
@@ -104,6 +105,8 @@ export interface ComposerProps {
   /** opens the New tab dialog on this pane's workspace, to start another agent with its model, effort, skills
    * and first message (NewSessionDialog); none: the pane has no workspace to add a tab to */
   onOpenNewSession?: () => void;
+  /** shows the pane's terminal, where a model the chip could not pick is chosen by hand; none: the pane has no terminal to show */
+  onOpenTerminal?: () => void;
   /** the pane's working folder, named in the strip tucked under the card; nothing is drawn for it while absent */
   cwd?: string | null;
   /** the pane's branch, beside the folder in that strip; nothing is drawn for it while absent */
@@ -250,6 +253,7 @@ export function Composer({
   inert = false,
   onOpenHistory,
   onOpenNewSession,
+  onOpenTerminal,
   cwd = null,
   branch = null,
   worktreeRepo = null,
@@ -1349,6 +1353,8 @@ export function Composer({
             </button>
           )}
           <BackgroundTasks paneId={paneId} count={backgroundTasks} omo={agent === "omo"} claude={agent === "claude"} plan={plan} />
+          {/* OpenCode 1.x keeps its model in the TUI: the chip lists the models and picks one there (server/opencode-model.ts) */}
+          {agent === "opencode" && <OpencodeModelPicker paneId={paneId} busy={isWorking || agentStatus === "blocked"} disabled={!connected || role === "observe"} onOpenTerminal={onOpenTerminal} />}
         </div>
         {/* between the two control groups of the card's last row. The agent's name, its separator and the
             state word are read, not drawn: the mark and the header name the agent, and Stop, the live row and

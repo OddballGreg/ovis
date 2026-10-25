@@ -1725,6 +1725,21 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
   line; a waiting step's name is dim), then a **Background tasks** heading over the tasks list when
   the pane has tasks to show. The steps are read again every few seconds while the list is open.
 
+### OpenCode model chip (`.oc-model-*`)
+- An OpenCode 1.x pane's composer names its model in a quiet chip after the background-task chip:
+  the cpu glyph and the model's name, `--fs-xs`, dim, with no tint, truncated with an ellipsis. It
+  follows the Codex and Claude apps, whose model menu sits in the composer; omp's own picker is a
+  prompt card only while the terminal shows it, which an always-there chip does not need. A narrow
+  card drops the name and keeps the glyph at a `--touch-target` width; the button's name keeps it.
+  Drawn only while the bridge lists the pane's models (OpenCode's 1.x HTTP source).
+- It opens one `.menu` list above the card, as the background tasks' list does, kept to the room
+  above the card: a search field, then the models under a `.menu-heading` per provider, the one in
+  use marked with an accent check and `aria-current`. A pointer that hovers starts in the search; a
+  finger does not, so no keyboard covers the list. While OpenCode works the rows are disabled with a
+  dim note; a pick shows a spinning glyph on the chip and "Switching to …" until the TUI's footer
+  shows the model. A failure is one `--status-blocked` sentence, with an underlined **Open Terminal**
+  where only a hand in the terminal can finish it.
+
 ### Background tasks ended (`.chat-task-results`)
 - Where OmO reports background tasks that ended, or a Claude Code subagent ends (its
   `<task-notification>`, drawn once however many records carry it), the transcript shows one `--bg-elevated` card

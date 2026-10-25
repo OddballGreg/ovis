@@ -1,0 +1,144 @@
+/* The chip sits beside the background tasks' chip in the input card's last row; the list opens above
+   the card as theirs does, so it never covers what is being typed. */
+.oc-model {
+  display: inline-flex;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.oc-model-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+  max-width: 16rem;
+  min-height: var(--chip-h);
+  padding: 0 var(--space-2);
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-pill);
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}
+
+.oc-model-toggle svg {
+  width: 12px;
+  height: 12px;
+  flex: none;
+}
+
+.oc-model-toggle[aria-expanded="true"] {
+  color: var(--text-strong);
+}
+
+@media (hover: hover) {
+  .oc-model-toggle:hover {
+    background: var(--bg-hover);
+    color: var(--text-strong);
+  }
+}
+
+.oc-model-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.oc-model-progress {
+  animation: oc-model-spin var(--dur-spin) steps(8) infinite;
+}
+
+@keyframes oc-model-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .oc-model-progress {
+    animation: none;
+  }
+}
+
+/* a narrow card (a phone, a lane beside the sidebar): the name gives way to the icon, the button's name keeps it */
+.composer-surface[data-compact] .oc-model-label {
+  display: none;
+}
+
+@media (max-width: 480px), (pointer: coarse) {
+  .composer-surface[data-compact] .oc-model-toggle {
+    justify-content: center;
+    min-width: var(--touch-target);
+  }
+}
+
+/* --oc-model-room is the measured room above the card (OpencodeModelPicker.tsx): the list keeps to it and scrolls */
+.oc-model-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + var(--space-2));
+  left: 0;
+  z-index: var(--z-popover);
+  max-height: max(calc(var(--row-h) * 3), min(calc(var(--row-h) * 12), calc(var(--oc-model-room, 100vh) - var(--space-2) * 2)));
+  white-space: normal;
+}
+
+.oc-model-search {
+  flex: none;
+  margin: var(--space-1);
+  width: auto;
+}
+
+.oc-model-list {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.oc-model-row {
+  width: 100%;
+}
+
+.oc-model-row:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.oc-model-row[aria-current="true"] {
+  color: var(--text-strong);
+}
+
+.oc-model-row .oc-model-check {
+  color: var(--accent);
+}
+
+@media (pointer: coarse) {
+  .oc-model-row {
+    min-height: var(--touch-target);
+  }
+}
+
+.oc-model-status:empty {
+  display: none;
+}
+
+.oc-model-note {
+  margin: 0;
+  padding: var(--space-1) var(--space-2);
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+}
+
+.oc-model-note.is-error {
+  color: var(--status-blocked);
+}
+
+.oc-model-terminal {
+  padding: 0;
+  background: none;
+  border: 0;
+  color: var(--accent);
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}

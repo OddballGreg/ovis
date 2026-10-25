@@ -252,6 +252,26 @@ describe("GET /api/pane/plan", () => {
   });
 });
 
+describe("OpenCode model API", () => {
+  it("lists nothing and switches nothing while the OpenCode HTTP source is off, in the shared error envelope", async () => {
+    // the contract server starts with no HERDR_WEB_OPENCODE_URL or HERDR_WEB_OPENCODE_SERVE: no list, and no key is sent
+    expect(await (await fetch(`${base()}/api/agent/models?agent=opencode`)).json()).toEqual({ available: false, providers: [], current: null });
+    for (const [url, method, body, status, code] of [
+      [`${base()}/api/pane/opencode-models`, "GET", undefined, 400, "missing_pane_id"],
+      [`${base()}/api/agent/models`, "GET", undefined, 400, "missing_agent"],
+      [`${base()}/api/pane/opencode-model`, "GET", undefined, 400, "method_not_allowed"],
+      [`${base()}/api/pane/opencode-model`, "POST", { pane_id: "w9999:p9999" }, 400, "missing_model"],
+      [`${base()}/api/pane/opencode-model`, "POST", { pane_id: "w9999:p9999", provider_id: "p", model_id: "m" }, 503, "unavailable"],
+    ] as const) {
+      const response = await fetch(url, { method, ...(body === undefined ? {} : { body: JSON.stringify(body), headers: { "content-type": "application/json", "x-herdr-machine": "1" } }) });
+      expect(response.status).toBe(status);
+      const answer: ApiError = await response.json();
+      expect(answer.error.code).toBe(code);
+      expect(typeof answer.error.message).toBe("string");
+    }
+  });
+});
+
 describe("Devin conversation API", () => {
   it("keeps the terminal fallback rather than guessing a shell pane's session", async () => {
     const state = mkdtempSync(join(tmpdir(), "herdr-web-ui-devin-contract-"));
