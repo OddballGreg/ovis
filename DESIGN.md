@@ -2449,6 +2449,21 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
 - The mobile key bar starts with Esc, Tab and `^C`, then sticky Ctrl/Alt/Shift, Enter and arrows;
   it never steals typing focus. Modifiers remain highlighted until toggled off,
   leaving the pane/lens or disconnecting; each exposes `aria-pressed`.
+- A held modifier makes the next character typed a chord, in the grid and in the terminal input
+  line alike: key-bar Ctrl and a typed p is Ctrl+P (`heldChord`), whether the keyboard sends a
+  keydown, an `insertText` or an IME composition of that one letter (Gboard composes every word, a
+  lone letter too). In the line the letter never lands in the text, and a letter Gboard still
+  composes is committed at once with the focus change a Send tapped mid-word uses. An IME's other
+  commits stay text (a syllable such as 한, a word), as does a paste or a drop. A hardware
+  Ctrl+letter in the line is the pane's too (`fieldKeyChord`), so Ctrl+P reaches the agent's command
+  palette instead of printing the page; select all, the clipboard, undo, redo, Ctrl+Shift app
+  shortcuts, AltGr and named keys such as Ctrl+Backspace stay the field's, and so does every
+  Ctrl+letter on a Mac, where they are the field's Emacs editing keys and Cmd prints. This is how a
+  terminal treats Ctrl+letter (Zed's sends what its own bindings do not take to the pty); the line
+  only keeps the keys any text box needs.
+- The chat composer writes messages and sends no keys to the pane, so a held modifier never makes
+  a one-letter message a control key there. Its Ctrl+P (outside a Mac) is blocked instead, so the
+  print dialog never opens over a message; Ctrl+P for the agent is typed in the terminal lens.
 - That is the default row. Settings → Terminal → Key bar can add, remove and reorder every
   terminal key and register exact combinations. Removing a held modifier clears it immediately.
   A deliberately empty row retains only the keyboard mode control on a touch screen.

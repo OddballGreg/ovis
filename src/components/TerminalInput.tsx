@@ -5,7 +5,9 @@ import "./TerminalInput.css";
 import { readTerminalDraft, writeTerminalDraft, TERMINAL_LINE_LIMIT, subscribeTerminalDraft, terminalDraftSending, setTerminalDraftSending, acknowledgeTerminalDraft } from "../lib/terminalDraft.ts";
 
 import { useT } from "../lib/i18n.ts";
+import { fieldKeyChord, heldChord, NO_STICKY_MODIFIERS, type StickyModifiers } from "../lib/keys.ts";
 import { useSettings } from "../lib/settings.ts";
+import { isAppShortcut, isMacPlatform } from "../lib/shortcuts.ts";
 import { MicButton, VoiceRecordingPill, useDictation } from "./VoiceInput.tsx";
 
 export interface TerminalInputProps {
@@ -21,6 +23,10 @@ export interface TerminalInputProps {
   onEnter: () => boolean | string;
   /** the line took the focus */
   onFocus?: () => void;
+  /** the key bar's held modifiers: the next character typed is a chord, not text for the line */
+  modifiers?: StickyModifiers;
+  /** sends one key with these modifiers to the pane, the way a key-bar key goes */
+  onKey?: (key: string, modifiers: StickyModifiers) => void;
 }
 
 /** Lines the box grows to before it scrolls. */
@@ -45,7 +51,7 @@ interface SendAttempt {
  * keyboard's own editing and goes to the pane whole, then Enter. Autocorrect and spell-check stay
  * off, as in the composer: they would swap a flag, path or branch name for a dictionary word.
  */
-export function TerminalInput({ owner, active = true, connected, onSend, onEnter, onComposing, onFocus }: TerminalInputProps) {
+export function TerminalInput({ owner, active = true, connected, onSend, onEnter, onComposing, onFocus, modifiers = NO_STICKY_MODIFIERS, onKey }: TerminalInputProps) {
   const t = useT();
   const text = useSyncExternalStore(subscribeTerminalDraft, () => readTerminalDraft(owner));
   const setText = useCallback((value: string | ((previous: string) => string)) => {
@@ -59,6 +65,30 @@ export function TerminalInput({ owner, active = true, connected, onSend, onEnter
   const composingCallback = useRef(onComposing);
   composingCallback.current = onComposing;
   useEffect(() => () => { composingCallback.current?.(false); }, []);
+
+  // The key bar's held modifiers make the next character a chord for the pane, as they do in the
+  // grid: it never lands in the line. They stay held afterwards, as the key bar's modifiers do.
+  const heldRef = useRef(modifiers);
+  heldRef.current = modifiers;
+  const keyRef = useRef(onKey);
+  keyRef.current = onKey;
+  /** the open composition: begun on nothing (a word typed afresh, not one picked up again), and the line before it */
+  const typedComposition = useRef<{ fresh: boolean; value: string; start: number; end: number } | null>(null);
+  // a soft keyboard's letter arrives without a keydown, as insertText: React's onBeforeInput is a
+  // keypress polyfill, so the native event is the one to cancel
+  useEffect(() => {
+    const element = box.current;
+    if (!element) return;
+    const onBeforeInput = (event: InputEvent): void => {
+      const send = keyRef.current;
+      if (!send || event.inputType !== "insertText" || event.data === null || event.isComposing || composing.current) return;
+      if (heldChord(event.data, heldRef.current, "typed") === null) return;
+      event.preventDefault();
+      send(event.data, heldRef.current);
+    };
+    element.addEventListener("beforeinput", onBeforeInput);
+    return () => element.removeEventListener("beforeinput", onBeforeInput);
+  }, []);
 
   const [note, setNote] = useState<string | null>(null);
   const sending = useSyncExternalStore(subscribeTerminalDraft, () => terminalDraftSending(owner));
@@ -181,11 +211,52 @@ export function TerminalInput({ owner, active = true, connected, onSend, onEnter
   sendRef.current = send;
 
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>): void => {
+    // a held key-bar modifier, or a hardware Ctrl+letter such as Ctrl+P (the agent's, not the
+    // browser's print dialog), goes to the pane as a chord; the field keeps its editing keys
+    const native = event.nativeEvent;
+    if (onKey && !composing.current && !isAppShortcut(native, settings.shortcutOverrides)) {
+      const typed = fieldKeyChord(native, modifiers, isMacPlatform());
+      if (typed !== null) {
+        event.preventDefault();
+        onKey(typed.key, typed.modifiers);
+        return;
+      }
+    }
     // Enter sends; Shift+Enter breaks the line; an IME keeps its Enter, including the committing
     // one WebKit can send after compositionend as key code 229
-    if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
+    if (event.key !== "Enter" || event.shiftKey || native.isComposing || native.keyCode === 229) return;
     event.preventDefault();
     send();
+  };
+
+  // Gboard composes every word, a lone letter too, and keeps it open until a space: under a held
+  // modifier that letter is a chord now, so a focus change commits it at once (Chrome ends a
+  // composition on blur and fires compositionend there), as a Send tapped mid-word does
+  const commitTypedLetter = (data: string): void => {
+    const typed = typedComposition.current;
+    const element = box.current;
+    if (!onKey || typed === null || !typed.fresh || heldChord(data, heldRef.current, "committed") === null) return;
+    if (element === null || document.activeElement !== element) return;
+    element.blur();
+    element.focus({ preventScroll: true });
+  };
+
+  /** A composition that committed one character under a held modifier: the pane gets the chord, the line keeps what it held. */
+  const takeTypedLetter = (data: string): void => {
+    const typed = typedComposition.current;
+    typedComposition.current = null;
+    if (!onKey || typed === null || !typed.fresh || heldChord(data, heldRef.current, "committed") === null) return;
+    onKey(data, heldRef.current);
+    const restore = (): void => {
+      setText(typed.value);
+      const element = box.current;
+      if (element === null) return;
+      element.value = typed.value;
+      element.setSelectionRange(typed.start, typed.end);
+    };
+    restore();
+    // WebKit updates the value with an input event after compositionend: put the line back after it too
+    setTimeout(restore);
   };
 
   // wrapped lines count too: a dictated sentence is one long line, and its end must stay readable
@@ -211,10 +282,17 @@ export function TerminalInput({ owner, active = true, connected, onSend, onEnter
         rows={rows}
         value={text}
         maxLength={TERMINAL_LINE_LIMIT}
-        onCompositionStart={() => { composing.current = true; onComposing?.(true); }}
-        onCompositionEnd={() => {
+        onCompositionStart={(event) => {
+          composing.current = true;
+          onComposing?.(true);
+          const element = event.currentTarget;
+          typedComposition.current = { fresh: event.data === "", value: element.value, start: element.selectionStart, end: element.selectionEnd };
+        }}
+        onCompositionUpdate={(event) => commitTypedLetter(event.data)}
+        onCompositionEnd={(event) => {
           composing.current = false;
           onComposing?.(false);
+          takeTypedLetter(event.data);
           const current = attempt.current;
           if (current === null) return;
           if (current.timer !== null) clearTimeout(current.timer);

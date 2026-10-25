@@ -91,6 +91,61 @@ export function keyFromData(data: string): string | null {
   return [...data].length === 1 && data.codePointAt(0)! >= 0x20 ? data : null;
 }
 
+/**
+ * The chord one typed or committed character is under the key bar's held modifiers, or null for
+ * text. A paste, a multi-character commit and anything typed while a composition is still open are
+ * text. A finished composition (`committed`) is a chord only for one printable ASCII character:
+ * that is how Gboard types a Latin letter, one composed word at a time, while a CJK syllable such
+ * as 한 is an IME's text and stays text whatever is held.
+ */
+export function heldChord(text: string, modifiers: StickyModifiers, state: "typed" | "composing" | "committed"): string | null {
+  if (state === "composing" || !hasModifiers(modifiers) || [...text].length !== 1) return null;
+  if (state === "committed" && !/^[\x21-\x7e]$/.test(text)) return null;
+  return terminalChord(text, modifiers);
+}
+
+/** What a key on a text field's keydown says about itself, as KeyboardEvent has it. */
+export interface FieldKeyLike {
+  key: string;
+  code: string;
+  ctrlKey: boolean;
+  altKey: boolean;
+  metaKey: boolean;
+  shiftKey: boolean;
+  isComposing: boolean;
+  keyCode: number;
+}
+
+/** Ctrl+letter chords a text field keeps: select all, the clipboard, undo and redo. */
+const FIELD_CONTROL_LETTERS = /^[acvxyz]$/;
+
+/**
+ * A keydown in a text field that writes for the terminal (the input line) that the terminal takes
+ * as a chord instead of the field: a character typed under the key bar's held modifiers, combined
+ * with the hardware ones, or a hardware Ctrl+letter (Ctrl+P, Ctrl+R) that would otherwise print
+ * the page or reload it. Null leaves the key to the field: named keys (Enter, Backspace, arrows,
+ * Ctrl+Backspace), an IME's keys, Cmd chords, Ctrl+Alt (AltGr), Ctrl+Shift (app shortcuts) and
+ * select all, the clipboard, undo and redo. On a Mac, where Ctrl+letter is the field's own Emacs
+ * editing (Ctrl+A, Ctrl+E, Ctrl+K) and Cmd prints, a hardware Ctrl+letter stays the field's.
+ */
+export function fieldKeyChord(event: FieldKeyLike, held: StickyModifiers, mac: boolean): { key: string; modifiers: StickyModifiers } | null {
+  if (event.isComposing || event.keyCode === 229 || event.metaKey) return null;
+  const letter = clipboardKey(event.key, event.code);
+  if (hasModifiers(held)) {
+    const key = physicalKey(event.key, event.code);
+    if ([...key].length !== 1 || (event.ctrlKey && FIELD_CONTROL_LETTERS.test(letter))) return null;
+    const modifiers = { ctrl: held.ctrl || event.ctrlKey, alt: held.alt || event.altKey, shift: held.shift || event.shiftKey };
+    return terminalChord(key, modifiers) === null ? null : { key, modifiers };
+  }
+  if (mac || !event.ctrlKey || event.altKey || event.shiftKey || !/^[a-z]$/.test(letter) || FIELD_CONTROL_LETTERS.test(letter)) return null;
+  return { key: letter, modifiers: { ctrl: true, alt: false, shift: false } };
+}
+
+/** Ctrl+P outside a Mac: the browser's print dialog, which a box writing for an agent never wants. */
+export function isPrintKey(event: Omit<FieldKeyLike, "isComposing" | "keyCode">, mac: boolean): boolean {
+  return !mac && event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey && clipboardKey(event.key, event.code) === "p";
+}
+
 /** A single printable UTF-16 character. */
 export function isPrintable(data: string): boolean {
   if (data.length !== 1) return false;

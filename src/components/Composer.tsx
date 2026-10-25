@@ -53,6 +53,8 @@ import { composerFull, formatChars, pasteOverflow } from "../lib/composerLength.
 import { normalizeComposerImageFile } from "../lib/composerImageMime.ts";
 import { paneStatus } from "../lib/status.ts";
 import { modelLabel } from "../lib/modelName.ts";
+import { isPrintKey } from "../lib/keys.ts";
+import { isMacPlatform } from "../lib/shortcuts.ts";
 import { useFacesArrived } from "../lib/fontFaces.ts";
 import { activeTrigger, applyCompletion, type ActiveTrigger } from "../lib/mentions.ts";
 import { resolveComposerMenuActiveItemId } from "../lib/composerMenuHighlight.ts";
@@ -921,6 +923,10 @@ export function Composer({
 
   const onKeyDown = useCallback(
     (event: KeyboardEvent<HTMLTextAreaElement>) => {
+      // Ctrl+P is an agent's command palette or history key, never the browser's print dialog. The
+      // box writes messages and sends no keys to the pane (an armed key-bar Ctrl must not turn a
+      // one-letter message into a control key either), so here the chord does nothing at all
+      if (isPrintKey(event.nativeEvent, isMacPlatform())) { event.preventDefault(); return; }
       // an IME keeps its keys; WebKit can send the committing Enter after compositionend, as key code 229
       if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
       if (menuOpen && trigger) {

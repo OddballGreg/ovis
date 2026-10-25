@@ -25,6 +25,86 @@ async function until(check: () => boolean | Promise<boolean>, label: string) {
     await Bun.sleep(20);
   }
 }
+/** The phone's input line: a held key-bar modifier or a hardware Ctrl+letter sends a chord, never line text. */
+async function checkInputLine(browser: Browser, mode: "legacy" | "kitty", pane: string, read: () => string) {
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+  await context.addInitScript(({ pane }) => {
+    localStorage.setItem("herdr-web-ui:settings", JSON.stringify({ language: "en", terminalInputMode: "line" }));
+    localStorage.setItem(`herdr-web-ui:view:${pane}`, "terminal");
+  }, { pane });
+  const page = await context.newPage();
+  page.on("pageerror", (error) => errors.push(error.message));
+  const frames: any[] = [];
+  await page.routeWebSocket(/\/ws(?:\?|$)/, (socket) => {
+    const remote = socket.connectToServer();
+    remote.onMessage((raw) => socket.send(raw));
+    socket.onMessage((raw) => { frames.push(JSON.parse(String(raw))); remote.send(raw); });
+  });
+  await page.goto(`http://127.0.0.1:${server.port}/?pane=${encodeURIComponent(pane)}`);
+  const ctrl = page.locator('[data-key="Control"]');
+  await until(async () => !(await ctrl.isDisabled()), "input line ready");
+  const line = page.getByRole("textbox", { name: "Terminal input line", exact: true });
+  await line.tap();
+  const sentSince = (start: number) => frames.slice(start).filter((frame) => frame.type === "keys" || frame.type === "input" || frame.type === "submit");
+  const ctrlP = mode === "kitty" ? "\x1b[112;5u" : "\x10";
+  const expectChord = async (label: string, act: () => Promise<void>) => {
+    const before = read();
+    const start = frames.length;
+    await act();
+    await until(() => sentSince(start).length > 0, `${label}: chord frame`);
+    assert.deepEqual(sentSince(start).map((frame) => frame.keys ?? frame.text), [["ctrl+p"]], label);
+    await until(() => read().length > before.length, `${label}: chord received by PTY`);
+    assert.equal(Buffer.from(read().slice(before.length), "hex").toString(), ctrlP, label);
+    assert.equal(await line.inputValue(), "ab", `${label}: the line keeps its text`);
+    console.log(`${mode} input line ${label}: ${Buffer.from(ctrlP).toString("hex")}`);
+  };
+  await page.keyboard.insertText("ab");
+  assert.equal(await line.inputValue(), "ab");
+  await ctrl.tap();
+  assert.equal(await ctrl.getAttribute("aria-pressed"), "true");
+  assert.equal(await line.evaluate((element) => document.activeElement === element), true, "Ctrl keeps the line's focus");
+  await expectChord("key-bar Ctrl + insertText p", () => page.keyboard.insertText("p"));
+  await expectChord("key-bar Ctrl + keydown p", () => line.press("p"));
+  await expectChord("key-bar Ctrl + IME commit p", () => line.evaluate((element) => {
+    const box = element as HTMLTextAreaElement;
+    box.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    box.value = "abp";
+    box.dispatchEvent(new CompositionEvent("compositionupdate", { bubbles: true, data: "p" }));
+    box.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertCompositionText", data: "p", isComposing: true }));
+    box.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "p" }));
+    box.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertCompositionText", data: "p" }));
+  }));
+  // a syllable an IME commits stays text in the line, Ctrl held or not
+  await line.evaluate((element) => {
+    const box = element as HTMLTextAreaElement;
+    box.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    box.value = "ab한";
+    box.dispatchEvent(new CompositionEvent("compositionupdate", { bubbles: true, data: "한" }));
+    box.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertCompositionText", data: "한", isComposing: true }));
+    box.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "한" }));
+  });
+  await until(async () => (await line.inputValue()) === "ab한", "IME syllable stays in the line");
+  await line.fill("ab");
+  // Ctrl stays held, as everywhere on the key bar
+  assert.equal(await ctrl.getAttribute("aria-pressed"), "true");
+  await ctrl.tap();
+  assert.equal(await ctrl.getAttribute("aria-pressed"), "false");
+  // a hardware Ctrl+P is the pane's, not the print dialog; select all stays the field's
+  await expectChord("hardware Ctrl+p", () => line.press("Control+p"));
+  const selectStart = frames.length;
+  await line.press("Control+a");
+  assert.deepEqual(await line.evaluate((element) => [(element as HTMLTextAreaElement).selectionStart, (element as HTMLTextAreaElement).selectionEnd]), [0, 2], "Ctrl+A selects the line");
+  assert.equal(sentSince(selectStart).length, 0, "Ctrl+A sends nothing");
+  await line.press("End");
+  // plain typing is the line's again
+  await page.keyboard.insertText("c");
+  await line.press("d");
+  assert.equal(await line.inputValue(), "abcd");
+  assert.equal(sentSince(selectStart).length, 0, "plain typing stays in the line");
+  await line.fill("");
+  await context.close();
+}
+
 try {
   const browser = launched = await chromium.launch({ executablePath: chromePath(), headless: true, args: ["--no-sandbox"] });
   for (const mode of ["legacy", "kitty"] as const) {
@@ -170,6 +250,22 @@ try {
     await until(() => Buffer.from(read().slice(burstBefore.length), "hex").toString() === "한글", "IME burst received");
     assert.equal(frames.slice(burstFrames).some((frame) => frame.type === "keys"), false, "consecutive IME commits bypass held modifiers");
     assert.equal(Buffer.from(read().slice(burstBefore.length), "hex").toString(), "한글");
+    // ...but one ASCII letter is how Gboard types a Latin key, a composition a letter long: under held
+    // modifiers the committed letter is the chord (key-bar Ctrl and a typed p is Ctrl+P)
+    const letterBefore = read();
+    const letterFrames = frames.length;
+    await input.evaluate((element) => {
+      const box = element as HTMLTextAreaElement;
+      box.value = "";
+      box.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+      box.value = "p";
+      box.dispatchEvent(new CompositionEvent("compositionupdate", { bubbles: true, data: "p" }));
+      box.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "p" }));
+    });
+    await until(() => frames.length > letterFrames, "IME letter chord frame");
+    assert.deepEqual(frames.slice(letterFrames).filter((frame) => frame.type === "keys" || frame.type === "input").map((frame) => frame.keys ?? frame.text), [["ctrl+alt+shift+p"]], "a committed letter under held modifiers is a chord");
+    await until(() => read().length > letterBefore.length, "IME letter chord received by PTY");
+    if (mode === "kitty") assert.equal(Buffer.from(read().slice(letterBefore.length), "hex").toString(), "\x1b[112;8u");
     // Hardware modifiers combine with held touch modifiers as well.
     await held(2);
     await input.evaluate((element) => { (element as HTMLTextAreaElement).value = ""; });
@@ -256,6 +352,7 @@ try {
     for (const key of ["Alt", "Shift"]) assert.equal(await page.locator(`[data-key="${key}"]`).getAttribute("aria-pressed"), "false");
     assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "phone has no horizontal page overflow");
     await context.close();
+    await checkInputLine(browser, mode, pane, read);
     console.log(`PASS ${mode}: seven modifier combinations, repeated keys, actual PTY bytes, touch focus, paste, IME, reset`);
   }
   assert.deepEqual(errors, []);
