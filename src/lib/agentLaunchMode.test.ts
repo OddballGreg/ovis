@@ -63,6 +63,11 @@ it("refuses a choice the launch does not take, and a model that would read as a 
   expect(launchChoiceFault("omp", { effort: "high" })).toBe("effort");
   expect(launchChoiceFault("codex", { effort: "ultracode" })).toBe("effort");
   expect(launchChoiceFault("opencode", { effort: "high" })).toBe("effort");
+  // OpenCode's model is `provider/model`, a Vertex id's `@` included; Claude Code's aliases are not
+  expect(launchChoiceFault("opencode", { model: "google-vertex-anthropic/claude-opus-4@20250514" })).toBeNull();
+  expect(launchChoiceFault("opencode", { model: "opus" })).toBe("model");
+  expect(launchChoiceFault("opencode", { model: "-x/model" })).toBe("model");
+  expect(launchChoiceFault("claude", { model: "vertex/claude@1" })).toBe("model");
   expect(launchChoiceFault("claude", { model: "--dangerously-skip-permissions" })).toBe("model");
   expect(launchChoiceFault("claude", { model: "two words" })).toBe("model");
   expect(launchChoiceFault("", { prompt: "a shell takes none" })).toBe("prompt");

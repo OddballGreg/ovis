@@ -2,6 +2,7 @@
  * OpenCode's model list as the composer's model chip and the new session dialog use it
  * (GET /api/pane/opencode-models, GET /api/agent/models; server/opencode-model.ts).
  */
+import { OPENCODE_MODEL_NAME } from "../../shared/launch-rules.ts";
 import type { OpencodeModel, OpencodeModelCatalog, OpencodeProvider } from "../../shared/protocol.ts";
 
 /** Whether a search names this model: every word in its name, its provider's name or its `provider/id`, in any case. */
@@ -18,8 +19,11 @@ export function opencodeModelName(catalog: OpencodeModelCatalog, model: { provid
   return catalog.providers.find((provider) => provider.id === model.provider_id)?.models.find((each) => each.id === model.model_id)?.name ?? null;
 }
 
-/** `--model` values for a new OpenCode session, `provider/id`, with the name each stands for. */
+/** `--model` values for a new OpenCode session, `provider/id`, with the name each stands for: only those the launch rules take. */
 export function opencodeLaunchModels(catalog: OpencodeModelCatalog | null): { value: string; label: string }[] {
   if (catalog === null || !catalog.available) return [];
-  return catalog.providers.flatMap((provider) => provider.models.map((model) => ({ value: `${provider.id}/${model.id}`, label: `${model.name} · ${provider.name}` })));
+  return catalog.providers.flatMap((provider) => provider.models.flatMap((model) => {
+    const value = `${provider.id}/${model.id}`;
+    return OPENCODE_MODEL_NAME.test(value) ? [{ value, label: `${model.name} · ${provider.name}` }] : [];
+  }));
 }

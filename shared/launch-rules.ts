@@ -23,6 +23,16 @@ export const CODEX_EFFORTS = ["low", "medium", "high", "xhigh", "max", "ultra"] 
  */
 export const MODEL_NAME = /^[A-Za-z0-9][\w.:/-]*(?:\[[A-Za-z0-9]+\])?$/;
 
+/**
+ * OpenCode 1.x's `--model`: `provider/model`, a provider id that never reads as a flag, then the
+ * model's id as its server lists it, which may hold `@`, `:` or more slashes (a Vertex id such as
+ * `claude-opus-4@20250514`), but no space or control character.
+ */
+export const OPENCODE_MODEL_NAME = /^[A-Za-z0-9][\w.-]*\/[^\s\p{Cc}]+$/u;
+
+/** The rule a model name for `kind`'s `--model` follows. */
+export const modelNameRule = (kind: string): RegExp => kind === "opencode" ? OPENCODE_MODEL_NAME : MODEL_NAME;
+
 /** the most a first message (and a queued chat message, server/core/composer.ts pendingText) may hold */
 export const MAX_FIRST_MESSAGE_CHARS = 20_000;
 
@@ -106,7 +116,7 @@ export function launchArgsFault(kind: string, args: readonly string[]): string |
       if (key === "model") model = setting;
       if (key === "model_reasoning_effort") effort = setting;
     }
-    if (model !== null && !MODEL_NAME.test(model)) return "agent.args --model must name one model";
+    if (model !== null && !modelNameRule(kind).test(model)) return "agent.args --model must name one model";
     if (effort !== null && !efforts.includes(effort)) {
       return kind === "claude" ? `agent.args --effort must be one of ${efforts.join(", ")}` : `agent.args model_reasoning_effort must be one of ${efforts.join(", ")}`;
     }

@@ -32,6 +32,15 @@ it("offers each model as provider/id for a new session", () => {
     { value: "go/kimi-k3", label: "Kimi K3 · OpenCode Go" },
     { value: "duo/opus-5", label: "Agentic Chat (Claude Opus 5) · GitLab Duo" },
   ]);
+  // only what the launch rules take: a Vertex id with `@` and a dotted name are; a space or a provider id that reads as a flag are not
+  expect(opencodeLaunchModels({ ...catalog, providers: [
+    { id: "google-vertex-anthropic", name: "Vertex", models: [{ id: "claude-opus-4@20250514", name: "Claude Opus 4" }, { id: "two words", name: "Bad" }] },
+    { id: "-x", name: "Flag", models: [{ id: "m", name: "M" }] },
+    { id: "my.provider", name: "Dotted", models: [{ id: "model.v2", name: "Model v2.1" }] },
+  ] })).toEqual([
+    { value: "google-vertex-anthropic/claude-opus-4@20250514", label: "Claude Opus 4 · Vertex" },
+    { value: "my.provider/model.v2", label: "Model v2.1 · Dotted" },
+  ]);
   expect(opencodeLaunchModels({ ...catalog, available: false })).toEqual([]);
   expect(opencodeLaunchModels(null)).toEqual([]);
 });

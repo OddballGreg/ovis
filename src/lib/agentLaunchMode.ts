@@ -8,7 +8,7 @@
  * reference documents the flag or argument (launchCapabilities); nothing is guessed for the rest.
  * The bridge checks them again by the same rules (shared/launch-rules.ts).
  */
-import { argumentText, CLAUDE_EFFORTS, CODEX_EFFORTS, MODEL_NAME } from "../../shared/launch-rules.ts";
+import { argumentText, CLAUDE_EFFORTS, CODEX_EFFORTS, modelNameRule } from "../../shared/launch-rules.ts";
 
 export { CLAUDE_EFFORTS, CODEX_EFFORTS };
 
@@ -98,7 +98,7 @@ export interface LaunchChoices {
 export function launchChoiceFault(kind: string, choices: LaunchChoices): "model" | "effort" | "prompt" | null {
   const can = launchCapabilities(kind);
   const model = choices.model?.trim() ?? "";
-  if (model !== "" && (!can.model || !MODEL_NAME.test(model))) return "model";
+  if (model !== "" && (!can.model || !modelNameRule(kind).test(model))) return "model";
   if (choices.effort && !can.efforts.includes(choices.effort)) return "effort";
   // a shell runs no agent to send a prompt to
   if ((choices.prompt?.trim() ?? "") !== "" && kind === "") return "prompt";
@@ -124,7 +124,7 @@ export function launchArgs(kind: string, modes: { claudeLaunchMode: ClaudeLaunch
   if (kind === "codex" && modes.codexLaunchMode !== "default") args.push(...CODEX_ARGS[modes.codexLaunchMode]);
   const can = launchCapabilities(kind);
   const model = choices.model?.trim() ?? "";
-  if (model !== "" && can.model && MODEL_NAME.test(model)) args.push("--model", model);
+  if (model !== "" && can.model && modelNameRule(kind).test(model)) args.push("--model", model);
   if (choices.effort && can.efforts.includes(choices.effort)) {
     args.push(...(kind === "codex" ? ["-c", `model_reasoning_effort=${choices.effort}`] : ["--effort", choices.effort]));
   }
