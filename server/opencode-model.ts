@@ -415,6 +415,15 @@ export function footerNames(footer: string, name: string, provider: string): boo
   return rest.length > 0 && !rest.includes(" · ") && provider.startsWith(rest);
 }
 
+/** Whether a footer is the start of a listed model's name and provider as the footer draws them: a pane's edge cut it. */
+export function cutListedModel(footer: string, providers: readonly OpencodeProvider[]): boolean {
+  const words = collapse(footer);
+  return providers.some((provider) => provider.models.some((model) => {
+    const drawn = `${collapse(model.name)} ${collapse(provider.name)}`;
+    return drawn.length > words.length && drawn.startsWith(words);
+  }));
+}
+
 /** How a model is told apart on the screen: its name and its provider's, as the TUI draws them. */
 const shownAs = (name: string, provider: string): string => `${collapse(name)}\0${collapse(provider)}`;
 
@@ -819,8 +828,10 @@ export async function handleOpencodeModelRequest(request: Request, url: URL, pat
       if (providers === null) return jsonResponse(NONE);
       const screen = await paneRead({ paneId, source: "visible", format: "text", timeoutMs: READ_MS }).then((read) => read.text, () => null);
       const current = screen === null ? null : footerModel(screen, providers);
-      // "unmatched" only when the footer names a model: then the pill must not keep the last one read
-      const footer = current !== null ? "model" : screen !== null && promptFooter(screen) ? "unmatched" : "unreadable";
+      const words = screen === null ? null : promptFooter(screen);
+      // "unmatched" only when the footer names a model the list lacks: then the pill must not keep the last
+      // one read. A footer a narrow pane cut inside a listed model's name and provider is only unreadable
+      const footer = current !== null ? "model" : words && !cutListedModel(words, providers) ? "unmatched" : "unreadable";
       return jsonResponse({ available: true, providers, current, footer } satisfies OpencodeModelCatalog);
     } catch (error) {
       return errorResponse(error);

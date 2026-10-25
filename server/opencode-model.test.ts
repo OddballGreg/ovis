@@ -9,6 +9,7 @@ import {
   ansiCells,
   dialogOnScreen,
   driveModelDialog,
+  cutListedModel,
   footerModel,
   footerNames,
   forgetOpencodeModels,
@@ -174,6 +175,19 @@ describe("OpenCode's model dialog on the screen", () => {
     // the dialog covers the footer's model: the prompt is there, its model is not read
     expect(promptFooter(fixture("claude-first"))).toBe("");
     expect(footerModel(fixture("claude-first"), providers)).toBeNull();
+  });
+
+  it("tells a footer a narrow pane cut inside a listed model from one naming a model the list lacks", () => {
+    const providers: OpencodeProvider[] = [
+      { id: "gitlab", name: "GitLab Duo", models: [{ id: "opus-5-5", name: "Agentic Chat (Claude Opus 5.5)" }] },
+    ];
+    // cut inside the name, inside the provider, and at a space: a listed model, drawn short
+    expect(cutListedModel("Agentic Chat (Claude Op", providers)).toBe(true);
+    expect(cutListedModel("Agentic Chat (Claude Opus 5.5) GitLab", providers)).toBe(true);
+    expect(cutListedModel("Agentic  Chat", providers)).toBe(true);
+    // whole, or naming another model: not a cut listed one
+    expect(cutListedModel("Agentic Chat (Claude Opus 5.5) GitLab Duo", providers)).toBe(false);
+    expect(cutListedModel("Local Llama Ollama", providers)).toBe(false);
   });
 
   it("reads the reasoning level the footer shows after the whole provider name, and none otherwise", () => {
