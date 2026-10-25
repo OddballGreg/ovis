@@ -4,7 +4,7 @@ import { FolderOpen, X } from "lucide-react";
 
 import "./NewSessionDialog.css";
 
-import type { AgentKind, SlashCommand } from "../../shared/protocol.ts";
+import type { AgentKind, OpencodeModelCatalog, SlashCommand } from "../../shared/protocol.ts";
 import { MAX_LABEL_CHARS } from "../../shared/labels.ts";
 import { ApiError } from "../lib/api.ts";
 import { AgentPicker, rememberAgent, rememberedAgent } from "./AgentPicker.tsx";
@@ -14,6 +14,7 @@ import { useMachineApi, useMachineId } from "../lib/machineContext.tsx";
 import { useT } from "../lib/i18n.ts";
 import { useSettings } from "../lib/settings.ts";
 import { launchCapabilities, modelSuggestions } from "../lib/agentLaunchMode.ts";
+import { opencodeLaunchModels } from "../lib/opencodeModels.ts";
 import { MAX_COMPOSER_CHARS } from "../lib/compose.ts";
 import { createRequest, firstMessageOutcome, newSessionLaunch, startNewSession } from "../lib/newSession.ts";
 import { useMachineSessions } from "../lib/machineSessionContext.tsx";
@@ -94,7 +95,7 @@ export function NewSessionDialog({ open, defaultCwd, tab = null, onClose, onCrea
   const t = useT();
   const { settings } = useSettings();
   const machineId = useMachineId();
-  const { createTab, createWorkspace, fetchAgentKinds, fetchAgentCommands } = useMachineApi();
+  const { createTab, createWorkspace, fetchAgentKinds, fetchAgentCommands, fetchAgentModels } = useMachineApi();
   const machineSessions = useMachineSessions();
   const [agents, setAgents] = useState<AgentKind[]>([]);
   const [agentKind, setAgentKind] = useState(rememberedAgent);
@@ -103,6 +104,8 @@ export function NewSessionDialog({ open, defaultCwd, tab = null, onClose, onCrea
   const [model, setModel] = useState("");
   const [effort, setEffort] = useState("");
   const [prompt, setPrompt] = useState("");
+  /** OpenCode's models for `--model`, once listed: its 1.x HTTP source lists them (server/opencode-model.ts); null while not asked or not answered */
+  const [opencodeModels, setOpencodeModels] = useState<OpencodeModelCatalog | null>(null);
   /** the picked agent's skills in the folder, once listed; null while none were asked for or the answer is on its way */
   const [skills, setSkills] = useState<{ rows: SlashCommand[]; note: string | null } | null>(null);
   const [pending, setPending] = useState(false);
@@ -206,6 +209,13 @@ export function NewSessionDialog({ open, defaultCwd, tab = null, onClose, onCrea
   }, [open, agentKind, skillFolder]);
 
   useEffect(() => {
+    if (!open || agentKind !== "opencode") return;
+    let alive = true;
+    fetchAgentModels("opencode").then((found) => { if (alive) setOpencodeModels(found); }, () => { if (alive) setOpencodeModels(null); });
+    return () => { alive = false; };
+  }, [open, agentKind, fetchAgentModels]);
+
+  useEffect(() => {
     if (!open) return;
     const onKeyDown = (event: KeyboardEvent): void => {
       // a native modal over it (Add PC, from the palette) takes its own Escape
@@ -227,7 +237,11 @@ export function NewSessionDialog({ open, defaultCwd, tab = null, onClose, onCrea
   const launched = newSessionLaunch({ agent: agentKind, model, effort, prompt }, settings);
   const fault = "fault" in launched ? launched.fault : null;
   const launch = "fault" in launched ? null : launched;
-  const suggestions = modelSuggestions(agentKind);
+  // OpenCode's models are `provider/id`, offered only while the bridge lists them: without its 1.x HTTP source the
+  // agent on the PC may be another OpenCode, whose command line this dialog does not know
+  const launchModels = agentKind === "opencode" ? opencodeLaunchModels(opencodeModels) : [];
+  const modelField = can.model && (agentKind !== "opencode" || launchModels.length > 0);
+  const suggestions: { value: string; label?: string }[] = agentKind === "opencode" ? launchModels : modelSuggestions(agentKind).map((alias) => ({ value: alias }));
   // what the picker's rows say each launch takes: only the agents whose command line takes a model and a level
   const pickerHints = Object.fromEntries(agents.flatMap((agent) => {
     const takes = launchCapabilities(agent.kind);
@@ -379,8 +393,8 @@ export function NewSessionDialog({ open, defaultCwd, tab = null, onClose, onCrea
             <span className="field-hint">{t(tab ? "Tab name (optional)" : "Optional workspace label")}</span>
           </label>
           {/* the launch's own choices, only where the agent's command line takes them (lib/agentLaunchMode.ts) */}
-          {(can.model || can.efforts.length > 0) && <div className="new-session-launch">
-            {can.model && <div className="field">
+          {(modelField || can.efforts.length > 0) && <div className="new-session-launch">
+            {modelField && <div className="field">
               <label className="field-label" htmlFor="new-session-model">{t("Model")}</label>
               <input
                 id="new-session-model"
@@ -396,7 +410,7 @@ export function NewSessionDialog({ open, defaultCwd, tab = null, onClose, onCrea
                 aria-describedby="new-session-model-hint"
                 onChange={(event) => setModel(event.target.value)}
               />
-              {suggestions.length > 0 && <datalist id="new-session-models">{suggestions.map((alias) => <option key={alias} value={alias} />)}</datalist>}
+              {suggestions.length > 0 && <datalist id="new-session-models">{suggestions.map((choice) => <option key={choice.value} value={choice.value} label={choice.label} />)}</datalist>}
               <span id="new-session-model-hint" className={`field-hint${fault === "model" ? " new-session-error" : ""}`} role={fault === "model" ? "alert" : undefined}>
                 {fault === "model" ? t("One model name, without spaces.") : t("Empty: the agent's own model.")}
               </span>

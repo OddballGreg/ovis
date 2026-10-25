@@ -60,6 +60,10 @@ const CAPABILITIES: Readonly<Record<string, LaunchCapabilities>> = {
   // 2026-10-20: `codex -- logout`, `-- update`, `-- --help` and `-- '-p x'` all started the TUI, and
   // `codex -- logout extra` failed with the root `[PROMPT]` usage, `codex logout extra` with the subcommand's
   codex: { model: true, efforts: CODEX_EFFORTS, positionalPrompt: true },
+  // OpenCode 1.x: `-m, --model  model to use in the format of provider/model` (`opencode --help` of 1.19, 2026-10-25).
+  // Its `--prompt` is not taken: a first message is the bridge's pending message. The dialog shows the model
+  // field only while the bridge lists OpenCode's models (GET /api/agent/models), which needs its 1.x HTTP source
+  opencode: { model: true, efforts: [], positionalPrompt: false },
 };
 
 /**

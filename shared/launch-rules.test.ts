@@ -21,6 +21,10 @@ describe("an agent's launch arguments", () => {
     expect(launchArgsFault("claude", ["--effort", "ultra"])).toContain("--effort");
     expect(launchArgsFault("codex", ["-c", "model_reasoning_effort=ultra", "-m", "gpt-6.1"])).toBeNull();
     expect(launchArgsFault("codex", ["-c", "model_reasoning_effort=ultracode"])).toContain("model_reasoning_effort");
+    // OpenCode 1.x's model is `provider/model`, in either spelling
+    expect(launchArgsFault("opencode", ["--model", "opencode-go/kimi-k3.1-pro"])).toBeNull();
+    expect(launchArgsFault("opencode", ["-m", "two words"])).toContain("--model");
+    expect(launchArgsFault("opencode", ["--model=--help"])).toContain("--model");
     // other agents' arguments are theirs: only control characters are refused there
     expect(launchArgsFault("omp", ["--model", "two words"])).toBeNull();
   });

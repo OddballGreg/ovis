@@ -46,9 +46,11 @@ export function firstMessageFault(value: unknown, agent: unknown): string | null
 
 type LaunchFlag = "model" | "effort" | "config";
 /** the flags whose values are checked, by agent: Codex's `-c`/`--config` sets `model` and `model_reasoning_effort` too */
-const LAUNCH_FLAGS: Record<"claude" | "codex", Record<string, LaunchFlag>> = {
+const LAUNCH_FLAGS: Record<"claude" | "codex" | "opencode", Record<string, LaunchFlag>> = {
   claude: { "--model": "model", "--effort": "effort" },
   codex: { "--model": "model", "-m": "model", "--config": "config", "-c": "config" },
+  // OpenCode 1.x: "-m, --model  model to use in the format of provider/model" (`opencode --help`, 1.19)
+  opencode: { "--model": "model", "-m": "model" },
 };
 
 /**
@@ -75,13 +77,13 @@ const configValue = (value: string): string => {
 /**
  * What is wrong with an agent's launch arguments, in the API's words; null when they can be passed. No
  * argument may hold a control character. Claude Code's and Codex's model and effort flags take only
- * the values the dialog offers, in every spelling their CLIs accept, and Codex's prompt after `--`
+ * the values the dialog offers, in every spelling their CLIs accept (OpenCode's model flag too), and Codex's prompt after `--`
  * follows a first message's rules.
  */
 export function launchArgsFault(kind: string, args: readonly string[]): string | null {
   if (!args.every(argumentText)) return "agent.args must not contain control characters (a tab or a line break included)";
-  if (kind !== "claude" && kind !== "codex") return null;
-  const efforts: readonly string[] = kind === "claude" ? CLAUDE_EFFORTS : CODEX_EFFORTS;
+  if (kind !== "claude" && kind !== "codex" && kind !== "opencode") return null;
+  const efforts: readonly string[] = kind === "claude" ? CLAUDE_EFFORTS : kind === "codex" ? CODEX_EFFORTS : [];
   for (let at = 0; at < args.length; at++) {
     const arg = args[at]!;
     if (arg === "--") {
