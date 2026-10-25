@@ -718,8 +718,8 @@ export async function agentGet(paneId: string, socketPath?: string): Promise<Age
   return (await herdrRpc("agent.get", { target: paneId }, socketPath)).agent;
 }
 
-export async function paneSendText(paneId: string, text: string, socketPath?: string, guard?: () => boolean): Promise<void> {
-  await herdrRpc("pane.send_text", { pane_id: paneId, text }, socketPath, undefined, guard);
+export async function paneSendText(paneId: string, text: string, socketPath?: string, guard?: () => boolean, timeoutMs?: number): Promise<void> {
+  await herdrRpc("pane.send_text", { pane_id: paneId, text }, socketPath, timeoutMs, guard);
 }
 
 /**
@@ -732,8 +732,8 @@ export async function agentPrompt(target: string, text: string, socketPath?: str
   await herdrRpc("agent.prompt", { target, text }, socketPath, undefined, guard);
 }
 
-export async function paneSendKeys(paneId: string, keys: string[], socketPath?: string, guard?: () => boolean): Promise<void> {
-  await herdrRpc("pane.send_keys", { pane_id: paneId, keys }, socketPath, undefined, guard);
+export async function paneSendKeys(paneId: string, keys: string[], socketPath?: string, guard?: () => boolean, timeoutMs?: number): Promise<void> {
+  await herdrRpc("pane.send_keys", { pane_id: paneId, keys }, socketPath, timeoutMs, guard);
 }
 
 export async function paneClose(paneId: string, socketPath?: string): Promise<void> {

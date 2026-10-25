@@ -7,16 +7,20 @@ import { join } from "node:path";
 import type { OpencodeModelCatalog, OpencodeProvider } from "../shared/protocol.ts";
 import {
   ansiCells,
+  dialogOnScreen,
   driveModelDialog,
   footerModel,
   footerNames,
   forgetOpencodeModels,
   handleOpencodeModelRequest,
   OPENCODE_MODEL_CATALOG_MS,
+  OPENCODE_MODEL_MAX_NAME,
+  OPENCODE_MODEL_STALE_MS,
   opencodeModelCatalog,
   opencodeModelOptions,
   opencodeProviders,
   parseSelectDialog,
+  promptBox,
   promptFooter,
   rowMatch,
   type DriveDeps,
@@ -51,6 +55,31 @@ describe("OpenCode's provider list", () => {
     ]);
   });
 
+  it("lists no provider or model whose id or name holds a key or an invisible mark, or is too long: names are typed into the pane", () => {
+    const providers = opencodeProviders({
+      providers: [
+        { id: "p", name: "P", models: {
+          ok: { name: "Fine 1.5 (preview)" },
+          esc: { name: "Bad\u001b[2J" },
+          cr: { name: "Bad\rName" },
+          lf: { name: "Two\nlines" },
+          del: { name: "Rub\u007fout" },
+          c1: { name: "Csi\u009b2J" },
+          bidi: { name: "Left\u202eright" },
+          zw: { name: "Zero\u200bwidth" },
+          sep: { name: "Line\u2028sep" },
+          long: { name: "x".repeat(OPENCODE_MODEL_MAX_NAME + 1) },
+          "id\u001bx": { name: "Hidden id" },
+          "bare\rid": {},
+          [`${"y".repeat(OPENCODE_MODEL_MAX_NAME)}`]: { name: "Longest id" },
+        } },
+        { id: "q", name: "Provider\u001b", models: { m: { name: "M" } } },
+        { id: "r\u0000", name: "R", models: { m: { name: "M" } } },
+      ],
+    });
+    expect(providers).toEqual([{ id: "p", name: "P", models: [{ id: "ok", name: "Fine 1.5 (preview)" }, { id: "y".repeat(OPENCODE_MODEL_MAX_NAME), name: "Longest id" }] }]);
+  });
+
   it("reads nothing from an answer of another shape", () => {
     expect(opencodeProviders(null)).toBeNull();
     expect(opencodeProviders({ all: [] })).toBeNull();
@@ -75,6 +104,10 @@ describe("OpenCode's provider list", () => {
     answer = null;
     expect(await opencodeModelCatalog()).toEqual(first);
     expect(reads).toBe(2);
+    // a list read before answers a failed read only while it is younger than ten minutes
+    now = 1_000 + OPENCODE_MODEL_STALE_MS;
+    expect(await opencodeModelCatalog()).toBeNull();
+    expect(reads).toBe(3);
   });
 
   it("offers nothing without the HTTP source", async () => {
@@ -127,8 +160,52 @@ describe("OpenCode's model dialog on the screen", () => {
     expect(footerModel(fixture("closed"), providers)).toEqual({ provider_id: "gitlab", model_id: "opus-5-5" });
     expect(footerModel(fixture("closed-after-variant"), providers)).toEqual({ provider_id: "gitlab", model_id: "gpt-6-1-sol" });
     expect(footerModel(fixture("closed"), providers.slice(1))).toBeNull();
-    // the dialog covers the footer's model
-    expect(promptFooter(fixture("claude-first"))).toBeNull();
+    // the dialog covers the footer's model: the prompt is there, its model is not read
+    expect(promptFooter(fixture("claude-first"))).toBe("");
+    expect(footerModel(fixture("claude-first"), providers)).toBeNull();
+  });
+
+  it("reads the prompt box of a session by where it is drawn: its draft, and its footer under it", () => {
+    // a session's view, with a three-line draft typed (ctrl+j) and not sent, before and after a switch
+    const draft = ["Draft line one, not sent", "line two · with a dot", "line three"];
+    expect(promptBox(fixture("session-draft"))).toEqual({ draft, footer: "Kimi K3.1 Pro OpenCode Go" });
+    expect(promptBox(fixture("session-switched"))).toEqual({ draft, footer: "Agentic Chat (Claude Sonnet 5.5) GitLab Duo" });
+    // a prompt with nothing typed draws its placeholder
+    expect(promptBox(fixture("closed"))?.draft).toEqual(["Ask anything… \"What is the tech stack of this project?\""]);
+    expect(promptBox(`${BASE}Sessions\r\n${BASE}  nothing here`)).toBeNull();
+  });
+
+  it("reads no transcript line drawn after a ┃ as the footer, nor a footer that names no model", () => {
+    const rows = fixture("session-draft").split("\n");
+    // a transcript line above the box, drawn after a ┃ and holding " · "
+    const transcript = rows.slice();
+    transcript[10] = `${BASE}  ┃  Build · Claude Haiku 5.5 OpenCode Go`;
+    transcript[11] = `${BASE}  ┃`;
+    expect(promptFooter(transcript.join("\n"))).toBe("Kimi K3.1 Pro OpenCode Go");
+    // a footer with no " · " (a shell prompt names no model): the transcript line is still not read
+    const shell = transcript.map((row) => row.includes("Kimi K3.1 Pro") ? `${BASE}  ┃  Shell` : row);
+    expect(promptFooter(shell.join("\n"))).toBe("");
+    // a theme that draws no row under the box: the bottom-most ┃ row is the footer
+    const open = shell.map((row) => row.includes("╹") ? `${BASE}` : row);
+    expect(promptFooter(open.join("\n"))).toBe("");
+    expect(promptFooter(transcript.map((row) => row.includes("╹") ? `${BASE}` : row).join("\n"))).toBe("Kimi K3.1 Pro OpenCode Go");
+    // "Build auto · …": an agent of two words
+    expect(promptFooter(rows.map((row) => row.replace("Plan · ", "Plan auto · ")).join("\n"))).toBe("Kimi K3.1 Pro OpenCode Go");
+  });
+
+  it("knows any dialog is open, whatever its title, by its header or its frame", () => {
+    for (const name of ["claude-first", "variant", "no-results", "session-dialog", "session-themes"]) expect(dialogOnScreen(fixture(name)), name).toBe(true);
+    for (const name of ["closed", "closed-after-variant", "session-draft", "session-switched"]) expect(dialogOnScreen(fixture(name)), name).toBe(false);
+    // the themes list is no model dialog, but it is a dialog
+    expect(parseSelectDialog(fixture("session-themes"))).toBeNull();
+    // a frame with no header row: a panel of a dialog's width, centred, three rows
+    const width = 120;
+    const panel = (text = ""): string => `${BASE}${" ".repeat(30)}${PANEL}${text.padEnd(60)}${BASE}${" ".repeat(width - 90)}`;
+    expect(dialogOnScreen([panel(), panel("  Working on it"), panel()].join("\n"))).toBe(true);
+    expect(dialogOnScreen([panel(), panel("  Working on it")].join("\n"))).toBe(false);
+    // a header in a read without colours
+    expect(dialogOnScreen("\n                     Status                         esc/enter\n")).toBe(true);
+    expect(dialogOnScreen(fixture("closed").replace(/\u001b\[[0-9;]*m/gu, ""))).toBe(false);
   });
 
   it("tells a row and a footer of this model from one of another", () => {
@@ -164,14 +241,23 @@ const WIDTH = 50;
 const WINDOW = 6;
 
 class FakeTui {
-  dialog: null | "model" | "variant" = null;
+  dialog: null | "model" | "variant" | "other" = null;
   query = "";
   cursor = 0;
   scroll = 0;
   sent: string[] = [];
+  /** the prompt's draft: its placeholder is drawn while it is empty */
   typedIntoPrompt = "";
   opens = true;
   confirms = true;
+  /** where an `m` goes when ctrl+x m opens no dialog: nowhere, or into the draft at its end or its start */
+  strayM: "none" | "end" | "start" = "none";
+  /** whether Escape closes a dialog */
+  closes = true;
+  /** a key whose sending fails, as a pane that cannot be written to does */
+  failKey: string | null = null;
+  /** the timeouts each read and write was given */
+  timeouts: number[] = [];
   constructor(public models: FakeModel[], public current: FakeModel) {}
 
   filtered(): FakeModel[] {
@@ -183,8 +269,13 @@ class FakeTui {
     for (const key of keys) {
       this.sent.push(key);
       const rows = this.filtered();
-      if (key === "m" && this.sent.at(-2) === "ctrl+x") { if (this.opens && this.dialog === null) { this.dialog = "model"; this.query = ""; this.cursor = 0; this.scroll = 0; } }
-      else if (key === "esc") this.dialog = null;
+      if (key === "m" && this.sent.at(-2) === "ctrl+x") {
+        if (this.opens && this.dialog === null) { this.dialog = "model"; this.query = ""; this.cursor = 0; this.scroll = 0; }
+        else if (!this.opens && this.strayM === "end") this.typedIntoPrompt += "m";
+        else if (!this.opens && this.strayM === "start") this.typedIntoPrompt = `m${this.typedIntoPrompt}`;
+      }
+      else if (key === "esc") { if (this.closes) this.dialog = null; }
+      else if (key === "backspace" && this.dialog === null) this.typedIntoPrompt = this.typedIntoPrompt.slice(0, -1);
       else if (key === "down" && this.dialog === "model" && rows.length > 0) {
         this.cursor = (this.cursor + 1) % rows.length;
         if (this.cursor === 0) this.scroll = 0;
@@ -209,7 +300,7 @@ class FakeTui {
   screen(): string {
     const lines: string[] = [`${BASE}${" ".repeat(70)}`];
     if (this.dialog !== null) {
-      const title = this.dialog === "model" ? "Select model" : "Select variant";
+      const title = this.dialog === "model" ? "Select model" : this.dialog === "variant" ? "Select variant" : "Themes";
       lines.push(`${BASE}${" ".repeat(10)}${PANEL}    ${title}${" ".repeat(WIDTH - 11 - title.length)}esc    ${BASE}${" ".repeat(10)}`);
       lines.push(this.panelLine(""));
       lines.push(this.panelLine(`   ${this.query || "Search"}`));
@@ -226,16 +317,23 @@ class FakeTui {
       }
       lines.push(this.panelLine(""), this.panelLine("   Connect provider ctrl+a"), this.panelLine(""));
     }
-    lines.push(`${BASE}  ┃  Build · ${this.current.name} ${this.current.provider}`);
+    // the prompt box: a padding row, the draft (or its placeholder), a padding row, the footer, and the row that ends it
+    const draft = this.typedIntoPrompt === "" ? ["Ask anything"] : this.typedIntoPrompt.split("\n");
+    lines.push(`${BASE}  ┃`, ...draft.map((row) => `${BASE}  ┃  ${row}`), `${BASE}  ┃`);
+    lines.push(`${BASE}  ┃  Build · ${this.current.name} ${this.current.provider}`, `${BASE}  ╹${"▀".repeat(60)}`);
     return lines.join("\r\n");
   }
 
   deps(): DriveDeps & { time: number } {
     const deps = {
       time: 0,
-      read: async () => this.screen(),
-      keys: async (keys: string[]) => this.keys(keys),
-      type: async (text: string) => this.type(text),
+      read: async (timeoutMs: number) => { this.timeouts.push(timeoutMs); return this.screen(); },
+      keys: async (keys: string[], timeoutMs: number) => {
+        this.timeouts.push(timeoutMs);
+        if (this.failKey !== null && keys.includes(this.failKey)) throw new Error("pane.send_keys timed out");
+        this.keys(keys);
+      },
+      type: async (text: string, timeoutMs: number) => { this.timeouts.push(timeoutMs); this.type(text); },
       sleep: async (ms: number) => { deps.time += ms; },
       now: () => deps.time,
     };
@@ -279,22 +377,63 @@ describe("driving OpenCode's model dialog", () => {
     expect(tui.sent.at(-1)).toBe("esc");
   });
 
-  it("refuses before any key when a dialog is open or the prompt is not on the screen", async () => {
-    const open = new FakeTui(MODELS, MODELS[0]!);
-    open.dialog = "model";
-    expect(await driveModelDialog(open.deps(), { name: "Claude Haiku 5.5", provider: "OpenCode Go" })).toMatchObject({ ok: false, code: "dialog_open" });
-    expect(open.sent).toEqual([]);
+  it("refuses before any key when any dialog is open, the prompt is not on the screen or names no model, or the request was given up", async () => {
+    for (const dialog of ["model", "other"] as const) {
+      const open = new FakeTui(MODELS, MODELS[0]!);
+      open.dialog = dialog;
+      expect(await driveModelDialog(open.deps(), { name: "Claude Haiku 5.5", provider: "OpenCode Go" })).toMatchObject({ ok: false, code: "dialog_open" });
+      expect(open.sent).toEqual([]);
+    }
     const other = new FakeTui(MODELS, MODELS[0]!);
     const deps = { ...other.deps(), read: async () => `${BASE}Sessions\r\n${BASE}  nothing here` };
     expect(await driveModelDialog(deps, { name: "Claude Haiku 5.5", provider: "OpenCode Go" })).toMatchObject({ ok: false, code: "not_ready" });
-    expect(other.sent).toEqual([]);
+    const shell = new FakeTui(MODELS, MODELS[0]!);
+    const shellDeps = { ...shell.deps(), read: async () => shell.screen().replace(/Build · .*/u, "Shell") };
+    expect(await driveModelDialog(shellDeps, { name: "Claude Haiku 5.5", provider: "OpenCode Go" })).toMatchObject({ ok: false, code: "not_ready" });
+    const given = new FakeTui(MODELS, MODELS[0]!);
+    expect(await driveModelDialog(given.deps(), { name: "Claude Haiku 5.5", provider: "OpenCode Go" }, undefined, AbortSignal.abort())).toMatchObject({ ok: false, code: "aborted" });
+    expect([other.sent, shell.sent, given.sent]).toEqual([[], [], []]);
+  });
+
+  it("types no name that holds a key or an invisible mark", async () => {
+    for (const name of ["Opus\u001b[2J", "Opus\r", "Opus\n", "Op\u202eus", "x".repeat(201)]) {
+      const tui = new FakeTui(MODELS, MODELS[0]!);
+      expect(await driveModelDialog(tui.deps(), { name, provider: "GitLab Duo" }), JSON.stringify(name)).toMatchObject({ ok: false, code: "unknown_model" });
+      expect(await driveModelDialog(tui.deps(), { name: "Claude Haiku 5.5", provider: `${name}` })).toMatchObject({ ok: false, code: "unknown_model" });
+      expect(tui.sent).toEqual([]);
+    }
   });
 
   it("gives up when the dialog does not open, sending no Escape to the prompt", async () => {
     const tui = new FakeTui(MODELS, MODELS[0]!);
     tui.opens = false;
-    expect(await driveModelDialog(tui.deps(), { name: "Claude Haiku 5.5", provider: "OpenCode Go" })).toMatchObject({ ok: false, code: "dialog_not_opened" });
+    const result = await driveModelDialog(tui.deps(), { name: "Claude Haiku 5.5", provider: "OpenCode Go" });
+    expect(result).toMatchObject({ ok: false, code: "dialog_not_opened" });
+    expect(result.ok ? "" : result.message).toContain("as it was");
     expect(tui.sent).toEqual(["ctrl+x", "m"]);
+  });
+
+  it("takes back an m that ctrl+x m left at the end of the draft, with one Backspace, and nothing else", async () => {
+    for (const draft of ["first line\nsecond line", ""]) {
+      const tui = new FakeTui(MODELS, MODELS[0]!);
+      tui.opens = false;
+      tui.strayM = "end";
+      tui.typedIntoPrompt = draft;
+      const result = await driveModelDialog(tui.deps(), { name: "Claude Haiku 5.5", provider: "OpenCode Go" });
+      expect(result).toMatchObject({ ok: false, code: "dialog_not_opened" });
+      expect(result.ok ? "" : result.message).toContain("taken back");
+      expect(tui.typedIntoPrompt).toBe(draft);
+      expect(tui.sent).toEqual(["ctrl+x", "m", "backspace"]);
+    }
+    // an m that went anywhere but the end is not the draft's last character: it is said, and left
+    const start = new FakeTui(MODELS, MODELS[0]!);
+    start.opens = false;
+    start.strayM = "start";
+    start.typedIntoPrompt = "keep this";
+    const result = await driveModelDialog(start.deps(), { name: "Claude Haiku 5.5", provider: "OpenCode Go" });
+    expect(result.ok ? "" : result.message).toContain("left as it is");
+    expect(start.typedIntoPrompt).toBe("mkeep this");
+    expect(start.sent).toEqual(["ctrl+x", "m"]);
   });
 
   it("closes the dialog with one Escape when the row is not there", async () => {
@@ -305,13 +444,46 @@ describe("driving OpenCode's model dialog", () => {
     expect(tui.current).toBe(MODELS[0]!);
   });
 
-  it("says when the footer never shows the model, within its time", async () => {
+  it("closes the dialog and says why when the pane cannot be written to or read after the first key", async () => {
+    const tui = new FakeTui(MODELS, MODELS[0]!);
+    tui.failKey = "down";
+    const written = await driveModelDialog(tui.deps(), { name: "Agentic Chat (Claude Sonnet 5)", provider: "GitLab Duo" });
+    expect(written).toMatchObject({ ok: false, code: "pane_error" });
+    expect(written.ok ? "" : written.message).toContain("timed out");
+    expect(tui.dialog).toBeNull();
+    expect(tui.sent.at(-1)).toBe("esc");
+    // a pane that stops answering reads: one Escape all the same, and the dialog may still be open
+    const silent = new FakeTui(MODELS, MODELS[0]!);
+    const deps = silent.deps();
+    let reads = 0;
+    const read = deps.read;
+    deps.read = async (timeoutMs) => { reads += 1; if (reads > 2) throw new Error("pane.read timed out"); return read(timeoutMs); };
+    expect(await driveModelDialog(deps, { name: "Agentic Chat (Claude Sonnet 5)", provider: "GitLab Duo" })).toMatchObject({ ok: false, code: "pane_error", dialog_left_open: true });
+    expect(silent.sent.filter((key) => key === "esc")).toEqual(["esc"]);
+  });
+
+  it("waits for the closing Escape to close the dialog, and says when it does not", async () => {
+    const tui = new FakeTui(MODELS, MODELS[0]!);
+    tui.closes = false;
+    const deps = tui.deps();
+    const result = await driveModelDialog(deps, { name: "Agentic Chat (Claude Opus 4.8)", provider: "OpenCode Go" });
+    expect(result).toMatchObject({ ok: false, code: "model_not_found", dialog_left_open: true });
+    expect(result.ok ? "" : result.message).toContain("still open");
+    expect(tui.sent.filter((key) => key === "esc")).toEqual(["esc"]);
+  });
+
+  it("says when the footer never shows the model, within its time, and what it shows", async () => {
     const tui = new FakeTui(MODELS, MODELS[0]!);
     tui.confirms = false;
     const deps = tui.deps();
-    expect(await driveModelDialog(deps, { name: "Agentic Chat (Claude Opus 5)", provider: "GitLab Duo" }, 3_000)).toMatchObject({ ok: false, code: "not_confirmed" });
+    const result = await driveModelDialog(deps, { name: "Agentic Chat (Claude Opus 5)", provider: "GitLab Duo" }, 3_000);
+    expect(result).toMatchObject({ ok: false, code: "not_confirmed" });
+    expect(result.ok ? "" : result.message).toContain("\"Claude Haiku 5.5 OpenCode Go\"");
     expect(deps.time).toBeLessThanOrEqual(3_000 + 100);
     expect(tui.sent.includes("esc")).toBe(false);
+    // each read and write is bounded by what is left of the budget
+    expect(Math.max(...tui.timeouts)).toBeLessThanOrEqual(2_000);
+    expect(Math.min(...tui.timeouts)).toBe(100);
   });
 });
 
@@ -416,5 +588,32 @@ describe("the model routes", () => {
     forgetOpencodeModels();
     opencodeModelOptions.endpoint = async () => null;
     expect((await call("/api/pane/opencode-model", { pane_id: "w1:p1", provider_id: "gitlab", model_id: "sonnet-5" })).status).toBe(503);
+  });
+
+  it("refuses a model whose name and provider another has too, and names none of them in use", async () => {
+    opencodeModelOptions.endpoint = async () => ({ baseUrl: "http://127.0.0.1:1", authorization: null });
+    opencodeModelOptions.read = async () => ({
+      providers: [{ id: "gitlab", name: "GitLab Duo", models: { "opus-5-5": { name: "Agentic Chat (Claude Opus 5.5)" }, "opus-5-5-again": { name: "Agentic Chat (Claude Opus 5.5)" }, "sonnet-5": { name: "Agentic Chat (Claude Sonnet 5)" } } }],
+    });
+    const tui = new FakeTui(MODELS, MODELS[2]!);
+    await withHerdr(tui, { agent: "opencode", agent_status: "idle" }, async () => {
+      const response = await call("/api/pane/opencode-model", { pane_id: "w1:p1", provider_id: "gitlab", model_id: "opus-5-5-again" });
+      expect([response.status, ((await response.json()) as { error: { code: string } }).error.code]).toEqual([422, "ambiguous_model"]);
+      expect(tui.sent).toEqual([]);
+      expect(((await (await call("/api/pane/opencode-models?pane_id=w1:p1")).json()) as OpencodeModelCatalog).current).toBeNull();
+    });
+  });
+
+  it("sends nothing for a request given up while it waited its turn", async () => {
+    configure();
+    const tui = new FakeTui(MODELS, MODELS[2]!);
+    await withHerdr(tui, { agent: "opencode", agent_status: "idle" }, async () => {
+      const controller = new AbortController();
+      const url = new URL("http://localhost/api/pane/opencode-model");
+      const request = new Request(url, { method: "POST", signal: controller.signal, body: JSON.stringify({ pane_id: "w1:p1", provider_id: "gitlab", model_id: "sonnet-5" }), headers: { "content-type": "application/json" } });
+      const response = (await handleOpencodeModelRequest(request, url, url.pathname, { serialize: async (_pane, task) => { controller.abort(); return task(); } }))!;
+      expect(((await response.json()) as { error: { code: string } }).error.code).toBe("aborted");
+      expect(tui.sent).toEqual([]);
+    });
   });
 });

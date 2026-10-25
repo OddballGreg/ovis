@@ -1354,7 +1354,7 @@ export function Composer({
           )}
           <BackgroundTasks paneId={paneId} count={backgroundTasks} omo={agent === "omo"} claude={agent === "claude"} plan={plan} />
           {/* OpenCode 1.x keeps its model in the TUI: the chip lists the models and picks one there (server/opencode-model.ts) */}
-          {agent === "opencode" && <OpencodeModelPicker paneId={paneId} busy={isWorking || agentStatus === "blocked"} disabled={!connected || role === "observe"} onOpenTerminal={onOpenTerminal} />}
+          {agent === "opencode" && <OpencodeModelPicker key={paneId} paneId={paneId} busy={isWorking || agentStatus === "blocked"} disabled={!connected || role === "observe"} onOpenTerminal={onOpenTerminal} />}
         </div>
         {/* between the two control groups of the card's last row. The agent's name, its separator and the
             state word are read, not drawn: the mark and the header name the agent, and Stop, the live row and

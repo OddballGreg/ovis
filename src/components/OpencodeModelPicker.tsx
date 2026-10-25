@@ -13,7 +13,7 @@ import type { OpencodeModelCatalog } from "../../shared/protocol.ts";
 export type Switch = { kind: "idle" } | { kind: "switching"; name: string } | { kind: "failed"; code: string | null; detail: string };
 
 /** The failures that only a hand in the terminal can get past: the chip offers the terminal for them. */
-const TERMINAL_FAILURES = new Set(["not_ready", "dialog_not_opened", "model_not_found", "not_confirmed", "timeout", "dialog_open"]);
+const TERMINAL_FAILURES = new Set(["not_ready", "pane_error", "dialog_not_opened", "model_not_found", "not_confirmed", "timeout", "dialog_open"]);
 
 /**
  * The model of an OpenCode 1.x pane, as a chip in the composer's row: it names the model the TUI's

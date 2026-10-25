@@ -239,9 +239,12 @@ export type { Machine, MachineEvent, MachineRoster, PaneTarget, SetupJob, SetupR
  *  POST   /api/pane/opencode-model { pane_id, provider_id, model_id } -> { ok: true, model }
  *         (picks the model in the pane's OpenCode 1.x TUI through its own "Select model" dialog, as a
  *         person would: ctrl+x m, the name typed, the row chosen, Enter; then reads the prompt footer
- *         back. 409 busy / dialog_open / not_ready before any key; 422 unknown_model; 502
- *         dialog_not_opened / model_not_found / not_confirmed / timeout after Escape closed the dialog
- *         it opened; 503 unavailable; 403 read_only for a watching device)
+ *         back. 409 busy / dialog_open (any dialog) / not_ready / aborted before any key; 422
+ *         unknown_model (a name with a control or format character is not listed) / ambiguous_model
+ *         (another model has the same name and provider); 502 pane_error / dialog_not_opened /
+ *         model_not_found / not_confirmed / timeout after one Escape closed a dialog still drawn,
+ *         with error.dialog_left_open: true when it did not; 503 unavailable; 403 read_only for a
+ *         watching device)
  *  GET    /api/pane/files?pane_id=&q=&limit=  -> { files: string[] } (paths relative to the pane
  *         cwd matching q, for @-mentions; git ls-files when the cwd is a repo, bounded walk otherwise)
  *  GET    /api/workspace/diff/files?pane_id=&directory=&scope=&base=&head= -> RepoDiffFileList
@@ -683,7 +686,8 @@ export interface OpencodeProvider {
  * GET /api/pane/opencode-models?pane_id= and GET /api/agent/models?agent=opencode: the models an
  * OpenCode 1.x pane can switch to. `available` is false when the OpenCode HTTP source is not
  * configured or does not answer, or the pane is not OpenCode; `current` is the model the pane's
- * prompt footer shows, null when it shows none this list knows (and always null without a pane).
+ * prompt footer shows, null when it shows none this list knows or one it cannot tell apart from
+ * another of the same name and provider (and always null without a pane).
  */
 export interface OpencodeModelCatalog {
   available: boolean;
@@ -700,8 +704,8 @@ export interface OpencodeModelRequest {
 
 /** Why a model switch did not happen; `terminal`: what the user can still do in the terminal by hand. */
 export type OpencodeModelFailure =
-  | "unavailable" | "not_opencode" | "busy" | "dialog_open" | "not_ready" | "unknown_model"
-  | "dialog_not_opened" | "model_not_found" | "not_confirmed" | "timeout";
+  | "unavailable" | "not_opencode" | "busy" | "dialog_open" | "not_ready" | "aborted" | "unknown_model" | "ambiguous_model"
+  | "pane_error" | "dialog_not_opened" | "model_not_found" | "not_confirmed" | "timeout";
 
 /** How far a pane's plan has got, for the sidebar: `current` names the step in progress. */
 export interface PlanSummary {
