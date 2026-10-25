@@ -529,7 +529,7 @@ describe("driving OpenCode's model dialog", () => {
     expect(tight.sent.at(-1)).toBe("esc");
   });
 
-  it("takes an Enter herdr could not confirm as the switch once the footer shows the model, and closes a dialog it left", async () => {
+  it("takes an Enter herdr could not confirm as the switch once the footer shows the model, and leaves the list open when it never lands", async () => {
     const tui = new FakeTui(MODELS, MODELS[2]!);
     tui.late = { key: "enter", ms: 150 };
     expect(await driveModelDialog(tui.deps(), { name: "Agentic Chat (Claude Sonnet 5)", provider: "GitLab Duo" })).toEqual({ ok: true });
@@ -542,15 +542,18 @@ describe("driving OpenCode's model dialog", () => {
     expect(await driveModelDialog(variant.deps(), { name: "Agentic Chat (GPT-6 Sol)", provider: "GitLab Duo" })).toEqual({ ok: true });
     expect(variant.current).toBe(MODELS[9]!);
     expect(variant.dialog).toBeNull();
-    // an Enter that never lands: the model dialog is closed and nothing was switched
+    // an Enter that has not landed by the end of the window: no Escape, the model list stays open on
+    // the target, so an Enter that lands even later only picks that row and never sends the draft
+    const draft = "my unsent draft";
     const lost = new FakeTui(MODELS, MODELS[2]!);
+    lost.typedIntoPrompt = draft;
     lost.late = { key: "enter", ms: 1_000_000_000 };
     const result = await driveModelDialog(lost.deps(), { name: "Agentic Chat (Claude Sonnet 5)", provider: "GitLab Duo" });
-    expect(result).toMatchObject({ ok: false, code: "pane_error" });
-    expect("dialog_left_open" in result).toBe(false);
-    expect(lost.dialog).toBeNull();
+    expect(result).toMatchObject({ ok: false, code: "pane_error", dialog_left_open: true });
+    expect(lost.dialog).not.toBeNull();
     expect(lost.current).toBe(MODELS[2]!);
-    expect(lost.sent.at(-1)).toBe("esc");
+    expect(lost.sent.includes("esc")).toBe(false);
+    expect([lost.typedIntoPrompt, lost.submitted]).toEqual([draft, []]);
   });
 
   it("sends no Escape while the keys of a failed write may still land, so none falls into the prompt's draft", async () => {

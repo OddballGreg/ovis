@@ -547,7 +547,10 @@ const quoted = (value: string): string => JSON.stringify(value.slice(0, OPENCODE
  * OPENCODE_MODEL_CLOSE_MS for the dialog to go; one still open is said (`dialog_left_open`). After a
  * write that failed, its keys may still land: until OPENCODE_MODEL_LATE_MS after it (the budget
  * permitting) nothing is said to be drawn and no Escape is sent, so they land in the dialog and not
- * in the prompt, and an Enter that failed but whose pick the footer then shows is a switch made. At
+ * in the prompt, and an Enter that failed but whose pick the footer then shows is a switch made. An
+ * Enter that failed and still has not landed then leaves the model list open on its target, with no
+ * Escape (`dialog_left_open`): an Enter that lands even later only picks that row, where one after an
+ * Escape would send the prompt's draft. At
  * most two Escapes are sent in all: one for a variant list, one to close. When ctrl+x m opened no
  * dialog, an `m` it left at the end of the draft is taken back with one Backspace, and any other
  * change to the draft is said and left alone.
@@ -705,6 +708,11 @@ export async function driveModelDialog(deps: DriveDeps, target: { name: string; 
         shown = footer;
       }
       if (deps.now() >= end) {
+        // the model list is still drawn on its target: an Enter that lands later only picks that row,
+        // and an Escape it lands after would leave it to send the prompt's draft, so no Escape is sent
+        if (enterFailed && screen !== null && modelDialog(screen) !== null) {
+          return { ...refuse("pane_error", `${reason(enterError)}; the model list is left open on the model, press Enter or Escape in the terminal`), dialog_left_open: true };
+        }
         if (enterFailed) return await fail("pane_error", reason(enterError));
         return await fail("not_confirmed", shown ? `its footer shows ${quoted(shown)}` : undefined);
       }
