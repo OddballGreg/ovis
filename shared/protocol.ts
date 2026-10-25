@@ -239,12 +239,16 @@ export type { Machine, MachineEvent, MachineRoster, PaneTarget, SetupJob, SetupR
  *  POST   /api/pane/opencode-model { pane_id, provider_id, model_id } -> { ok: true, model }
  *         (picks the model in the pane's OpenCode 1.x TUI through its own "Select model" dialog, as a
  *         person would: ctrl+x m, the name typed, the row chosen, Enter; then reads the prompt footer
- *         back. 409 busy / dialog_open (any dialog) / not_ready / aborted before any key; 422
- *         unknown_model (a name with a control or format character is not listed) / ambiguous_model
- *         (another model has the same name and provider); 502 pane_error / dialog_not_opened /
- *         model_not_found / not_confirmed / timeout after one Escape closed a dialog still drawn,
- *         with error.dialog_left_open: true when it did not; 503 unavailable; 403 read_only for a
- *         watching device)
+ *         back, and once more a moment later for a variant list to close, with dialog_left_open: true
+ *         when Escape did not close it. An Enter that could not be written but whose pick the footer
+ *         then shows is a switch made. 409 busy / dialog_open (any dialog) / not_ready / aborted
+ *         before any key; 422 unknown_model (a name with a control or format character is not
+ *         listed) / ambiguous_model (another model has the same name and provider); 502 pane_error /
+ *         dialog_not_opened / model_not_found (also: more than one row reads as the model) /
+ *         not_confirmed / timeout after one Escape sent when a dialog is drawn or the screen cannot
+ *         be read (after a write that failed, the screen is first watched about a second for a
+ *         dialog its keys open late), with error.dialog_left_open: true when it did not close; 503
+ *         unavailable; 403 read_only for a watching device)
  *  GET    /api/pane/files?pane_id=&q=&limit=  -> { files: string[] } (paths relative to the pane
  *         cwd matching q, for @-mentions; git ls-files when the cwd is a repo, bounded walk otherwise)
  *  GET    /api/workspace/diff/files?pane_id=&directory=&scope=&base=&head= -> RepoDiffFileList

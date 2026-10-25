@@ -68,7 +68,7 @@ describe("a model name", () => {
 describe("an OpenCode model name", () => {
   it("is provider/model: a provider id that is no flag, then any id without a space or a control character", () => {
     for (const name of ["opencode-go/kimi-k3.1-pro", "google-vertex-anthropic/claude-opus-4@20250514", "openrouter/qwen/qwen3:free", "my.provider/model.v2", "a/b"]) expect(OPENCODE_MODEL_NAME.test(name), name).toBeTrue();
-    for (const name of ["opus", "-x/model", "--model/x", "/model", "provider/", "pro vider/m", "provider/two words", "provider/m\u0085x", "provider/m\u001bx", "pro@vider/m"]) expect(OPENCODE_MODEL_NAME.test(name), name).toBeFalse();
+    for (const name of ["opus", "-x/model", "--model/x", "/model", "provider/", "pro vider/m", "provider/two words", "provider/m\u0085x", "provider/m\u001bx", "provider/m\u200bx", "provider/m\u202ex", "provider/m\ufeffx", "provider/m\u2028x", "pro@vider/m"]) expect(OPENCODE_MODEL_NAME.test(name), name).toBeFalse();
   });
 });
 

@@ -189,6 +189,10 @@ describe("OpenCode's model dialog on the screen", () => {
     const open = shell.map((row) => row.includes("╹") ? `${BASE}` : row);
     expect(promptFooter(open.join("\n"))).toBe("");
     expect(promptFooter(transcript.map((row) => row.includes("╹") ? `${BASE}` : row).join("\n"))).toBe("Kimi K3.1 Pro OpenCode Go");
+    // the bottom-most ┃/╹ pair is the box: not one a transcript draws above it, nor a ┃ row under it
+    const box = rows.findIndex((row) => row.includes("╹"));
+    const quoted = [...rows.slice(0, 8), `${BASE}  ┃  Build · Claude Haiku 5.5 OpenCode Go`, `${BASE}  ╹${"▀".repeat(20)}`, ...rows.slice(10, box + 1), `${BASE}  ┃  status`, ...rows.slice(box + 1)];
+    expect(promptFooter(quoted.join("\n"))).toBe("Kimi K3.1 Pro OpenCode Go");
     // "Build auto · …": an agent of two words
     expect(promptFooter(rows.map((row) => row.replace("Plan · ", "Plan auto · ")).join("\n"))).toBe("Kimi K3.1 Pro OpenCode Go");
   });
@@ -256,6 +260,14 @@ class FakeTui {
   closes = true;
   /** a key whose sending fails, as a pane that cannot be written to does */
   failKey: string | null = null;
+  /** a write that herdr reports failed although its keys land, `reads` reads of the screen later */
+  late: { key: string; reads: number } | null = null;
+  private pending: { keys: string[]; reads: number } | null = null;
+  /** a narrow pane: a model's name drawn cut to this many characters and an ellipsis */
+  cut: number | null = null;
+  /** a pick of a model with variants opens their list only this many reads after Enter */
+  variantAfterReads: number | null = null;
+  private variantIn: number | null = null;
   /** the timeouts each read and write was given */
   timeouts: number[] = [];
   constructor(public models: FakeModel[], public current: FakeModel) {}
@@ -283,7 +295,8 @@ class FakeTui {
       } else if (key === "enter" && this.dialog === "model") {
         const picked = rows[this.cursor];
         if (picked && this.confirms) this.current = picked;
-        this.dialog = picked?.variants ? "variant" : null;
+        this.dialog = picked?.variants && this.variantAfterReads === null ? "variant" : null;
+        if (picked?.variants && this.variantAfterReads !== null) this.variantIn = this.variantAfterReads;
       } else if (key === "enter" && this.dialog === "variant") this.dialog = null;
     }
   }
@@ -309,7 +322,7 @@ class FakeTui {
         const rows = this.filtered();
         rows.slice(this.scroll, this.scroll + WINDOW).forEach((model, index) => {
           const mark = model === this.current ? " ● " : "   ";
-          const left = `${mark}${model.name}`;
+          const left = `${mark}${this.cut === null || model.name.length <= this.cut ? model.name : `${model.name.slice(0, this.cut)}…`}`;
           lines.push(this.panelLine(`${left}${" ".repeat(Math.max(1, WIDTH - 2 - left.length - model.provider.length - 2))}${model.provider}`, this.scroll + index === this.cursor ? CURSOR : PANEL));
         });
       } else {
@@ -327,9 +340,25 @@ class FakeTui {
   deps(): DriveDeps & { time: number } {
     const deps = {
       time: 0,
-      read: async (timeoutMs: number) => { this.timeouts.push(timeoutMs); return this.screen(); },
+      read: async (timeoutMs: number) => {
+        this.timeouts.push(timeoutMs);
+        if (this.pending !== null) {
+          if (this.pending.reads === 0) { this.keys(this.pending.keys); this.pending = null; }
+          else this.pending.reads -= 1;
+        }
+        if (this.variantIn !== null) {
+          if (this.variantIn === 0) { this.dialog = "variant"; this.variantIn = null; }
+          else this.variantIn -= 1;
+        }
+        return this.screen();
+      },
       keys: async (keys: string[], timeoutMs: number) => {
         this.timeouts.push(timeoutMs);
+        if (this.late !== null && keys.includes(this.late.key)) {
+          this.pending = { keys, reads: this.late.reads };
+          this.late = null;
+          throw new Error("pane.send_keys timed out");
+        }
         if (this.failKey !== null && keys.includes(this.failKey)) throw new Error("pane.send_keys timed out");
         this.keys(keys);
       },
@@ -460,6 +489,80 @@ describe("driving OpenCode's model dialog", () => {
     deps.read = async (timeoutMs) => { reads += 1; if (reads > 2) throw new Error("pane.read timed out"); return read(timeoutMs); };
     expect(await driveModelDialog(deps, { name: "Agentic Chat (Claude Sonnet 5)", provider: "GitLab Duo" })).toMatchObject({ ok: false, code: "pane_error", dialog_left_open: true });
     expect(silent.sent.filter((key) => key === "esc")).toEqual(["esc"]);
+  });
+
+  it("watches for a dialog that keys herdr could not confirm open late, and closes it", async () => {
+    const tui = new FakeTui(MODELS, MODELS[0]!);
+    tui.late = { key: "m", reads: 4 };
+    const result = await driveModelDialog(tui.deps(), { name: "Claude Haiku 5.5", provider: "OpenCode Go" });
+    expect(result).toMatchObject({ ok: false, code: "pane_error" });
+    expect(result.ok ? "" : result.message).toContain("timed out");
+    expect("dialog_left_open" in result).toBe(false);
+    expect(tui.dialog).toBeNull();
+    expect(tui.sent).toEqual(["ctrl+x", "m", "esc"]);
+    // near the end of the budget the watch still lasts, though each read of the drive would be 100ms
+    const tight = new FakeTui(MODELS, MODELS[0]!);
+    tight.late = { key: "m", reads: 4 };
+    const deps = tight.deps();
+    expect(await driveModelDialog(deps, { name: "Claude Haiku 5.5", provider: "OpenCode Go" }, 50)).toMatchObject({ ok: false, code: "pane_error" });
+    expect(tight.dialog).toBeNull();
+    expect(tight.sent.at(-1)).toBe("esc");
+  });
+
+  it("takes an Enter herdr could not confirm as the switch once the footer shows the model, and closes a dialog it left", async () => {
+    const tui = new FakeTui(MODELS, MODELS[2]!);
+    tui.late = { key: "enter", reads: 3 };
+    expect(await driveModelDialog(tui.deps(), { name: "Agentic Chat (Claude Sonnet 5)", provider: "GitLab Duo" })).toEqual({ ok: true });
+    expect(tui.current).toBe(MODELS[4]!);
+    expect(tui.dialog).toBeNull();
+    expect(tui.sent.includes("esc")).toBe(false);
+    // with variants: the list it opens late is closed, and the pick kept
+    const variant = new FakeTui(MODELS, MODELS[0]!);
+    variant.late = { key: "enter", reads: 2 };
+    expect(await driveModelDialog(variant.deps(), { name: "Agentic Chat (GPT-6 Sol)", provider: "GitLab Duo" })).toEqual({ ok: true });
+    expect(variant.current).toBe(MODELS[9]!);
+    expect(variant.dialog).toBeNull();
+    // an Enter that never lands: the model dialog is closed and nothing was switched
+    const lost = new FakeTui(MODELS, MODELS[2]!);
+    lost.late = { key: "enter", reads: 1_000_000 };
+    const result = await driveModelDialog(lost.deps(), { name: "Agentic Chat (Claude Sonnet 5)", provider: "GitLab Duo" });
+    expect(result).toMatchObject({ ok: false, code: "pane_error" });
+    expect("dialog_left_open" in result).toBe(false);
+    expect(lost.dialog).toBeNull();
+    expect(lost.current).toBe(MODELS[2]!);
+    expect(lost.sent.at(-1)).toBe("esc");
+  });
+
+  it("closes a variant list that opens a moment after the footer shows the model", async () => {
+    const tui = new FakeTui(MODELS, MODELS[0]!);
+    tui.variantAfterReads = 1;
+    expect(await driveModelDialog(tui.deps(), { name: "Agentic Chat (GPT-6 Sol)", provider: "GitLab Duo" })).toEqual({ ok: true });
+    expect(tui.current).toBe(MODELS[9]!);
+    expect(tui.dialog).toBeNull();
+    expect(tui.sent.at(-1)).toBe("esc");
+    const stuck = new FakeTui(MODELS, MODELS[0]!);
+    stuck.variantAfterReads = 1;
+    stuck.closes = false;
+    expect(await driveModelDialog(stuck.deps(), { name: "Agentic Chat (GPT-6 Sol)", provider: "GitLab Duo" })).toEqual({ ok: true, dialog_left_open: true });
+  });
+
+  it("chooses no row when more than one reads as the model, as names a narrow pane cuts short alike", async () => {
+    const tui = new FakeTui(MODELS, MODELS[0]!);
+    tui.cut = 20;
+    const result = await driveModelDialog(tui.deps(), { name: "Agentic Chat (Claude Opus 5)", provider: "GitLab Duo" });
+    expect(result).toMatchObject({ ok: false, code: "model_not_found" });
+    expect(result.ok ? "" : result.message).toContain("more than one row");
+    expect(tui.current).toBe(MODELS[0]!);
+    expect(tui.dialog).toBeNull();
+    // one row cut short, alone in the filter: it is the model
+    const one = new FakeTui(MODELS, MODELS[0]!);
+    one.cut = 20;
+    expect(await driveModelDialog(one.deps(), { name: "Agentic Chat (GPT-6 Sol)", provider: "GitLab Duo" })).toEqual({ ok: true });
+    expect(one.current).toBe(MODELS[9]!);
+    // two rows drawn alike in full
+    const twice = new FakeTui([...MODELS, { name: "Claude Haiku 5.5", provider: "OpenCode Go" }], MODELS[2]!);
+    expect(await driveModelDialog(twice.deps(), { name: "Claude Haiku 5.5", provider: "OpenCode Go" })).toMatchObject({ ok: false, code: "model_not_found" });
+    expect(twice.current).toBe(MODELS[2]!);
   });
 
   it("waits for the closing Escape to close the dialog, and says when it does not", async () => {

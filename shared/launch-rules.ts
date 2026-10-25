@@ -26,9 +26,10 @@ export const MODEL_NAME = /^[A-Za-z0-9][\w.:/-]*(?:\[[A-Za-z0-9]+\])?$/;
 /**
  * OpenCode 1.x's `--model`: `provider/model`, a provider id that never reads as a flag, then the
  * model's id as its server lists it, which may hold `@`, `:` or more slashes (a Vertex id such as
- * `claude-opus-4@20250514`), but no space or control character.
+ * `claude-opus-4@20250514`), but no space, control or format character (bidi overrides, zero-width
+ * marks), as the model names typed into a pane hold none (server/opencode-model.ts typeableName).
  */
-export const OPENCODE_MODEL_NAME = /^[A-Za-z0-9][\w.-]*\/[^\s\p{Cc}]+$/u;
+export const OPENCODE_MODEL_NAME = /^[A-Za-z0-9][\w.-]*\/[^\s\p{Cc}\p{Cf}]+$/u;
 
 /** The rule a model name for `kind`'s `--model` follows. */
 export const modelNameRule = (kind: string): RegExp => kind === "opencode" ? OPENCODE_MODEL_NAME : MODEL_NAME;
