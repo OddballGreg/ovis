@@ -50,7 +50,7 @@ const css = ["src/styles.css", "src/components/Composer.css", "src/components/Te
   .map((file) => readFileSync(join(repo, file), "utf8")).join("\n");
 // the terminal lens with the Compact input line and its key bar folded (PaneTerminal.tsx): the line
 // is the bar at the screen's bottom
-const compactLine = `<div class="terminal-input-slot is-compact is-folded"><div class="terminal-input is-compact"><textarea class="terminal-input-text" aria-label="Terminal input" rows="1"></textarea><button class="terminal-input-send" type="button" aria-label="Send"></button></div></div>`;
+const compactLine = `<div class="terminal-input-slot is-compact is-folded"><div class="terminal-input is-compact has-keys"><label class="terminal-input-label" for="terminal-line">Input line</label><textarea id="terminal-line" class="terminal-input-text" aria-label="Terminal input" rows="1"></textarea><span class="terminal-input-actions"><button class="terminal-input-action terminal-input-insert" type="button" aria-label="Insert text without Enter"><span class="terminal-input-caption">Insert text</span><span class="terminal-input-face"></span></button><button class="terminal-input-action terminal-input-send" type="button" aria-label="Send"><span class="terminal-input-caption">Send</span><span class="terminal-input-face"></span></button><button class="terminal-input-keys" type="button" aria-label="Terminal keys"></button></span></div></div>`;
 
 async function checkCompactLine(page: Page, keyboard: boolean, height: number, inset: number): Promise<void> {
   const state = await page.evaluate(() => {
@@ -60,6 +60,10 @@ async function checkCompactLine(page: Page, keyboard: boolean, height: number, i
     return {
       keyboard: root.hasAttribute("data-keyboard"),
       slot: slot.getBoundingClientRect().height,
+      // the line hangs from the slot's bottom: one row of it fills the slot, the label and the actions' words drawn nowhere
+      line: document.querySelector(".terminal-input")!.getBoundingClientRect().height,
+      face: document.querySelector(".terminal-input-send .terminal-input-face")!.getBoundingClientRect().height,
+      compact: px("--touch-target-compact"),
       bottom: slot.getBoundingClientRect().bottom,
       padding: parseFloat(getComputedStyle(slot.firstElementChild!).paddingBottom),
       hostPadding: parseFloat(getComputedStyle(document.querySelector(".terminal-host")!).paddingBottom),
@@ -73,6 +77,8 @@ async function checkCompactLine(page: Page, keyboard: boolean, height: number, i
   // up, the keyboard covers the home indicator: no band between the field and the keyboard
   assert.equal(state.slot, keyboard ? state.bar : state.bar + Math.max(0, inset - state.pad), "folded line carries the inset only off the keyboard");
   assert.equal(state.padding, keyboard ? state.pad : Math.max(state.pad, inset), "folded line's bottom padding drops the inset over the keyboard");
+  assert.equal(state.line, state.slot, "the compact line is one row, its label and captions out of view");
+  assert.equal(state.face, state.compact, "the compact line's Send is drawn --touch-target-compact");
 }
 const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
   const url = new URL(request.url);
@@ -141,10 +147,11 @@ try {
         const line = await page.evaluate(() => {
           const root = getComputedStyle(document.documentElement);
           const input = getComputedStyle(document.querySelector(".terminal-input")!);
-          return { top: parseFloat(input.paddingTop), bottom: parseFloat(input.paddingBottom), space: parseFloat(root.getPropertyValue("--space-2")),
-            send: document.querySelector(".terminal-input-send")!.getBoundingClientRect().height, target: parseFloat(root.getPropertyValue("--touch-target")) };
+          return { top: parseFloat(input.paddingTop), bottom: parseFloat(input.paddingBottom), space: parseFloat(root.getPropertyValue("--space-1")),
+            send: document.querySelector(".terminal-input-send .terminal-input-face")!.getBoundingClientRect().height, target: parseFloat(root.getPropertyValue("--touch-target")),
+            label: getComputedStyle(document.querySelector(".terminal-input-label")!).position, keys: getComputedStyle(document.querySelector(".terminal-input-keys")!).display };
         });
-        assert.deepEqual(line, { top: line.space, bottom: 0, space: line.space, send: line.target, target: line.target }, "desktop keeps the full input line");
+        assert.deepEqual(line, { top: line.space, bottom: line.space, space: line.space, send: line.target, target: line.target, label: "static", keys: "none" }, "desktop keeps the full input line");
         assert.deepEqual(errors, []);
         continue;
       }
