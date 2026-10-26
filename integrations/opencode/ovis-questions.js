@@ -393,6 +393,7 @@ export function createHub() {
       } else if (bridges.size === 0 && handle) {
         handle.close();
         handle = null;
+        log("closed", {});
       }
     });
     return chain;
@@ -426,8 +427,10 @@ export const OvisQuestionsPlugin = async (input) => {
   void hub.add(bridge, socketPath, log);
   return {
     event: async ({ event }) => bridge.handleEvent(event),
-    // OpenCode disposes an instance on exit and on a reload; the last one out removes the socket
-    dispose: async () => { await hub.remove(bridge, socketPath, log); },
+    // OpenCode disposes an instance on a reload, and the last one out removes the socket. A normal
+    // exit of OpenCode 1.19's TUI ends the process without a dispose, so its socket file stays
+    // until the next start on this pane finds it refusing connections and replaces it.
+    dispose: async () => { log("dispose", {}); await hub.remove(bridge, socketPath, log); },
   };
 };
 
