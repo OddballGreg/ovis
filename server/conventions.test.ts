@@ -162,6 +162,7 @@ describe("herdr socket", () => {
   };
   const NET_CONNECT_ALLOWED: Record<string, string> = {
     "server/ssh-askpass.ts": "the SSH askpass helper's own private socket, not herdr's",
+    "server/opencode-v1-questions.ts": "the ovis-questions OpenCode plugin's per-pane socket, not herdr's",
   };
 
   it("opens herdr's socket only in server/herdr/client.ts", () => {

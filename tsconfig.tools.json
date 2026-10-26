@@ -6,6 +6,7 @@
   "files": [
     "integrations/gjc.ts",
     "integrations/gjc.test.ts",
+    "integrations/opencode/ovis-questions.test.ts",
     "scripts/install-gjc-integration.ts",
     "scripts/install-gjc-integration.test.ts",
     "scripts/herdr-themes.ts",

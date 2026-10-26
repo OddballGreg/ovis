@@ -126,6 +126,12 @@ export type ParsedPrompt = InteractivePrompt & {
     fieldKey: string;
     stepIndex: number;
     totalSteps: number;
+    /** every field's key, in the form's order: OpenCode 1.x takes its answers as a list in that order */
+    fieldKeys: string[];
+    /** the fields as listed when the card was read, compared again before an OpenCode 1.x reply */
+    fieldsSignature: string;
+    /** who holds the form: the pane's own question plugin (OpenCode 1.x) or OpenCode 2's service */
+    transport: "plugin" | "service";
     options: OpenCodeFormFieldOption[];
     sessionID: string;
     state: OpenCodePromptEntry;
@@ -519,6 +525,8 @@ export interface OpenCodePromptEntry {
   sessionID: string;
   form: string | null;
   listed: OpenCodeFormInfo | null;
+  /** where `listed` was read from (prompt.ts readKnownPrompt) */
+  transport?: "plugin" | "service";
   available: boolean;
   draft?: OpenCodeFormDraft;
   revision: number;

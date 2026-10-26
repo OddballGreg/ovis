@@ -14,11 +14,17 @@ import { chmodSync, existsSync, mkdirSync, realpathSync, writeFileSync } from "n
 import { homedir, tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { ping, sessionSnapshot, workspaceCreate } from "../server/herdr/client.ts";
+import { openCodeQuestionSocketOptions } from "../server/opencode-v1-questions.ts";
 import { testShellEnv } from "./test-shell.ts";
 
 // macOS's temp dir is behind a symlink (/var -> /private/var): herdr reports a pane's cwd
 // resolved, so a fixture made under the unresolved path never matches the pane it is for
 process.env["TMPDIR"] = realpathSync(tmpdir());
+
+// test pane ids (w1:p1, …) are the user's own pane ids too: never reach a real OpenCode's
+// question plugin, and never start one in a test pane
+openCodeQuestionSocketOptions.runtimeDir = join(tmpdir(), "ovis-tests-have-no-opencode-questions");
+delete process.env["OVIS_OPENCODE_QUESTIONS"];
 
 export const TEST_SESSION = process.env["HERDR_TEST_SESSION"] || "ovis-test";
 
