@@ -107,7 +107,7 @@ try {
   assert.equal(await page.locator(".pending-message-send").count(), 0, "unknown delivery cannot retry");
   await herdrRpc("pane.report_agent", { pane_id: paneId, source: "manual", agent: "claude", state: "idle" }, socket);
   await page.locator('.composer-status:not([data-status="working"])').waitFor();
-  await page.waitForTimeout(400);
+  await page.waitForTimeout(400); // fixed wait: no saved input may be sent after the reload
   assert.equal(inputs.length, count, "reload and status changes never dispatch saved pending input");
   assert.equal(bytes(), delivered, "no automatic replay reaches the remote pty");
   await select("QA second PC");
@@ -117,11 +117,11 @@ try {
   await page.getByRole("button", { name: "Discard saved copy", exact: true }).click();
   await pendingRows.waitFor({ state: "hidden" });
   // Older versions' held messages remain editable, manual and scoped to their PC.
-  await page.evaluate(({ owner }) => localStorage.setItem(`herdr-web-ui:queue:${owner}`, JSON.stringify({ version: 1, messages: [{ id: "legacy-machine-browser", text: "HELD_A_MUST_NOT_SEND" }] })), { owner: paneStorageId(a, paneId) });
+  await page.evaluate(({ owner }) => localStorage.setItem(`ovis:queue:${owner}`, JSON.stringify({ version: 1, messages: [{ id: "legacy-machine-browser", text: "HELD_A_MUST_NOT_SEND" }] })), { owner: paneStorageId(a, paneId) });
   await page.reload(); await page.locator(".composer-queue-text").waitFor();
   await herdrRpc("pane.report_agent", { pane_id: paneId, source: "manual", agent: "claude", state: "blocked" }, socket);
   await page.locator('.composer-status[data-status="blocked"]').waitFor();
-  await page.waitForTimeout(400);
+  await page.waitForTimeout(400); // fixed wait: no held input may be sent while blocked
   assert.equal(bytes(), delivered, "legacy held input does not advance through blocked status");
   await select("QA second PC");
   assert.equal(await page.locator(".composer-queue-text").count(), 0);

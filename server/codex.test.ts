@@ -332,7 +332,7 @@ describe("Codex queued questions (request_user_input_async)", () => {
   });
 
   it("scans a rollout once however many ask at the same time", async () => {
-    dir = mkdtempSync(join(tmpdir(), "herdr-web-ui-codex-questions-"));
+    dir = mkdtempSync(join(tmpdir(), "ovis-codex-questions-"));
     const path = join(dir, "rollout.jsonl");
     writeFileSync(path, `${jsonl(message("user", "go"), ask("call_x", [{ title: "First?", options: ["a"] }]))}\n`);
     await unansweredCodexQuestions(path);
@@ -345,7 +345,7 @@ describe("Codex queued questions (request_user_input_async)", () => {
   });
 
   it("lists the questions still unanswered, reading only what the rollout appends", async () => {
-    dir = mkdtempSync(join(tmpdir(), "herdr-web-ui-codex-questions-"));
+    dir = mkdtempSync(join(tmpdir(), "ovis-codex-questions-"));
     const path = join(dir, "rollout.jsonl");
     writeFileSync(path, `${jsonl(message("user", "go"), asked)}\n`);
     expect(await unansweredCodexQuestions(path)).toEqual([
@@ -694,7 +694,7 @@ describe("Codex rollout resolution", () => {
   const short = [
     "세 사진을 확인하고 한 장으로 합칠게요. 이미지 편집을 위해 imagegen 스킬을 사용할게요.",
     "세 화면이 모두 보이도록, 올려주신 순서대로 가로로 나란히 배치할게요.",
-    "imagegen으로 세 사진을 올려주신 순서대로 가로로 합쳤어요.\n\n[합친 이미지 다운로드](/home/user/repo/.herdr-web-ui/combined-20261002.png)",
+    "imagegen으로 세 사진을 올려주신 순서대로 가로로 합쳤어요.\n\n[합친 이미지 다운로드](/home/user/repo/.ovis/combined-20261002.png)",
   ];
   const shortRollout = jsonl(
     message("user", "이거 세개 사진 합처서 하나의 이미지로 만들어줘."),
@@ -997,6 +997,61 @@ describe("Codex tool calls that failed, and patches", () => {
     ));
     const tools = turns.flatMap((turn) => turn.parts).filter((part) => part.kind === "tool");
     expect(tools.map((tool) => [tool.summary, tool.error === true])).toEqual([["src/a.ts", false], ["false", true]]);
+  });
+});
+
+describe("Codex native call id and state", () => {
+  const plan = (id: string) => item({ type: "function_call", call_id: id, name: "update_plan", arguments: JSON.stringify({ plan: [{ step: "Read", status: "completed" }] }) });
+  const tools = (text: string) => parseCodexTranscript(text).flatMap((turn) => turn.parts).filter((part) => part.kind === "tool");
+
+  it("pending without matching output retains call_id and pending state", () => {
+    // an output for another call answers nothing here
+    expect(tools(jsonl(message("user", "Plan"), plan("call_a"), item({ type: "function_call_output", call_id: "call_other", output: "Plan updated" }))))
+      .toMatchObject([{ call_id: "call_a", state: "pending", output: "" }]);
+  });
+
+  it("completed function_call_output omits state and retains call_id", () => {
+    for (const output of ["Plan updated", "", "Error: plan update failed", "Process exited with code 1\nOutput:\n"]) {
+      const [part] = tools(jsonl(message("user", "Plan"), plan("call_a"), item({ type: "function_call_output", call_id: "call_a", output })));
+      expect(part).toMatchObject({ call_id: "call_a" });
+      expect(part && "state" in part).toBe(false);
+    }
+  });
+
+  it("completed custom_tool_call_output omits state and retains call_id", () => {
+    for (const output of ["applied", "", "apply_patch verification failed: Failed to find expected lines"]) {
+      const [part] = tools(jsonl(item({ type: "custom_tool_call", call_id: "call_p", name: "apply_patch", input: "*** Begin Patch\n*** End Patch" }), item({ type: "custom_tool_call_output", call_id: "call_p", output })));
+      expect(part).toMatchObject({ call_id: "call_p" });
+      expect(part && "state" in part).toBe(false);
+    }
+  });
+
+  it("repeated identical calls retain distinct ids", () => {
+    const parts = tools(jsonl(message("user", "Plan"), plan("call_a"), item({ type: "function_call_output", call_id: "call_a", output: "Plan updated" }),
+      plan("call_b"), item({ type: "function_call_output", call_id: "call_b", output: "Plan updated" })));
+    expect(parts.map((part) => part.kind === "tool" && part.call_id)).toEqual(["call_a", "call_b"]);
+    expect(parts[0]?.kind === "tool" && parts[1]?.kind === "tool" && [parts[0].input === parts[1].input, parts[0].output === parts[1].output]).toEqual([true, true]);
+  });
+
+  it("append and full poll replacement preserve call id and update or omit state", async () => {
+    const { createCodexTranscriptParser } = await import("./codex.ts");
+    const parser = createCodexTranscriptParser();
+    const first = jsonl(message("user", "Plan"), plan("call_a"), plan("call_b"));
+    parser.write(first);
+    const pending = parser.snapshot();
+    const ids = (turns: ReturnType<typeof parseCodexTranscript>) => turns.flatMap((turn) => turn.parts).flatMap((part) => part.kind === "tool" ? [[part.call_id, part.state ?? "omitted"]] : []);
+    expect(ids(pending)).toEqual([["call_a", "pending"], ["call_b", "pending"]]);
+    const second = jsonl(item({ type: "function_call_output", call_id: "call_a", output: "" }));
+    // a preview of an unfinished line, then the appended record, then a full re-read of the file
+    expect(ids(parser.snapshot(second))).toEqual([["call_a", "omitted"], ["call_b", "pending"]]);
+    parser.write(second);
+    expect(ids(parser.snapshot())).toEqual([["call_a", "omitted"], ["call_b", "pending"]]);
+    expect(parser.snapshot()).toEqual(parseCodexTranscript(`${first}\n${second}`));
+    // the earlier snapshot is not rewritten under the reader
+    expect(ids(pending)).toEqual([["call_a", "pending"], ["call_b", "pending"]]);
+    const long = tools(jsonl(plan("call_c"), item({ type: "function_call_output", call_id: "call_c", output: "x".repeat(5000) })))[0];
+    expect(long).toMatchObject({ call_id: "call_c", output_ref: "call_c", output_size: 5000 });
+    expect(long && "state" in long).toBe(false);
   });
 });
 

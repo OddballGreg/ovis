@@ -1,33 +1,52 @@
 #!/bin/sh
 # Ovis in one line, from a PC that may have none of it yet:
 #
-#   curl -fsSL https://herdrweb.dev/install.sh | sh
+#   curl -fsSL https://ovis.sh/install.sh | sh
 #
 # 1. Installs what is missing, for this user only and without sudo: herdr (its own installer, into
-#    ~/.local/bin), Bun (its own installer, into ~/.bun) and Node 22 (the official build, checked
-#    against its published SHA-256, into ~/.local/share/herdr-web-ui/node).
+#    ~/.local/bin) and Bun (its own installer, into ~/.bun). Terminals run on the release's Rust PTY
+#    host, checked against its SHA-256; only when that cannot be installed, Node 22 (the official
+#    build, checked against its published SHA-256, into ~/.local/share/ovis/node) runs them instead.
 # 2. Installs Ovis as a herdr plugin, so it starts with herdr and Settings → Updates keeps it
 #    current, and starts it now when herdr is running.
 # 3. When Tailscale runs on this PC, serves the app to your tailnet (`tailscale serve`, on the first
-#    free HTTPS port, or only the one HERDR_WEB_TAILSCALE_HTTPS_PORT names) and prints the address
+#    free HTTPS port, or only the one OVIS_TAILSCALE_HTTPS_PORT names) and prints the address
 #    a phone opens as a QR code (scripts/plugin.ts phone).
 # 4. On a first install, mentions a GitHub star once. When the gh CLI is signed in and has not
 #    starred the repository, it asks at the terminal, for 20 seconds, and stars only on "y"; it
 #    never stars by itself.
 #
 # Run it again at any time: what is already there is kept, and step 3 is repeated.
-#   HERDR_WEB_UI_REF=<branch or tag>   install that ref instead of the latest release
-#   HERDR_WEB_TAILSCALE_HTTPS_PORT=<port>   serve the app on that HTTPS port only, keeping 443 free
+#   OVIS_REF=<branch or tag>   install that ref instead of the latest release
+#   OVIS_TAILSCALE_HTTPS_PORT=<port>   serve the app on that HTTPS port only, keeping 443 free
 set -eu
 
-REPO="devswha/herdr-web-ui"
-PLUGIN="devswha.herdr-web-ui"
+REPO="devswha/ovis"
+PLUGIN="devswha.ovis"
+# the id before the rename: an install under it moves to PLUGIN, keeping its config
+LEGACY_PLUGIN="devswha.herdr-web-ui"
 BIN_DIR="$HOME/.local/bin"
-NODE_DIR="$HOME/.local/share/herdr-web-ui/node"
+NODE_DIR="$HOME/.local/share/ovis/node"
 # Official digests from nodejs.org/dist/v22.23.2/SHASUMS256.txt, as scripts/build-remote-bundle.ts pins them
 NODE_VERSION="v22.23.2"
 
 say() { printf '%s\n' "Ovis: $*"; }
+
+# shellcheck disable=SC2016 # JavaScript, not shell
+plugin_root() { herdr plugin list --json | bun -e 'const d = JSON.parse(await Bun.stdin.text()); console.log(d.result.plugins.find((p) => p.plugin_id === process.argv[1])?.plugin_root ?? "")' "$1"; }
+
+# herdr keeps a plugin's config by its id: the old id's env files (the token among them) go to
+# the new id's dir unless it has its own, with their owner-only mode
+adopt_legacy_config() {
+  old=$(herdr plugin config-dir "$LEGACY_PLUGIN" 2>/dev/null </dev/null) || return 0
+  new=$(herdr plugin config-dir "$PLUGIN" 2>/dev/null </dev/null) || return 0
+  [ ! -e "$new/env" ] && [ ! -e "$new/.env" ] || return 0
+  for name in env .env; do
+    [ -e "$old/$name" ] || continue
+    mkdir -p "$new"
+    cp -p "$old/$name" "$new/$name"
+  done
+}
 # a clickable address in a terminal (OSC 8); $terminal is set once, since $(link …) runs in a pipe
 # shellcheck disable=SC1003 # the backslashes end OSC 8 escapes (ESC \\), no quote is escaped
 link() { if [ "$terminal" = 1 ]; then printf '\033]8;;%s\033\\%s\033]8;;\033\\' "$1" "$1"; else printf '%s' "$1"; fi; }
@@ -39,6 +58,17 @@ latest_release() {
   git ls-remote --tags --refs "https://github.com/$REPO.git" 'v*' 2>/dev/null |
     sed -n 's|.*refs/tags/\(v[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$|\1|p' |
     sort -t. -k1.2,1n -k2,2n -k3,3n | tail -n 1
+}
+# The plugin id a ref installs under, or nothing when it cannot be told. Releases before the rename
+# (0.4.13 and older) name the old id. Its manifest says so; raw.githubusercontent.com can be blocked
+# where github.com is not, and then a release tag's version tells it.
+ref_plugin_id() {
+  ref_id=$(curl -fsSL --max-time 10 "https://raw.githubusercontent.com/$REPO/$1/herdr-plugin.toml" 2>/dev/null </dev/null |
+    sed -n '/^id *=/{s/^id *= *"\([^"]*\)".*/\1/p;q;}') || ref_id=""
+  if [ -z "$ref_id" ] && printf '%s\n' "$1" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+    if at_least 0.4.14 "${1#v}"; then ref_id=$PLUGIN; else ref_id=$LEGACY_PLUGIN; fi
+  fi
+  printf '%s' "$ref_id"
 }
 # at_least 1.4.0 1.10.2: is the second dotted version the first or newer
 at_least() {
@@ -130,7 +160,7 @@ open_app() {
   loopback=0
   case "$host" in 127.0.0.1 | localhost) loopback=1 ;; esac
   opener=""
-  if [ -z "${CI:-}" ] && [ -z "${HERDR_WEB_NO_OPEN:-}" ] && [ -z "${SSH_CONNECTION:-}" ] && [ -z "${SSH_TTY:-}" ] && [ "$loopback" = 1 ]; then
+  if [ -z "${CI:-}" ] && [ -z "${OVIS_NO_OPEN:-${HERDR_WEB_NO_OPEN:-}}" ] && [ -z "${SSH_CONNECTION:-}" ] && [ -z "${SSH_TTY:-}" ] && [ "$loopback" = 1 ]; then
     if [ "$os" = darwin ]; then
       ! command -v open >/dev/null 2>&1 || opener=open
     elif [ -n "${BROWSER:-}" ] && command -v "$BROWSER" >/dev/null 2>&1; then
@@ -153,6 +183,48 @@ open_app() {
   fi
 }
 
+# kills a process and everything it started (ps -A -o pid= -o ppid= reads the same on Linux and macOS)
+kill_tree() {
+  for kill_child in $(ps -A -o pid= -o ppid= 2>/dev/null | awk -v parent="$1" '$2 == parent { print $1 }'); do
+    kill_tree "$kill_child"
+  done
+  kill -KILL "$1" 2>/dev/null || true
+}
+
+# runs "$@" for at most $1 seconds: past that it is killed with all it started (and fails), so a
+# command that hangs cannot hold the install. The watcher looks once a second, as gh_api's does.
+bounded() {
+  bounded_limit=$1
+  shift
+  "$@" &
+  bounded_pid=$!
+  (
+    waited=0
+    while [ "$waited" -lt "$bounded_limit" ]; do sleep 1; kill -0 "$bounded_pid" 2>/dev/null || exit 0; waited=$((waited + 1)); done
+    kill_tree "$bounded_pid"
+  ) >/dev/null 2>&1 &
+  bounded_watch=$!
+  bounded_status=0
+  wait "$bounded_pid" || bounded_status=$?
+  kill "$bounded_watch" 2>/dev/null || true
+  wait "$bounded_watch" 2>/dev/null || true
+  return "$bounded_status"
+}
+
+# the server's own check of the Rust PTY host (server/pty/host.ts), with its deadlines: its usage
+# line with exit 2, then a pty; a host that hangs on either counts as one that does not run here
+rust_host_runs() {
+  [ -x "$1" ] || return 1
+  probe_err=$(mktemp) || return 1
+  probe_status=0
+  bounded 3 "$1" </dev/null >/dev/null 2>"$probe_err" || probe_status=$?
+  probe_first=$(sed -n 1p "$probe_err" 2>/dev/null)
+  rm -f "$probe_err"
+  [ "$probe_status" = 2 ] || return 1
+  case "$probe_first" in "pty-sidecar: usage:"*) ;; *) return 1 ;; esac
+  bounded 3 "$1" 1 1 true </dev/null >/dev/null 2>&1
+}
+
 install_node() {
   case "$platform" in
     linux-x64) node_sha=b294a556e639d64338823920e5866c21c02741742d2e1529ee1a225c1ec9252a ;;
@@ -161,24 +233,35 @@ install_node() {
     darwin-arm64) node_sha=61130f394c1630d211dd50aecc4353d379480f36d3ac913cd85dbba1aed585c6 ;;
   esac
   say "installing Node $NODE_VERSION into $NODE_DIR"
-  tmp=$(mktemp -d)
+  # it runs as a condition, where set -e does nothing: each step says itself when it fails
+  tmp=$(mktemp -d) || return 1
   archive="$tmp/node.tar.gz"
-  curl -fsSL --retry 3 "https://nodejs.org/dist/$NODE_VERSION/node-$NODE_VERSION-$platform.tar.gz" -o "$archive"
-  [ "$(sha256 "$archive")" = "$node_sha" ] || { rm -rf "$tmp"; fail "the Node download does not match its published SHA-256; nothing was installed"; }
-  rm -rf "$NODE_DIR"
-  mkdir -p "$NODE_DIR" "$BIN_DIR"
-  tar -xzf "$archive" -C "$NODE_DIR" --strip-components=1
-  rm -rf "$tmp"
+  curl -fsSL --retry 3 "https://nodejs.org/dist/$NODE_VERSION/node-$NODE_VERSION-$platform.tar.gz" -o "$archive" || { rm -rf "$tmp"; return 1; }
+  [ "$(sha256 "$archive")" = "$node_sha" ] || { rm -rf "$tmp"; say "the Node download does not match its published SHA-256; nothing was installed"; return 1; }
+  # unpacked beside the old one and swapped in only once it holds a node: a failed unpack leaves an
+  # existing install (and the link to it) as it was
+  mkdir -p "$tmp/node" "$BIN_DIR" || { rm -rf "$tmp"; return 1; }
+  tar -xzf "$archive" -C "$tmp/node" --strip-components=1 || { rm -rf "$tmp"; return 1; }
+  [ -x "$tmp/node/bin/node" ] || { rm -rf "$tmp"; say "the Node download holds no bin/node; nothing was installed"; return 1; }
+  mkdir -p "$(dirname "$NODE_DIR")" || { rm -rf "$tmp"; return 1; }
+  rm -rf "$NODE_DIR.old"
+  if [ -e "$NODE_DIR" ]; then mv "$NODE_DIR" "$NODE_DIR.old" || { rm -rf "$tmp"; return 1; }; fi
+  mv "$tmp/node" "$NODE_DIR" || { [ ! -e "$NODE_DIR.old" ] || mv "$NODE_DIR.old" "$NODE_DIR"; rm -rf "$tmp"; return 1; }
+  rm -rf "$NODE_DIR.old" "$tmp"
   # an older node elsewhere on the PATH would still win in a new shell, so this one goes first in ours
-  [ -e "$BIN_DIR/node" ] || ln -s "$NODE_DIR/bin/node" "$BIN_DIR/node"
-  installed_here="$installed_here node"
+  [ -e "$BIN_DIR/node" ] || ln -s "$NODE_DIR/bin/node" "$BIN_DIR/node" || return 1
 }
 
 # herdr's checkout stays at the version first installed: Settings → Updates builds each newer release
 # in the app's state dir and runs it from there (server/updater.ts, current.json). The directory of the
 # code that runs now, so the phone step is the running version's, not the first install's.
 running_code() {
-  state="${HERDR_WEB_STATE_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr-web-ui}"
+  state="${OVIS_STATE_DIR:-${HERDR_WEB_STATE_DIR:-}}"
+  if [ -z "$state" ]; then
+    state="${XDG_CONFIG_HOME:-$HOME/.config}/ovis"
+    # an install whose server has not run since the rename still has its state under the old name
+    [ -d "$state" ] || state="${XDG_CONFIG_HOME:-$HOME/.config}/herdr-web-ui"
+  fi
   head=$(git -C "$1" rev-parse HEAD 2>/dev/null || true)
   # shellcheck disable=SC2016 # JavaScript, not shell
   bun -e '
@@ -252,19 +335,52 @@ main() {
     installed_here="$installed_here bun"
   fi
 
-  node_major=$(node --version 2>/dev/null | sed -n 's/^v\([0-9][0-9]*\).*/\1/p')
-  [ "${node_major:-0}" -ge 18 ] || install_node
+  # The ref to install is settled before anything moves: a release from before the rename still
+  # names the plugin by its old id, and installing it cannot move an install to the new one
+  ref=""
+  move=1
+  if ! herdr plugin list 2>/dev/null | grep -q "$PLUGIN "; then
+    need git
+    ref=${OVIS_REF:-${HERDR_WEB_UI_REF:-$(latest_release)}}
+    [ -n "$ref" ] || fail "could not look up the latest release on github.com. Check the connection and run this again."
+    case "$(ref_plugin_id "$ref")" in
+      # that release installs, runs and updates under the old id: the move waits for a release
+      # that names the new one, which Settings → Updates or this script brings
+      "$LEGACY_PLUGIN") PLUGIN=$LEGACY_PLUGIN ;;
+      # a branch whose manifest cannot be read: an install under the old id is left running, since
+      # the ref may not be able to move it
+      "") move=0 ;;
+    esac
+  fi
+
+  legacy_root=""
+  if [ "$move" = 0 ] && herdr plugin list 2>/dev/null | grep -q "$LEGACY_PLUGIN "; then
+    say "could not read the plugin id at $ref, so the install under $LEGACY_PLUGIN is left as it is; run this again to move it"
+  elif [ "$PLUGIN" != "$LEGACY_PLUGIN" ] && herdr plugin list 2>/dev/null | grep -q "$LEGACY_PLUGIN "; then
+    legacy_root=$(plugin_root "$LEGACY_PLUGIN")
+    say "moving the installed plugin to its Ovis id; its settings and token come along"
+    # stopped first: removed with its server up, the old checkout would keep serving, and the new
+    # id's start would find the port answering and leave it
+    if [ -n "$legacy_root" ] && ! bun "$legacy_root/scripts/plugin.ts" stop </dev/null >/dev/null 2>&1; then
+      fail "could not stop the server of the old id, so nothing was moved. Stop it (herdr plugin action invoke $LEGACY_PLUGIN.stop, or restart herdr), then run this again."
+    fi
+  fi
 
   if herdr plugin list 2>/dev/null | grep -q "$PLUGIN "; then
     say "already installed as a herdr plugin; Settings → Updates keeps it current"
   else
-    need git
-    ref=${HERDR_WEB_UI_REF:-$(latest_release)}
-    [ -n "$ref" ] || fail "could not look up the latest release on github.com. Check the connection and run this again."
     say "installing the herdr plugin at $ref (herdr clones and builds it: about a minute)"
     # herdr previews the whole manifest first; on success its last word is enough, on failure all of it
     log=$(mktemp)
+    installed=0
     if herdr plugin install "$REPO" --ref "$ref" --yes </dev/null >"$log" 2>&1; then
+      installed=1
+    elif grep -q "Ovis needs Node 18 or newer" "$log" && ( install_node ); then
+      # a release from before the Rust PTY host was the default still asks for Node in its first build step
+      installed_here="$installed_here node"
+      herdr plugin install "$REPO" --ref "$ref" --yes </dev/null >"$log" 2>&1 && installed=1
+    fi
+    if [ "$installed" = 1 ]; then
       grep '^Installed ' "$log" || true
       rm -f "$log"
       new_install=1
@@ -275,8 +391,37 @@ main() {
     fi
   fi
 
-  root=$(herdr plugin list --json | bun -e 'const d = JSON.parse(await Bun.stdin.text()); console.log(d.result.plugins.find((p) => p.plugin_id === "'"$PLUGIN"'")?.plugin_root ?? "")')
+  root=$(plugin_root "$PLUGIN")
+  # the id unknown before the install: the ref may have named the old one
+  if [ -z "$root" ] && [ "$move" = 0 ]; then
+    PLUGIN=$LEGACY_PLUGIN
+    root=$(plugin_root "$PLUGIN")
+  fi
   [ -n "$root" ] || fail "herdr does not list the plugin after installing it; see: herdr plugin list"
+
+  if [ "$PLUGIN" != "$LEGACY_PLUGIN" ] && [ "$move" = 1 ] && herdr plugin list 2>/dev/null | grep -q "$LEGACY_PLUGIN "; then
+    adopt_legacy_config
+    herdr plugin uninstall "$LEGACY_PLUGIN" </dev/null >/dev/null || fail "could not remove the plugin's old id; run: herdr plugin uninstall $LEGACY_PLUGIN"
+  fi
+
+  # the Rust PTY host of the release that runs, checked against its SHA-256: herdr's build step and
+  # Settings → Updates fetch it too, so this is for an install from before it shipped, or one whose
+  # download failed. Without it, terminals use the Node sidecar where there is Node, or a mirror.
+  code=$(running_code "$root")
+  [ ! -f "$code/scripts/pty-sidecar.ts" ] || (cd "$code" && bun scripts/pty-sidecar.ts install </dev/null) || true
+  # Node only where terminals would otherwise have no PTY host: a release without the Rust host (one
+  # from before it, or a branch), or one whose host failed its checks here
+  if ! rust_host_runs "$code/bin/ovis-pty-sidecar"; then
+    node_major=$(node --version 2>/dev/null | sed -n 's/^v\([0-9][0-9]*\).*/\1/p')
+    # optional now: a Node that cannot be installed leaves the panes mirrored, never the install unfinished
+    if [ "${node_major:-0}" -lt 18 ]; then
+      if ( install_node ); then
+        installed_here="$installed_here node"
+      else
+        say "could not install Node, so this PC's panes are mirrored until the Rust PTY host can be installed (run this again later)"
+      fi
+    fi
+  fi
 
   if herdr status server --json 2>/dev/null | grep -q '"running":true'; then
     # the action only queues the start (its output goes to herdr's plugin log), so wait for it here
@@ -298,7 +443,6 @@ main() {
   fi
 
   echo
-  code=$(running_code "$root")
   if grep -q '"phone"' "$code/scripts/plugin.ts" 2>/dev/null; then
     bun "$code/scripts/plugin.ts" phone </dev/null || true
   else

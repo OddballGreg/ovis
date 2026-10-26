@@ -23,7 +23,7 @@ const paneInfo = (id: string) => ({
 });
 
 beforeEach(() => {
-  root = mkdtempSync(join(tmpdir(), "herdr-web-ui-omo-send-"));
+  root = mkdtempSync(join(tmpdir(), "ovis-omo-send-"));
   panes = {};
   calls = [];
   screens = {};
@@ -58,8 +58,11 @@ beforeEach(() => {
   });
 });
 
-afterEach(() => {
-  for (const child of children.splice(0)) child.kill();
+afterEach(async () => {
+  await Promise.all(children.splice(0).map(async (child) => {
+    child.kill();
+    await child.exited;
+  }));
   listener.stop(true);
   if (socketBefore === undefined) delete process.env["HERDR_SOCKET"];
   else process.env["HERDR_SOCKET"] = socketBefore;
@@ -70,13 +73,28 @@ afterEach(() => {
  * A live omo holding a session: its store named in its environment and omo's holder record for its pid.
  * A child of its own, so the environment read from /proc is this one, not whatever ran the tests.
  */
+/** The first line a fixture prints: stdout can arrive in more than one chunk, so read up to the newline. */
+async function firstLine(stdout: ReadableStream<Uint8Array>): Promise<string> {
+  const reader = stdout.getReader();
+  const decoder = new TextDecoder();
+  let text = "";
+  try {
+    while (!text.includes("\n")) {
+      const { value, done } = await reader.read();
+      if (done) throw new Error(`the fixture's stdout ended before a full line: ${JSON.stringify(text)}`);
+      text += decoder.decode(value, { stream: true });
+    }
+  } finally { reader.releaseLock(); }
+  return text;
+}
+
 async function heldOmo(): Promise<{ pid: number; argv: string[]; cwd: string }> {
   const agentDir = join(root, "agent");
-  const child = Bun.spawn(["sh", "-c", "echo ready; exec sleep 60"], { cwd: root, env: { OMO_CODING_AGENT_DIR: agentDir, PATH: process.env["PATH"] ?? "" }, stdout: "pipe" });
+  // Keep the process that signals ready: another exec can make /proc/<pid>/environ
+  // briefly empty while the composer looks up the store holding this session.
+  const child = Bun.spawn(["sh", "-c", "echo ready; read -r stop"], { cwd: root, env: { OMO_CODING_AGENT_DIR: agentDir, PATH: process.env["PATH"] ?? "" }, stdin: "pipe", stdout: "pipe" });
   children.push(child);
-  const reader = child.stdout.getReader();
-  await reader.read();
-  reader.releaseLock();
+  expect(await firstLine(child.stdout)).toBe("ready\n");
   const holders = join(agentDir, "sessions", omoSessionFolder(root), "session-holders", "sess-1");
   mkdirSync(holders, { recursive: true });
   writeFileSync(join(holders, `${child.pid}.json`), JSON.stringify({ pid: child.pid, processStartedAtMs: processStartedAt(child.pid), cwd: root }));
@@ -92,6 +110,28 @@ const DRAFT_SCREEN = ["", "\u2500".repeat(60), "\u276f an unsent draft", "\u2500
 const submitter = () => createSubmitText({
   options: { submitDelayMs: 0 }, lastTyped: new Map(), attachments: new Map(), terminalAttach: async () => false,
   SUBMIT_DEADLINE_MS: 20_000, TYPED_SETTLE_MS: 0, DRAFT_CLEAR_WAIT_MS: 0, DRAFT_CLEAR_POLL_MS: 0, SUBMIT_DELAY_MS: 0,
+});
+
+// These need no /proc: they run on every platform
+it("keeps Claude's draft refusal when only a script from an omo-ai checkout runs beside Claude", async () => {
+  screens["w:p1"] = DRAFT_SCREEN;
+  panes["w:p1"] = { agent: "claude", process: [{ pid: 2147483646, argv: ["/usr/bin/claude"], cwd: root }, { ...OMO_AI_SCRIPT, cwd: root }] };
+  const refused = await submitter()("w:p1", "hello", "hello", Date.now()).catch((error: unknown) => error);
+  expect(refused).toBeInstanceOf(HerdrError);
+  expect((refused as HerdrError).code).toBe("input_draft");
+  expect(calls.some((call) => call.method === "agent.prompt")).toBeFalse();
+});
+
+it("neither reads nor types into a Hermes pane once the device loses its access while its processes are looked up", async () => {
+  screens["w:p1"] = "";
+  panes["w:p1"] = { agent: "hermes", process: [{ pid: 2147483646, argv: ["/usr/bin/hermes"], cwd: root }] };
+  let revoked = false;
+  onProcessInfo = () => { revoked = true; };
+  const authorize = () => { if (revoked) throw new HerdrError("forbidden", "access revoked"); };
+  const refused = await submitter()("w:p1", "hello", "hello", Date.now(), false, authorize).catch((error: unknown) => error);
+  expect((refused as HerdrError).code).toBe("forbidden");
+  expect(calls.some((call) => call.method === "pane.process_info")).toBeTrue();
+  expect(calls.some((call) => ["pane.read", "agent.prompt", "pane.send_text", "pane.send_keys"].includes(call.method))).toBeFalse();
 });
 
 // omo's identity is read from /proc (its environment) and its holder records
@@ -118,21 +158,13 @@ it("pastes a multiline message into an unlabelled omo pane as one bracketed past
   panes["w:p3"] = { process: [{ pid: 2147483646, argv: ["/bin/bash"], cwd: root }, { ...OMO_AI_SCRIPT, cwd: root }] };
   const sent = async (paneId: string) => {
     calls.length = 0;
-    await submitter()(paneId, "a\nb", "a\nb", Date.now());
+    // the payload a composer shapes for a pane whose paste mode its browser never learned: bare lines joined by CR
+    await submitter()(paneId, "a\nb", "a\rb", Date.now());
     return calls.find((call) => call.method === "pane.send_text")?.params.text;
   };
-  expect(await sent("w:p1")).toBe("\u001b[200~a\nb\u001b[201~");
-  expect(await sent("w:p2")).toBe("a\nb");
-  expect(await sent("w:p3"), "a script from an omo-ai checkout gets no omo paste markers").toBe("a\nb");
-});
-
-it("keeps Claude's draft refusal when only a script from an omo-ai checkout runs beside Claude", async () => {
-  screens["w:p1"] = DRAFT_SCREEN;
-  panes["w:p1"] = { agent: "claude", process: [{ pid: 2147483646, argv: ["/usr/bin/claude"], cwd: root }, { ...OMO_AI_SCRIPT, cwd: root }] };
-  const refused = await submitter()("w:p1", "hello", "hello", Date.now()).catch((error: unknown) => error);
-  expect(refused).toBeInstanceOf(HerdrError);
-  expect((refused as HerdrError).code).toBe("input_draft");
-  expect(calls.some((call) => call.method === "agent.prompt")).toBeFalse();
+  expect(await sent("w:p1")).toBe("\u001b[200~a\rb\u001b[201~");
+  expect(await sent("w:p2")).toBe("a\rb");
+  expect(await sent("w:p3"), "a script from an omo-ai checkout gets no omo paste markers").toBe("a\rb");
 });
 
 it("sends nothing when the device loses its access while the pane's processes are looked up", async () => {

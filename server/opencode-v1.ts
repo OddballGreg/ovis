@@ -8,9 +8,9 @@
  * as `{ info, parts }`, the shape the 1.x tables hold, mapped to turns by the same code
  * (`opencodeMessage1Record`).
  *
- * Off unless asked for. `HERDR_WEB_OPENCODE_URL` names a server the user runs; otherwise
- * `HERDR_WEB_OPENCODE_SERVE=1` has this server start one of its own on loopback
- * (`HERDR_WEB_OPENCODE_BIN`, else `opencode` on PATH) when a chat first needs it, behind a password
+ * Off unless asked for. `OVIS_OPENCODE_URL` names a server the user runs; otherwise
+ * `OVIS_OPENCODE_SERVE=1` has this server start one of its own on loopback
+ * (`OVIS_OPENCODE_BIN`, else `opencode` on PATH) when a chat first needs it, behind a password
  * only this process knows, in an empty folder under the state folder, through
  * opencode-watchdog.ts. The watchdog runs it as a process group of its own and is the only process
  * that stops it: this one closes the pipe to the watchdog and sends it SIGTERM, never SIGKILL, and
@@ -118,7 +118,7 @@ const loopback = (hostname: string): boolean => hostname === "localhost" || host
  * and so is a password that would go over plain http to another host, where anyone on the way reads it.
  */
 export function opencodeV1Mode(env: Env = process.env): OpencodeV1Mode {
-  const url = env["HERDR_WEB_OPENCODE_URL"]?.trim();
+  const url = env["OVIS_OPENCODE_URL"]?.trim();
   if (url) {
     let parsed: URL;
     try { parsed = new URL(url); } catch { return null; }
@@ -127,7 +127,7 @@ export function opencodeV1Mode(env: Env = process.env): OpencodeV1Mode {
     if (authorization !== null && parsed.protocol === "http:" && !loopback(parsed.hostname)) return null;
     return { kind: "url", endpoint: { baseUrl: `${parsed.origin}${parsed.pathname.replace(/\/+$/, "")}`, authorization } };
   }
-  if (env["HERDR_WEB_OPENCODE_SERVE"] === "1") return { kind: "serve", bin: env["HERDR_WEB_OPENCODE_BIN"]?.trim() || "opencode" };
+  if (env["OVIS_OPENCODE_SERVE"] === "1") return { kind: "serve", bin: env["OVIS_OPENCODE_BIN"]?.trim() || "opencode" };
   return null;
 }
 
@@ -215,7 +215,7 @@ async function health(endpoint: OpencodeV1Endpoint): Promise<"ready" | "incompat
 }
 
 /* -------------------------------------------------------------------------------------------------
- * The server this one starts (HERDR_WEB_OPENCODE_SERVE=1)
+ * The server this one starts (OVIS_OPENCODE_SERVE=1)
  * ----------------------------------------------------------------------------------------------- */
 
 export interface ServeChild {
@@ -423,7 +423,7 @@ const QUIET_ENV: Record<string, string> = {
 export function serveEnvironment(env: Env, password: string): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [key, value] of Object.entries(env)) {
-    if (value === undefined || key.startsWith("HERDR_") || key === "OPENCODE_SERVER_PASSWORD" || key === "OPENCODE_SERVER_USERNAME") continue;
+    if (value === undefined || key.startsWith("HERDR_") || key.startsWith("OVIS_") || key === "OPENCODE_SERVER_PASSWORD" || key === "OPENCODE_SERVER_USERNAME") continue;
     out[key] = value;
   }
   Object.assign(out, QUIET_ENV);
@@ -517,7 +517,7 @@ export class OpencodeServe {
   private backoff(why: string): void {
     this.failures++;
     if (this.gaveUp) {
-      this.deps.log(`OpenCode server ${why}; it is not started again until HERDR_WEB_OPENCODE_BIN changes or the app restarts.`);
+      this.deps.log(`OpenCode server ${why}; it is not started again until OVIS_OPENCODE_BIN changes or the app restarts.`);
       return;
     }
     const wait = Math.min(this.options.maxBackoffMs, this.options.minBackoffMs * 2 ** (this.failures - 1));
@@ -641,7 +641,7 @@ async function checkedUrl(endpoint: OpencodeV1Endpoint): Promise<OpencodeV1Endpo
       check.state = answer === false ? "failed" : answer;
       if (answer === "incompatible" && !loggedIncompatibleUrl) {
         loggedIncompatibleUrl = true;
-        console.error("The OpenCode server HERDR_WEB_OPENCODE_URL names is not OpenCode 1.x; chats are read from opencode.db until it changes or the app restarts.");
+        console.error("The OpenCode server OVIS_OPENCODE_URL names is not OpenCode 1.x; chats are read from opencode.db until it changes or the app restarts.");
       }
     });
     await check.pending;

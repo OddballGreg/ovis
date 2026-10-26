@@ -4,8 +4,8 @@
  * OpenCode 1.x keeps the model a TUI uses in the TUI itself (its local state, sent with each
  * prompt), and a TUI listens on no port, so nothing over HTTP can set it. What can: the TUI's own
  * "Select model" dialog, driven with keys as a person would (`driveModelDialog`). The list comes
- * from the OpenCode HTTP source (opencode-v1.ts, HERDR_WEB_OPENCODE_URL or
- * HERDR_WEB_OPENCODE_SERVE=1): any 1.x server answers GET /config/providers from the same
+ * from the OpenCode HTTP source (opencode-v1.ts, OVIS_OPENCODE_URL or
+ * OVIS_OPENCODE_SERVE=1): any 1.x server answers GET /config/providers from the same
  * configuration and credentials the TUI reads, `{ providers: [{ id, name, models: { <id>: { name,
  * status, release_date } } }], default }`. Without that source nothing here is offered.
  *

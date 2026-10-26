@@ -23,8 +23,8 @@ export async function checkTerminalPinch(browser: Browser, origin: string, paneI
   const context = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, locale: "en-US" });
   await context.addInitScript(({ paneId }) => {
     // Keep the size saved by the gesture when this same page reloads.
-    if (!localStorage.getItem("herdr-web-ui:settings")) localStorage.setItem("herdr-web-ui:settings", JSON.stringify({ language: "en" }));
-    localStorage.setItem(`herdr-web-ui:view:${paneId}`, "terminal");
+    if (!localStorage.getItem("ovis:settings")) localStorage.setItem("ovis:settings", JSON.stringify({ language: "en" }));
+    localStorage.setItem(`ovis:view:${paneId}`, "terminal");
     const touchWindow = window as Window & { wheels_: number; wheelModes_: number[]; remaining_: number[] };
     touchWindow.wheels_ = 0;
     touchWindow.wheelModes_ = [];
@@ -61,7 +61,7 @@ export async function checkTerminalPinch(browser: Browser, origin: string, paneI
     const probe = () => page.evaluate(() => ({
       fontPx: parseFloat(getComputedStyle(document.querySelector(".pane-terminal .xterm-rows")!).fontSize),
       rows: document.querySelectorAll(".pane-terminal .xterm-rows > div").length,
-      saved: JSON.parse(localStorage.getItem("herdr-web-ui:settings") ?? "{}").terminalFontSize as number | undefined,
+      saved: JSON.parse(localStorage.getItem("ovis:settings") ?? "{}").terminalFontSize as number | undefined,
       transform: (document.querySelector(".pane-terminal .xterm") as HTMLElement).style.transform,
       computedTransform: getComputedStyle(document.querySelector(".pane-terminal .xterm")!).transform,
       wheels: (window as Window & { wheels_: number }).wheels_,
@@ -109,6 +109,18 @@ export async function checkTerminalPinch(browser: Browser, origin: string, paneI
         await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: cx, y: cy - distance / 2 + distance * step / moves, id: 1 }] });
       }
       await release();
+      // an attached swipe's reports go out a few per animation frame (lib/touchWheelPacer.ts), and the
+      // pacer sends in every frame while any wait: a frame that sends none means the swipe has drained
+      await page.evaluate(() => new Promise<void>((resolve) => {
+        const sent = () => (window as Window & { wheels_: number }).wheels_;
+        let last = sent();
+        const check = (): void => {
+          const now = sent();
+          if (now === last) resolve();
+          else { last = now; requestAnimationFrame(check); }
+        };
+        requestAnimationFrame(check);
+      }));
       const after = await probe();
       assert(after.wheelModes.slice(before.wheelModes.length).every((mode) => mode === 1),
         `a ${moves}-move swipe sends line-mode wheels only`);
@@ -278,7 +290,7 @@ if (import.meta.main) {
   let browser: Browser | undefined;
   let workspace: string | undefined;
   try {
-    const made = await workspaceCreate({ cwd: root, label: "herdr-web-ui-test-terminal-pinch", focus: false });
+    const made = await workspaceCreate({ cwd: root, label: "ovis-test-terminal-pinch", focus: false });
     workspace = made.workspace.workspace_id;
     browser = await chromium.launch({ executablePath: chromePath(), headless: true, args: ["--no-sandbox"] });
     await checkTerminalPinch(browser, `http://127.0.0.1:${server.port}`, made.root_pane.pane_id);

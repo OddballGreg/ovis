@@ -7,7 +7,7 @@ const RESCUE_MS = 600;
 const PLAYING_HOLD_MS = 5_000;
 /** a chime another tab played this long before this tab heard the alert was for the same one */
 const CHIMED_BEFORE_MS = 400;
-const CHANNEL = "herdr-web-ui:alert-turns";
+const CHANNEL = "ovis:alert-turns";
 
 export interface AlertTurnMessage {
   type: "claim" | "playing" | "chimed" | "withdraw";
@@ -164,7 +164,8 @@ function isMessage(value: unknown): value is AlertTurnMessage {
 
 /** Browser wiring. No Web Locks or secure-context-only UUID API: LAN HTTP works too. */
 export function createAlertTurnPlayer(options: {
-  play: (kind: AlertSoundKind) => boolean | Promise<boolean>;
+  /** `key` is the one the chime was asked with: false (not played) when it no longer should sound */
+  play: (kind: AlertSoundKind, key: string) => boolean | Promise<boolean>;
   channel?: BroadcastChannel | null;
 }) {
   const turns = new AlertTurns([...crypto.getRandomValues(new Uint32Array(4))].join("-"));
@@ -193,7 +194,7 @@ export function createAlertTurnPlayer(options: {
         playing.delete(key);
         send(turns.finish(key, played, performance.now()));
       };
-      const result = options.play(kind);
+      const result = options.play(kind, key);
       if (typeof result === "boolean") finish(result);
       else void result.then(finish);
     }
@@ -229,7 +230,7 @@ export function createAlertTurnPlayer(options: {
   return {
     chime(key: string, kind: AlertSoundKind) {
       if (!active) return;
-      if (!channel) { options.play(kind); return; }
+      if (!channel) { options.play(kind, key); return; }
       send(turns.start(key, kind, performance.now()));
       schedule();
     },

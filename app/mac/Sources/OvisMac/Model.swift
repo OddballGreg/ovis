@@ -1,6 +1,13 @@
 import AppKit
 import Foundation
 
+/// Ends a request at its redirect: the redirect's own response is the answer.
+private final class NoRedirects: NSObject, URLSessionTaskDelegate {
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        completionHandler(nil)
+    }
+}
+
 struct Status: Equatable {
     var running: Bool
     var origin: URL?
@@ -23,23 +30,120 @@ final class Model: ObservableObject {
     @Published var phase: Phase = .checking
     @Published var log: [String] = []
     @Published var status: Status?
+    /// The Ovis page the main window shows: the running server's address, nil while it is not running.
+    @Published private(set) var webOrigin: URL?
+    /// Bumped to load the page again: View > Reload, or the server answering again after it was gone.
+    @Published private(set) var reloads = 0
+    /// An Install from this app is done: the phone's QR code opens next to the page.
+    @Published var phoneSetupRequested = false
+    /// The main window's page, for Open in Browser.
+    weak var page: WebPageController?
+    /// The page did not load: it loads again once the server answers. A page that did load reconnects
+    /// by itself, as it does in a browser, and keeps what the user had open in it.
+    private var pageFailedToLoad = false
+    /// Bumped as Install, Restart, Make the phone address or Remove starts: a check that began before it
+    /// must not put its result over theirs.
+    private var work = 0
     private var pluginRoot: String?
+    /// The id the plugin is installed under: an install of an older release keeps the old one.
+    private var pluginID = Ovis.pluginID
+    /// What Try again repeats: a Restart that timed out restarts again rather than reinstalling.
+    private var retryRestarts = false
 
     var logText: String { log.joined(separator: "\n") }
 
+    /// Install, Restart or Remove is under way, and waits for the server itself.
+    var busy: Bool {
+        if case .working = phase { return true }
+        return false
+    }
+
     func refresh() async {
-        guard FileManager.default.isExecutableFile(atPath: Paths.herdr), let root = await findPluginRoot() else {
+        let started = work
+        let plugin = FileManager.default.isExecutableFile(atPath: Paths.herdr) ? await findPlugin() : nil
+        guard work == started else { return }
+        guard let plugin else {
             pluginRoot = nil
             status = nil
+            webOrigin = nil
             phase = .notInstalled
             return
         }
-        pluginRoot = root
-        status = await readStatus(root: root)
+        pluginID = plugin.id
+        pluginRoot = plugin.root
+        let status = await readStatus(root: plugin.root)
+        guard work == started else { return }
+        self.status = status
+        let origin = status.running ? status.origin : nil
+        if origin != webOrigin {
+            // a page at a new address loads by itself
+            webOrigin = origin
+            pageFailedToLoad = false
+        }
         phase = .installed
     }
 
+    /// Keeps the main window on a live page for as long as the app runs. A running page reconnects by
+    /// itself to a server that comes back, and tells the user itself when the server it meets was
+    /// updated; a page that did not load, or whose code never started, loads again once the server
+    /// answers. Every fifth miss (about 15 s) reads the status again: the server may be on another port
+    /// now, or stopped, and then the window shows Start. A server started outside the app (a terminal,
+    /// herdr's own start) is picked up the same way.
+    func monitor() async {
+        var misses = 0
+        while !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            // Install, Restart and Remove wait for the server themselves, and a failure stays on screen
+            guard phase == .installed || phase == .notInstalled else {
+                misses = 0
+                continue
+            }
+            let started = work
+            var up = false
+            if let origin = status?.origin { up = await answers(origin) }
+            guard work == started else { continue }
+            if up {
+                let wasGone = misses >= 1
+                misses = 0
+                if webOrigin == nil {
+                    await refresh()
+                } else if pageFailedToLoad {
+                    pageFailedToLoad = false
+                    reloads += 1
+                } else if wasGone {
+                    page?.reloadIfNotStarted()
+                }
+                continue
+            }
+            misses += 1
+            if misses % 5 == 0 { await refresh() }
+        }
+    }
+
+    func pageFailed() {
+        pageFailedToLoad = true
+    }
+
+    func pageLoaded() {
+        pageFailedToLoad = false
+    }
+
+    func reload() {
+        reloads += 1
+    }
+
+    /// The page as it is now (a pane's address), or the server's own address.
+    func openInBrowser() {
+        if let url = page?.webView.url ?? webOrigin ?? status?.origin { open(url) }
+    }
+
+    func retry() async {
+        if retryRestarts { await restart() } else { await install() }
+    }
+
     func install() async {
+        work += 1
+        retryRestarts = false
         log = []
         phase = .working(L("Downloading the installer…", "설치 프로그램을 받는 중…"))
         let script: URL
@@ -49,12 +153,12 @@ final class Model: ObservableObject {
             script = FileManager.default.temporaryDirectory.appendingPathComponent("ovis-install-\(UUID().uuidString).sh")
             try data.write(to: script)
         } catch {
-            fail(L("Could not download the installer from herdrweb.dev. Check the internet connection.", "herdrweb.dev에서 설치 프로그램을 받지 못했습니다. 인터넷 연결을 확인해 주세요."), detail: error.localizedDescription)
+            fail(L("Could not download the installer from ovis.sh. Check the internet connection.", "ovis.sh에서 설치 프로그램을 받지 못했습니다. 인터넷 연결을 확인해 주세요."), detail: error.localizedDescription)
             return
         }
         defer { try? FileManager.default.removeItem(at: script) }
-        phase = .working(L("Installing herdr, Bun, Node and herdr web UI…", "herdr, Bun, Node, herdr web UI를 설치하는 중…"))
-        let result = await run("/bin/sh", [script.path], env: ["HERDR_WEB_NO_OPEN": "1"], onLine: appendLine)
+        phase = .working(L("Installing herdr, Bun, Node and the Ovis server…", "herdr, Bun, Node, Ovis 서버를 설치하는 중…"))
+        let result = await run("/bin/sh", [script.path], env: ["OVIS_NO_OPEN": "1"], onLine: appendLine)
         guard result.status == 0 else {
             fail(L("The installer stopped with an error.", "설치 중 오류가 났습니다."))
             return
@@ -67,19 +171,24 @@ final class Model: ObservableObject {
             return
         }
         await waitUntilRunning()
-        await refresh()
+        if webOrigin != nil { phoneSetupRequested = true }
     }
 
     func restart() async {
+        work += 1
+        retryRestarts = true
+        log = []
         phase = .working(L("Restarting…", "다시 시작하는 중…"))
-        if await herdrRunning() {
-            // the actions' output is in the log already: a failure only names which one stopped
-            guard await run(Paths.herdr, ["plugin", "action", "invoke", "\(Ovis.pluginID).stop"], onLine: appendLine).status == 0 else {
-                fail(L("Could not stop herdr web UI.", "herdr web UI를 멈추지 못했습니다."))
+        if await herdrRunning(), let root = pluginRoot {
+            // `herdr plugin action invoke` only queues the action, so a start invoked right after a stop
+            // finds the old server still up and fails: run them here and wait for each, with the locale
+            // the login item gives herdr. The output is in the log: a failure only names which one stopped.
+            guard await run(Paths.bun, ["\(root)/scripts/plugin.ts", "stop"], env: ["LC_CTYPE": "UTF-8"], timeout: 60, onLine: appendLine).status == 0 else {
+                fail(L("Could not stop the Ovis server.", "Ovis 서버를 멈추지 못했습니다."))
                 return
             }
-            guard await run(Paths.herdr, ["plugin", "action", "invoke", "\(Ovis.pluginID).start"], onLine: appendLine).status == 0 else {
-                fail(L("Could not start herdr web UI.", "herdr web UI를 시작하지 못했습니다."))
+            guard await run(Paths.bun, ["\(root)/scripts/plugin.ts", "start"], env: ["LC_CTYPE": "UTF-8"], timeout: 60, onLine: appendLine).status == 0 else {
+                fail(L("Could not start the Ovis server.", "Ovis 서버를 시작하지 못했습니다."))
                 return
             }
         } else if !(await LaunchAgent.start()) {
@@ -92,26 +201,30 @@ final class Model: ObservableObject {
             }
         }
         await waitUntilRunning()
-        await refresh()
     }
 
     /// The installer's phone step: `tailscale serve` for this app, when Tailscale runs here.
     func makePhoneAddress() async {
         guard let root = pluginRoot else { return }
+        work += 1
         log = []
         phase = .working(L("Making the phone address…", "휴대폰 주소를 만드는 중…"))
         _ = await run(Paths.bun, ["\(root)/scripts/plugin.ts", "phone"], onLine: appendLine)
         await refresh()
     }
 
-    /// Takes herdr web UI off this Mac, as the guide's Uninstall does. herdr, Bun and Node stay, and
+    /// Takes the Ovis server off this Mac, as the guide's Uninstall does. herdr, Bun and Node stay, and
     /// herdr keeps running: stopping it would end every agent in it.
     func uninstall() async {
+        work += 1
         log = []
         phase = .working(L("Removing…", "제거하는 중…"))
         let phoneURL = status?.phoneURL
-        _ = await run(Paths.herdr, ["plugin", "action", "invoke", "\(Ovis.pluginID).stop"], onLine: appendLine)
-        _ = await run(Paths.herdr, ["plugin", "uninstall", Ovis.pluginID], onLine: appendLine)
+        // the stop has to end before the uninstall removes the plugin's files: run it here, not as a queued action
+        if let root = pluginRoot {
+            _ = await run(Paths.bun, ["\(root)/scripts/plugin.ts", "stop"], env: ["LC_CTYPE": "UTF-8"], timeout: 60, onLine: appendLine)
+        }
+        _ = await run(Paths.herdr, ["plugin", "uninstall", pluginID], onLine: appendLine)
         if let phoneURL, let tailscale = Paths.tailscale {
             _ = await run(tailscale, ["serve", "--https=\(phoneURL.port ?? 443)", "off"], onLine: appendLine)
         }
@@ -144,18 +257,24 @@ final class Model: ObservableObject {
         }
     }
 
-    private func findPluginRoot() async -> String? {
-        let result = await run(Paths.herdr, ["plugin", "list", "--json"], keepStderr: false)
+    /// The plugin's id and root, under its id or, for an install of an older release, the old one.
+    private func findPlugin() async -> (id: String, root: String)? {
+        let result = await run(Paths.herdr, ["plugin", "list", "--json"], keepStderr: false, timeout: 10)
         guard result.status == 0,
               let json = try? JSONSerialization.jsonObject(with: Data(result.output.utf8)) as? [String: Any],
               let plugins = (json["result"] as? [String: Any])?["plugins"] as? [[String: Any]]
         else { return nil }
-        return plugins.first { $0["plugin_id"] as? String == Ovis.pluginID }?["plugin_root"] as? String
+        for id in [Ovis.pluginID, Ovis.legacyPluginID] {
+            if let root = plugins.first(where: { $0["plugin_id"] as? String == id })?["plugin_root"] as? String {
+                return (id, root)
+            }
+        }
+        return nil
     }
 
     /// `plugin.ts status` knows the port the plugin settled on: "running http://127.0.0.1:7317 (pid 1)" or "down …".
     private func readStatus(root: String) async -> Status {
-        let result = await run(Paths.bun, ["\(root)/scripts/plugin.ts", "status"], keepStderr: false)
+        let result = await run(Paths.bun, ["\(root)/scripts/plugin.ts", "status"], keepStderr: false, timeout: 10)
         let words = (result.output.split(separator: "\n").first ?? "").split(separator: " ")
         var status = Status(running: words.first == "running", origin: words.count > 1 ? URL(string: String(words[1])) : nil)
         guard status.running, let origin = status.origin else { return status }
@@ -171,16 +290,45 @@ final class Model: ObservableObject {
         return status
     }
 
+    /// The server's health check that leaves herdr alone (`scope=bridge`); it answers without a sign-in.
+    /// Only Ovis's own answer counts, as in `scripts/plugin.ts`: another program can take a port Ovis
+    /// left, and its 200 would hide the server's new address. A redirect is not followed: one to the new
+    /// address would hide it the same way.
+    private func answers(_ origin: URL) async -> Bool {
+        guard let url = URL(string: "api/health?scope=bridge", relativeTo: origin)?.absoluteURL else { return false }
+        let request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 2)
+        guard let (data, response) = try? await URLSession.shared.data(for: request, delegate: NoRedirects()),
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+        return body["ok"] as? Bool == true && body["bridge_protocol"] is Int
+    }
+
     private func herdrRunning() async -> Bool {
-        let result = await run(Paths.herdr, ["status", "server", "--json"], keepStderr: false)
+        let result = await run(Paths.herdr, ["status", "server", "--json"], keepStderr: false, timeout: 10)
         return result.output.contains("\"running\":true")
     }
 
-    /// herdr starts the app from its startup hook; give it up to two minutes, checking every two seconds.
+    /// herdr starts the app from its startup hook; give it up to two minutes, checking every two seconds,
+    /// then show where it stopped instead of the spinner or the Install button.
     private func waitUntilRunning() async {
-        for _ in 0..<60 {
-            if let root = await findPluginRoot(), await readStatus(root: root).running { return }
+        let deadline = Date().addingTimeInterval(120)
+        while Date() < deadline {
+            if let plugin = await findPlugin(), await readStatus(root: plugin.root).running {
+                await refresh()
+                return
+            }
             try? await Task.sleep(nanoseconds: 2_000_000_000)
+        }
+        // herdr's own output from the login item: what it printed while it started, or failed to
+        let logTail = (try? String(contentsOfFile: "\(Paths.logDir)/herdr-server.log", encoding: .utf8))?
+            .split(separator: "\n").suffix(10).joined(separator: "\n")
+        if await findPlugin() == nil {
+            fail(L("herdr does not list the Ovis plugin. Try again, or copy the log and get help.",
+                   "herdr에 Ovis 플러그인이 보이지 않습니다. 다시 시도하거나, 오류 내용을 복사해 도움을 받으세요."), detail: logTail)
+        } else {
+            fail(L("The Ovis server did not start within two minutes. Try again, or copy the log and get help.",
+                   "Ovis 서버가 2분 안에 시작되지 않았습니다. 다시 시도하거나, 오류 내용을 복사해 도움을 받으세요."),
+                 detail: logTail)
         }
     }
 }

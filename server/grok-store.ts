@@ -92,30 +92,55 @@ export function grokHomeFromEnvironment(environment: string): string | null {
   return home && isAbsolute(home) ? home : null;
 }
 
-/** Directories of real events.jsonl files this process holds. Null when that table cannot be
- * trusted: it could not be read, it is too large, or a held events file is deleted, renamed
- * or cannot be resolved as a real file. Only a complete set can confirm Herdr's ID. */
-export function grokHeldSessions(pid: number, home: string): Set<string> | null {
+/**
+ * Held events.jsonl directories and descriptor write times. Null on an unreadable or oversized
+ * table, or on a held file that may be a session's events file under another name, since that
+ * session could be the newest one written:
+ * - a file whose name starts with `events.jsonl` that is not a resolved real
+ *   `<group>/<session>/events.jsonl` with an accepted session ID: deleted, renamed with a suffix
+ *   (`events.jsonl.old`), moved into a folder the ID filter skips (`.archived-resumed`) or
+ *   deeper into the store, or replaced at its path;
+ * - any other file held in a folder of a cwd group (a session's, or one renamed past the ID
+ *   filter) that has no `events.jsonl` of its own on disk: its events file moved away, perhaps to
+ *   that held name (`old-events.jsonl`).
+ * Other held files are ignored: which ones Grok keeps open is not known from native captures.
+ */
+export function grokHeldSessions(pid: number, home: string): Map<string, number> | null {
   try {
     const store = realpathSync(join(home, "sessions"));
     const fds = opendirSync(`/proc/${pid}/fd`);
-    const sessions = new Set<string>();
+    const sessions = new Map<string, number>();
+    /** folders of a cwd group the process holds some other file in */
+    const others = new Set<string>();
     let count = 0;
     try {
       for (let fd = fds.readSync(); fd; fd = fds.readSync()) {
         if (++count > 4096) return null;
+        const descriptor = `/proc/${pid}/fd/${fd.name}`;
         let target: string;
         // a descriptor closed since the listing is not a held file
-        try { target = readlinkSync(`/proc/${pid}/fd/${fd.name}`); } catch { continue; }
-        if (!inside(store, target) || !basename(target).startsWith("events.jsonl")) continue;
+        try { target = readlinkSync(descriptor); } catch { continue; }
+        if (!inside(store, target)) continue;
         const parts = relative(store, target).split(sep);
-        if (parts.length !== 3 || !SESSION.test(parts[1]!)) continue;
-        // Do not silently drop events.jsonl (deleted) or events.jsonl.old: that could
-        // make an older held session look newest after an unreported /resume.
-        if (basename(target) !== "events.jsonl" || realpathSync(target) !== target || !statSync(target).isFile()) return null;
-        sessions.add(dirname(target));
+        if (!basename(target).startsWith("events.jsonl")) {
+          if (parts.length >= 3) others.add(join(store, parts[0]!, parts[1]!));
+          continue;
+        }
+        // Do not silently drop events.jsonl (deleted), events.jsonl.old or one moved out of
+        // the session's shape: that could make an older held session look newest after an
+        // unreported /resume.
+        if (parts.length !== 3 || !SESSION.test(parts[1]!) || basename(target) !== "events.jsonl" || realpathSync(target) !== target) return null;
+        const held = statSync(descriptor);
+        const named = statSync(target);
+        if (!held.isFile() || !named.isFile() || held.dev !== named.dev || held.ino !== named.ino) return null;
+        sessions.set(dirname(target), held.mtimeMs);
       }
     } finally { fds.closeSync(); }
+    for (const folder of others) {
+      if (sessions.has(folder)) continue;
+      // a folder whose events file is gone may hold it under the other name
+      if (!statSync(join(folder, "events.jsonl"), { throwIfNoEntry: false })?.isFile()) return null;
+    }
     return sessions;
   } catch { return null; }
 }
@@ -139,13 +164,13 @@ export async function resolveGrokStore(pane: HerdrPane, configuredHome?: string)
     if (path === null) return null;
     const held = grokHeldSessions(owner.pid, home);
     const sessionDir = dirname(path);
-    if (!held?.has(sessionDir)) return null;
+    const written = held?.get(sessionDir);
+    if (!held || written === undefined) return null;
     // A duplicate held ID is ambiguous even if only one directory has updates.jsonl.
-    if ([...held].filter((dir) => basename(dir) === session.value).length !== 1) return null;
-    const written = statSync(join(sessionDir, "events.jsonl")).mtimeMs;
-    for (const dir of held) {
+    if ([...held.keys()].filter((dir) => basename(dir) === session.value).length !== 1) return null;
+    for (const [dir, mtime] of held) {
       // Equal timestamps cannot prove which session was written most recently.
-      if (dir !== sessionDir && statSync(join(dir, "events.jsonl")).mtimeMs >= written) return null;
+      if (dir !== sessionDir && mtime >= written) return null;
     }
     return path;
   } catch { return null; }

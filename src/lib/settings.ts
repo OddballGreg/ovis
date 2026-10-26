@@ -626,6 +626,16 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
   const [systemDark, setSystemDark] = useState(() => resolveTheme("system") === "dark");
 
   useEffect(() => {
+    const onStorage = (event: StorageEvent): void => {
+      if (event.storageArea !== window.localStorage || (event.key !== SETTINGS_STORAGE_KEY && event.key !== null)) return;
+      const { shortcutOverrides } = loadSettings();
+      setSettings((current) => ({ ...current, shortcutOverrides }));
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
+
+  useEffect(() => {
     const query = window.matchMedia?.(DARK_QUERY);
     if (!query) return;
     const onChange = (event: MediaQueryListEvent): void => setSystemDark(event.matches);
@@ -669,7 +679,7 @@ export function useSettings(): SettingsContextValue {
   return value;
 }
 
-export const PANE_VIEW_KEY_PREFIX = "herdr-web-ui:view:";
+export const PANE_VIEW_KEY_PREFIX = "ovis:view:";
 
 /** Forgets every pane's own lens on this device, so each opens in the default one again. */
 export function forgetPaneViews(given?: Pick<Storage, "length" | "key" | "removeItem">): number {

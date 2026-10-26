@@ -12,7 +12,7 @@ import { chromePath } from "./chrome-path.ts";
 /** GUI searches stay in herdr's history, never in browser scrollback or terminal input. */
 export async function checkPaneFind(browser: Browser, origin: string): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "herdr-find-browser-"));
-  const created = await workspaceCreate({ cwd: root, label: "herdr-web-ui-test-find-browser" });
+  const created = await workspaceCreate({ cwd: root, label: "ovis-test-find-browser" });
   const pane = created.root_pane.pane_id;
   const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, colorScheme: "dark" });
   try {
@@ -26,8 +26,8 @@ export async function checkPaneFind(browser: Browser, origin: string): Promise<v
     });
     await ready;
     await context.addInitScript((id) => {
-      localStorage.setItem(`herdr-web-ui:view:${id}`, "terminal");
-      localStorage.setItem("herdr-web-ui:settings", JSON.stringify({ theme: "system" }));
+      localStorage.setItem(`ovis:view:${id}`, "terminal");
+      localStorage.setItem("ovis:settings", JSON.stringify({ theme: "system" }));
     }, pane);
     const page = await context.newPage();
     page.setDefaultTimeout(10000);
@@ -150,7 +150,8 @@ export async function checkPaneFind(browser: Browser, origin: string): Promise<v
     await page.getByRole("button", { name: "Previous match", exact: true }).focus();
     await page.keyboard.press("Escape");
     await closedGeometry;
-    assert.equal(await page.getByRole("search").count(), 0);
+    // the find bar is gone; the sidebar's label filter is a search landmark of its own and stays
+    assert.equal(await page.getByRole("search", { name: "Find in terminal", exact: true }).count(), 0);
     assert.deepEqual(inputFrames, [], "find keys and query must never be sent to the terminal");
 
     // Delay, then forward a real upload. Its old drop intent may paste the path, but its

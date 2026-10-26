@@ -16,9 +16,13 @@ on:
 permissions:
   contents: read
 concurrency:
-  # A push to main gets a group of its own commit, so every merge's run finishes and says whether that
-  # merge broke main; a pull request keeps one group per branch and cancels its superseded run.
-  group: validation-${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
+  # One group per ref, as oh-my-openagent's CI does. A running push run of main is never cancelled; a newer
+  # push cancels the one still waiting and takes its place, so a burst of merges runs main's checks at most
+  # twice instead of once per merge on the self-hosted PC, and the newest run covers the merges in between.
+  # Pages deploys only a successful push run of main (a cancelled one's Website run skips building), so a
+  # manual run gets a group of its own and never replaces a waiting push run. A pull request still cancels
+  # its superseded run.
+  group: validation-${{ github.workflow }}-${{ github.ref }}${{ github.event_name == 'workflow_dispatch' && '-manual' || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   changes:
@@ -30,18 +34,21 @@ jobs:
       draft: ${{ steps.filter.outputs.draft }}
       linux: ${{ steps.route.outputs.linux }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
+          persist-credentials: false
       - id: route
         name: Choose the Linux runner
         env:
           EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
           REPOSITORY: ${{ github.repository }}
           REQUESTED_LABELS: ${{ inputs.self_hosted_labels }}
           CONFIGURED_LABELS: ${{ vars.CI_SELF_HOSTED_LABELS }}
+          MAIN_LABELS: ${{ vars.CI_MAIN_SELF_HOSTED_LABELS }}
         run: bash scripts/ci-runner-route.sh >> "$GITHUB_OUTPUT"
       - id: filter
         env:
@@ -82,9 +89,10 @@ jobs:
     env:
       HERDR_TEST_MODE: unit
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
+          persist-credentials: false
       - uses: ./.github/actions/setup-ci
       # A required check: a draft run must not report it green without running it, or a stale
       # draft result could satisfy the merge gate. Marking the PR ready reruns CI.
@@ -112,9 +120,10 @@ jobs:
     env:
       HERDR_TEST_MODE: unit
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
+          persist-credentials: false
       - uses: ./.github/actions/setup-ci
       - name: Skip heavy tests on draft PRs
         if: needs.changes.outputs.draft == 'true'
@@ -125,6 +134,48 @@ jobs:
         if: needs.changes.outputs.draft != 'true'
       - run: bun test ./server/claude-store.test.ts ./server/process-start.test.ts
         if: needs.changes.outputs.draft != 'true'
+  rust-pty-host:
+    # The Rust PTY host (crates/pty-sidecar) is the default where it is installed or built, and its
+    # PtySession checks skip without a build. The self-hosted runners have no Rust toolchain, so this job always runs on
+    # GitHub's image, which has one: it builds the host and runs the same checks on it as on Node.
+    name: Rust PTY host
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      HERDR_TEST_MODE: unit
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-ci
+        with:
+          node: 'true'
+      - name: Skip heavy tests on draft PRs
+        if: needs.changes.outputs.draft == 'true'
+        run: |
+          echo "Draft PR detected, skipping the Rust PTY host checks"
+          exit 0
+      - name: Build the Rust PTY host
+        if: needs.changes.outputs.draft != 'true'
+        run: |
+          cargo --version
+          cargo build --release --locked --manifest-path crates/pty-sidecar/Cargo.toml
+      - name: Rust unit tests
+        if: needs.changes.outputs.draft != 'true'
+        run: cargo test --locked --manifest-path crates/pty-sidecar/Cargo.toml
+      - run: bun install --frozen-lockfile
+        if: needs.changes.outputs.draft != 'true'
+      - name: PtySession on both hosts
+        if: needs.changes.outputs.draft != 'true'
+        run: bun test ./server/pty/host.test.ts
+      - name: The Node host's own checks, on the Rust host
+        if: needs.changes.outputs.draft != 'true'
+        env:
+          OVIS_PTY_SIDECAR: rust
+        run: bun test ./server/pty/session.test.ts
   fast:
     name: Fast checks
     needs: changes
@@ -133,10 +184,15 @@ jobs:
     env:
       CHECK_DIR: ${{ github.workspace }}/.ci
       UNIT_TEST_WORKERS: 4
+      # Fast takes no herdr slot, but its start still passes check.ts's admission port, which every
+      # runner on the self-hosted PC shares (scripts/self-hosted-runner/run.sh): a run that starts
+      # while another runner's run holds that port for a moment waits instead of failing.
+      CHECK_WAIT_SECONDS: 120
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
+          persist-credentials: false
       - uses: ./.github/actions/setup-ci
         with:
           node: 'true'
@@ -155,7 +211,7 @@ jobs:
           bun scripts/release-guards.ts --base "$BASE_SHA"
       - name: Preserve check report and verification logs
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: check-fast-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -181,9 +237,10 @@ jobs:
       CHECK_MAX_RUNS: 3
       CHECK_WAIT_SECONDS: 2400
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
+          persist-credentials: false
       - name: Skip heavy tests on draft PRs
         if: needs.changes.outputs.draft == 'true'
         run: |
@@ -203,7 +260,7 @@ jobs:
         run: bun run check integration
       - name: Preserve check report and verification logs
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: integration-logs-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -227,9 +284,10 @@ jobs:
       CHECK_MAX_RUNS: 3
       CHECK_WAIT_SECONDS: 2400
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
+          persist-credentials: false
       - name: Skip heavy tests on draft PRs
         if: needs.changes.outputs.draft == 'true'
         run: |
@@ -248,7 +306,7 @@ jobs:
         run: echo "version=$(bun -e 'console.log(require("playwright-core/package.json").version)')" >> "$GITHUB_OUTPUT"
       - name: Cache Playwright browser
         if: needs.changes.outputs.draft != 'true' && runner.environment != 'self-hosted'
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: .ci-cache/playwright
           key: playwright-workspace-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.playwright-version.outputs.version }}
@@ -262,10 +320,11 @@ jobs:
         run: bun run check run -- bun scripts/ci-browser-parallel.ts
       - name: Preserve browser logs and evidence
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: browser-main-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
+            .ci/report.json
             .ci/browser-logs/**
             .ci/browser-evidence/**/*.png
             .ci/browser-evidence/**/*.json
@@ -287,9 +346,10 @@ jobs:
       CHECK_MAX_RUNS: 3
       CHECK_WAIT_SECONDS: 2400
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
+          persist-credentials: false
       - name: Skip heavy tests on draft PRs
         if: needs.changes.outputs.draft == 'true'
         run: |
@@ -308,7 +368,7 @@ jobs:
         run: echo "version=$(bun -e 'console.log(require("playwright-core/package.json").version)')" >> "$GITHUB_OUTPUT"
       - name: Cache Playwright browser
         if: needs.changes.outputs.draft != 'true' && runner.environment != 'self-hosted'
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: .ci-cache/playwright
           key: playwright-workspace-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.playwright-version.outputs.version }}
@@ -323,10 +383,11 @@ jobs:
         run: bun run check run -- bun scripts/ci-browser-parallel.ts
       - name: Preserve browser logs and evidence
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: browser-other-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
+            .ci/report.json
             .ci/browser-logs/**
             .ci/browser-evidence/**/*.png
             .ci/browser-evidence/**/*.json

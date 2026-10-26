@@ -4,6 +4,10 @@
     "noEmit": true
   },
   "files": [
+    "integrations/gjc.ts",
+    "integrations/gjc.test.ts",
+    "scripts/install-gjc-integration.ts",
+    "scripts/install-gjc-integration.test.ts",
     "scripts/herdr-themes.ts",
     "scripts/herdr-theme-proposal.ts",
     "scripts/herdr-theme-overrides.ts",
@@ -30,6 +34,7 @@
     "scripts/grok-chat-browser-qa.ts",
     "scripts/gjc-status-browser-regression.ts",
     "scripts/sidebar-activity-demo-regression.ts",
+    "scripts/pane-mute-demo-regression.ts",
     "scripts/file-preview-text-browser-qa.ts",
     "scripts/file-preview-text-fixture.tsx",
     "scripts/virtual-source-browser-qa.ts",

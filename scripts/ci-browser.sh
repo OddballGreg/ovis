@@ -22,14 +22,19 @@ finish() {
 trap finish EXIT
 
 run_script() {
-  local started=$SECONDS code=0 evidence="${UI_EVIDENCE_DIR:-}"
+  local started=$SECONDS code=0 evidence="${UI_EVIDENCE_DIR:-}" line
   if [ -n "${CI:-}${CHECK_DIR:-}" ]; then
     # These evidence branches add viewport changes, assertions or font waits, not just captures.
     case "$1" in
       scripts/ui-regression.ts|scripts/ui-contexts-regression.ts|scripts/key-bar-customization-demo-regression.ts) evidence="";;
     esac
   fi
-  UI_EVIDENCE_DIR="$evidence" bun "$@" || code=$?
+  UI_EVIDENCE_DIR="$evidence" bun "$@" 2>&1 | while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      PASS\ *|FAIL\ *) printf '%s\n' "$line";;
+      *) printf '[%s] %s\n' "$(date -Is)" "$line";;
+    esac
+  done || code=$?
   local seconds=$((SECONDS - started))
   printf 'TIMING %s seconds=%s exit=%s\n' "$1" "$seconds" "$code"
   timings="${timings}$(printf '%-60s %7s %5s' "$1" "$seconds" "$code")"$'\n'
@@ -58,6 +63,7 @@ run_script scripts/herdr-restart-regression.ts
 run_script scripts/sticky-modifiers-regression.ts
 run_script scripts/terminal-arrows-clicks-regression.ts
 run_script scripts/terminal-viewport-regression.ts
+run_script scripts/terminal-touch-burst-regression.ts
 run_script scripts/omo-question-wheel-regression.ts
 run_script scripts/mirror-scroll-demo-regression.ts
 run_script scripts/terminal-cjk-punctuation-regression.ts
@@ -82,6 +88,7 @@ run_script scripts/chat-fallback-browser-qa.ts
 run_script scripts/grok-chat-browser-qa.ts
 run_script scripts/omo-chat-browser-qa.ts
 run_script scripts/omo-plan-browser-regression.ts
+run_script scripts/plan-chip-demo-regression.ts
 run_script scripts/agent-skill-menu-demo-regression.ts
 run_script scripts/terminal-autoswitch-demo-regression.ts
 run_script scripts/agy-chat-browser-qa.ts
@@ -94,27 +101,36 @@ run_script scripts/revision-bound-update-demo-regression.ts
 run_script scripts/file-preview-text-browser-qa.ts
 run_script scripts/virtual-source-browser-qa.ts
 run_script scripts/repo-diff-browser-qa.ts
+run_script scripts/diff-find-demo-regression.ts
 run_script scripts/keyboard-viewport-regression.ts
 run_script scripts/file-viewer-mobile-regression.ts
 run_script scripts/droplet-demo-regression.ts
+run_script scripts/phone-glass-header-demo-regression.ts
 run_script scripts/chat-greeting-demo-regression.ts
 run_script scripts/restored-draft-demo-regression.ts
+run_script scripts/chat-local-send-follow-demo-regression.ts
+run_script scripts/chat-tool-paths-demo-regression.ts
+run_script scripts/terminal-paste-insert-demo-regression.ts
 run_script scripts/composer-fit-demo-regression.ts
 run_script scripts/held-rows-demo-regression.ts
 run_script scripts/replay-clipboard-demo-regression.ts
+run_script scripts/todo-snapshots-demo-regression.ts
 run_script scripts/command-outcome-demo-regression.ts
 run_script scripts/chat-outcome-note-browser-qa.ts
 run_script scripts/sidebar-activity-demo-regression.ts
+run_script scripts/sidebar-filter-demo-regression.ts
 run_script scripts/sidebar-spacing-demo-regression.ts
 run_script scripts/sidebar-machine-layout-demo-regression.ts
 run_script scripts/sidebar-machine-removal-demo-regression.ts
 run_script scripts/sidebar-branch-line-demo-regression.ts
 run_script scripts/sidebar-tokens-demo-regression.ts
+run_script scripts/pane-mute-demo-regression.ts
 run_script scripts/workspace-touch-reorder-demo-regression.ts
 run_script scripts/prompt-dock-demo-regression.ts
 run_script scripts/opencode-prompt-regression.ts
 run_script scripts/files-prompt-regression.ts
 run_script scripts/plugin-actions-demo-regression.ts
+run_script scripts/background-agent-detail-demo-regression.ts
 run_script scripts/palette-machines-demo-regression.ts
 run_script scripts/health-flap-demo-regression.ts
 run_script scripts/narrow-pane-demo-regression.ts

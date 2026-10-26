@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type KeyboardEvent } from "react";
-import { ChevronDown, ChevronUp, CornerDownLeft, SendHorizontal } from "lucide-react";
+import { useCallback, useEffect, useId, useImperativeHandle, useLayoutEffect, useRef, useState, useSyncExternalStore, type KeyboardEvent, type Ref } from "react";
+import { ChevronDown, ChevronUp, CornerDownLeft, SendHorizontal, TextCursorInput } from "lucide-react";
 
 import "./TerminalInput.css";
-import { readTerminalDraft, writeTerminalDraft, TERMINAL_LINE_LIMIT, subscribeTerminalDraft, terminalDraftSending, setTerminalDraftSending, acknowledgeTerminalDraft } from "../lib/terminalDraft.ts";
+import { readTerminalDraft, writeTerminalDraft, TERMINAL_LINE_LIMIT, subscribeTerminalDraft, terminalDraftSending, setTerminalDraftSending, acknowledgeTerminalDraft, terminalDraftVersion } from "../lib/terminalDraft.ts";
 
 import { useT } from "../lib/i18n.ts";
 import { composedChordLetter, fieldKeyChord, fieldLineKey, hasModifiers, heldChord, NO_STICKY_MODIFIERS, type StickyModifiers } from "../lib/keys.ts";
@@ -21,6 +21,13 @@ export interface TerminalInputProps {
   /** an empty line's send: Enter alone, for a menu's default or a prompt that asks to continue;
    * true: sent, false: not sent (offline), a string: not sent, and why */
   onEnter: () => boolean | string;
+  /** the line typed into the pane without Enter; true: typed, clear the line; a string: keep the text and say why; false: not sent (offline) */
+  onInsert: (text: string) => false | Promise<true | string>;
+  /** what a paste is for, read at the tap and again once the clipboard answers: the PC, pane and
+   * connection; null while the pane cannot take one. A different answer cancels the paste. */
+  pasteTarget?: () => string | null;
+  /** a paste waits on the clipboard: the key bar's Paste is off meanwhile */
+  onPasting?: (active: boolean) => void;
   /** the line took the focus */
   onFocus?: () => void;
   /** Settings → Terminal → Compact input line: one short row, and the key bar's fold button */
@@ -31,6 +38,13 @@ export interface TerminalInputProps {
   modifiers?: StickyModifiers;
   /** sends one key with these modifiers to the pane, the way a key-bar key goes */
   onKey?: (key: string, modifiers: StickyModifiers) => void;
+  ref?: Ref<TerminalInputHandle>;
+}
+
+/** What the key bar's Paste asks of the line (PaneTerminal.tsx). */
+export interface TerminalInputHandle {
+  /** reads the clipboard for the line, from the user's own tap and for this line alone */
+  paste(): void;
 }
 
 /** Lines the box grows to before it scrolls. */
@@ -55,7 +69,7 @@ interface SendAttempt {
  * keyboard's own editing and goes to the pane whole, then Enter. Autocorrect and spell-check stay
  * off, as in the composer: they would swap a flag, path or branch name for a dictionary word.
  */
-export function TerminalInput({ owner, active = true, connected, onSend, onEnter, onComposing, onFocus, compact = false, keyBar, modifiers = NO_STICKY_MODIFIERS, onKey }: TerminalInputProps) {
+export function TerminalInput({ owner, active = true, connected, onSend, onEnter, onInsert, pasteTarget, onPasting, onComposing, onFocus, ref, compact = false, keyBar, modifiers = NO_STICKY_MODIFIERS, onKey }: TerminalInputProps) {
   const t = useT();
   const text = useSyncExternalStore(subscribeTerminalDraft, () => readTerminalDraft(owner));
   const setText = useCallback((value: string | ((previous: string) => string)) => {
@@ -66,6 +80,9 @@ export function TerminalInput({ owner, active = true, connected, onSend, onEnter
 
   }, [owner]);
   const composing = useRef(false);
+  /** compositions begun or ended, and selection changes, in the line: a paste waiting on the clipboard compares them (paste below) */
+  const compositions = useRef(0);
+  const selections = useRef(0);
   const composingCallback = useRef(onComposing);
   composingCallback.current = onComposing;
   useEffect(() => () => { composingCallback.current?.(false); }, []);
@@ -94,8 +111,12 @@ export function TerminalInput({ owner, active = true, connected, onSend, onEnter
   }, [modifiers]);
 
   const [note, setNote] = useState<string | null>(null);
+  /** a paste waiting on the clipboard, said under the line while it does */
+  const [pending, setPending] = useState<string | null>(null);
   const sending = useSyncExternalStore(subscribeTerminalDraft, () => terminalDraftSending(owner));
   const box = useRef<HTMLTextAreaElement>(null);
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const textRef = useRef(text);
   textRef.current = text;
 
@@ -260,6 +281,104 @@ export function TerminalInput({ owner, active = true, connected, onSend, onEnter
   }, [awaitCommit, clearPendingSend, connected, dictation.forget, onEnter, onSend, owner, t]);
   sendRef.current = send;
 
+  /**
+   * Types the line into the pane without Enter. The line clears only once the bridge says herdr
+   * has the bytes, and then only the text that was sent: what was typed meanwhile stays, as after
+   * Send. A refusal, a drop or no answer keeps the line with a note; nothing is tried again.
+   */
+  const insert = useCallback(() => {
+    if (!connected || terminalDraftSending(owner)) return;
+    // an open composition is the keyboard's: the committed word goes, not the preedit
+    if (composing.current) { setNote(t("Finish the word, then insert.")); return; }
+    clearPendingSend();
+    setNote(null);
+    const draft = readTerminalDraft(owner);
+    if (draft.length === 0) return;
+    // one line: nothing reports whether the program takes several as one paste, and a shell would
+    // run each (shared/terminal-insert.ts), so a block is said here and nothing is sent
+    if (/[\r\n]/.test(draft)) { setNote(t("Insert takes one line. Send several lines, or insert them one at a time.")); return; }
+    const sent = onInsert(draft);
+    if (sent === false) { setNote(t("Not inserted: the terminal is disconnected.")); return; }
+    dictation.forget();
+    setTerminalDraftSending(owner, true);
+    void sent.then((result) => {
+      if (result === true) acknowledgeTerminalDraft(owner);
+      else setNote(result);
+    }).catch(() => setNote(t("Not confirmed: the terminal did not confirm the text. Check it before inserting again."))).finally(() => { setTerminalDraftSending(owner, false); });
+  }, [clearPendingSend, connected, dictation.forget, onInsert, owner, t]);
+
+  /**
+   * The key bar's Paste: the clipboard is read from the user's tap and for this line alone, at the
+   * selection the tap found. What the paste is for is captured before the read (the PC, pane,
+   * connection, role and input lease; the draft as written; where the caret is; the compositions
+   * so far), since the browser may hold the read for a permission prompt: an answer that comes
+   * after any of them changed, even and back again (a selection moved, a composition begun and
+   * ended with nothing written, the pane's input lost and given again), or for a line no longer
+   * shown, is dropped with a note. A refused or missing clipboard says to use the keyboard's own
+   * paste; nothing is read in the background or retried.
+   */
+  const pasting = useRef(false);
+  const paste = useCallback(() => {
+    const element = box.current;
+    if (pasting.current || element === null) return;
+    if (composing.current) { setNote(t("Finish the word, then paste.")); return; }
+    const clipboard = typeof navigator === "undefined" ? undefined : navigator.clipboard;
+    if (typeof clipboard?.readText !== "function") { setNote(t("Paste is not available here. Use the keyboard's own paste in the input line.")); return; }
+    const target = pasteTarget?.() ?? null;
+    if (target === null) { setNote(t("Not pasted: the terminal is not ready.")); return; }
+    const version = terminalDraftVersion(owner);
+    const start = element.selectionStart;
+    const end = element.selectionEnd;
+    const composed = compositions.current;
+    const selected = selections.current;
+    // a caret moved in the focused line, by touch or by script, while the read waits
+    const moved = (): void => { if (document.activeElement === element) selections.current += 1; };
+    document.addEventListener("selectionchange", moved);
+    pasting.current = true;
+    onPasting?.(true);
+    setNote(null);
+    setPending(t("Reading the clipboard…"));
+    clipboard.readText().then((clip) => {
+      if (!mounted.current || box.current !== element) return;
+      const stale = composing.current || compositions.current !== composed || selections.current !== selected
+        || element.selectionStart !== start || element.selectionEnd !== end
+        || (pasteTarget?.() ?? null) !== target || terminalDraftVersion(owner) !== version;
+      if (stale) {
+        setNote(t("Not pasted: the line or the terminal changed meanwhile. Paste again."));
+        return;
+      }
+      const text = clip.replace(/\r\n?/g, "\n");
+      if (text.length === 0) { setNote(t("Nothing to paste: the clipboard is empty.")); return; }
+      const current = readTerminalDraft(owner);
+      const next = current.slice(0, start) + text + current.slice(end);
+      writeTerminalDraft(owner, next);
+      const written = readTerminalDraft(owner);
+      const cut = next.length - written.length;
+      setNote(cut > 0 ? t("Pasted up to the line's limit: {n} characters were left out.", { n: cut }) : null);
+      const caret = Math.min(start + text.length, written.length);
+      const pasted = terminalDraftVersion(owner);
+      requestAnimationFrame(() => {
+        // another pane picked, or the line written again, before the frame: its focus is not taken back
+        if (box.current !== element || (pasteTarget?.() ?? null) !== target || terminalDraftVersion(owner) !== pasted) return;
+        element.focus({ preventScroll: true });
+        element.setSelectionRange(caret, caret);
+      });
+    }, () => {
+      if (!mounted.current || box.current !== element) return;
+      setNote(t("The clipboard could not be read. Use the keyboard's own paste in the input line."));
+    }).finally(() => {
+      document.removeEventListener("selectionchange", moved);
+      pasting.current = false;
+      onPasting?.(false);
+      if (mounted.current) setPending(null);
+    });
+  }, [onPasting, owner, pasteTarget, t]);
+  useImperativeHandle(ref, () => ({ paste }), [paste]);
+  // a paste that outlives the line (a pane switch, the masked input taking its place) is dropped above; the bar's Paste comes back
+  const pastingCallback = useRef(onPasting);
+  pastingCallback.current = onPasting;
+  useEffect(() => () => { if (pasting.current) pastingCallback.current?.(false); }, []);
+
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>): void => {
     // a held key-bar modifier, or a hardware Ctrl+letter such as Ctrl+P (the agent's, not the
     // browser's print dialog), goes to the pane as a chord; the field keeps its editing keys, and
@@ -345,24 +464,31 @@ export function TerminalInput({ owner, active = true, connected, onSend, onEnter
     setWrappedRows(Math.max(1, Math.round(content / line)));
   }, [text]);
   const rows = Math.min(MAX_ROWS, Math.max(wrappedRows, text.split("\n").length));
+  const fieldId = useId();
   return (
     <div className={`terminal-input${dictation.shown ? " has-voice" : ""}${compact ? " is-compact" : ""}${compact && keyBar ? " has-keys" : ""}`}
       // a compact field is shorter than a finger: a press on the bar around it is a press on it
       onClick={compact ? (event) => { if (event.target === event.currentTarget) box.current?.focus(); } : undefined}>
+      {/* the field's name in view, not only its placeholder: the same words as the key bar's mode key
+          (a compact line keeps it for assistive technology only, TerminalInput.css) */}
+      <label className="terminal-input-label" htmlFor={fieldId}>{t("Input line")}</label>
       <textarea
         ref={box}
+        id={fieldId}
         className="terminal-input-text"
         rows={rows}
         value={text}
         maxLength={TERMINAL_LINE_LIMIT}
         onCompositionStart={(event) => {
           composing.current = true;
+          compositions.current += 1;
           onComposing?.(true);
           const element = event.currentTarget;
           compositionBase.current = element.selectionStart === element.selectionEnd ? { value: element.value, caret: element.selectionStart } : null;
         }}
         onCompositionEnd={(event) => {
           composing.current = false;
+          compositions.current += 1;
           onComposing?.(false);
           takeComposedLetter(event.data);
           const current = attempt.current;
@@ -375,6 +501,9 @@ export function TerminalInput({ owner, active = true, connected, onSend, onEnter
         placeholder={t("Type for the terminal…")}
         aria-label={t("Terminal input line")}
         enterKeyHint="send"
+        // the keyboard's word strip too: Chrome on Android hands the keyboard NO_SUGGESTIONS only
+        // for autocomplete="off", never for autocorrect or spellcheck
+        autoComplete="off"
         autoCapitalize="off"
         autoCorrect="off"
         spellCheck={false}
@@ -388,32 +517,50 @@ export function TerminalInput({ owner, active = true, connected, onSend, onEnter
         onFocus={onFocus}
       />
       {dictation.shown && <MicButton dictation={dictation} className="terminal-input-mic" />}
-      <button
-        type="button"
-        className="terminal-input-send"
-        aria-label={t(text.length === 0 ? "Press Enter in the terminal" : "Send to the terminal")}
-        title={t(text.length === 0 ? "Press Enter in the terminal" : "Send to the terminal")}
-        disabled={!connected || sending}
-        // the soft keyboard stays up for the next line
-        onPointerDown={(event) => event.preventDefault()}
-        onClick={() => send()}
-      >
-        {text.length === 0 ? <CornerDownLeft aria-hidden="true" /> : <SendHorizontal aria-hidden="true" />}
-      </button>
-      {compact && keyBar && (
+      <span className="terminal-input-actions">
+        {/* Insert, apart from Send by its words, its outline and its name: the text goes to the
+            prompt and stays there to edit. Each says what it does above its round target */}
         <button
           type="button"
-          className="terminal-input-keys"
-          aria-label={t("Terminal keys")}
-          title={t("Terminal keys")}
-          aria-pressed={keyBar.shown}
-          // the soft keyboard stays up, as for Send
+          className="terminal-input-action terminal-input-insert"
+          aria-label={t("Insert text without Enter")}
+          title={t("Insert text without Enter")}
+          disabled={!connected || sending || text.length === 0}
           onPointerDown={(event) => event.preventDefault()}
-          onClick={keyBar.onToggle}
+          onClick={insert}
         >
-          {keyBar.shown ? <ChevronDown aria-hidden="true" /> : <ChevronUp aria-hidden="true" />}
+          <span className="terminal-input-caption" aria-hidden="true">{t("Insert text")}</span>
+          <span className="terminal-input-face"><TextCursorInput aria-hidden="true" /></span>
         </button>
-      )}
+        <button
+          type="button"
+          className="terminal-input-action terminal-input-send"
+          aria-label={t(text.length === 0 ? "Press Enter in the terminal" : "Send to the terminal")}
+          title={t(text.length === 0 ? "Press Enter in the terminal" : "Send to the terminal")}
+          disabled={!connected || sending}
+          // the soft keyboard stays up for the next line
+          onPointerDown={(event) => event.preventDefault()}
+          onClick={() => send()}
+        >
+          <span className="terminal-input-caption" aria-hidden="true">{t(text.length === 0 ? "Enter" : "Send")}</span>
+          <span className="terminal-input-face">{text.length === 0 ? <CornerDownLeft aria-hidden="true" /> : <SendHorizontal aria-hidden="true" />}</span>
+        </button>
+        {compact && keyBar && (
+          <button
+            type="button"
+            className="terminal-input-keys"
+            aria-label={t("Terminal keys")}
+            title={t("Terminal keys")}
+            aria-pressed={keyBar.shown}
+            // the soft keyboard stays up, as for Send
+            onPointerDown={(event) => event.preventDefault()}
+            onClick={keyBar.onToggle}
+          >
+            {keyBar.shown ? <ChevronDown aria-hidden="true" /> : <ChevronUp aria-hidden="true" />}
+          </button>
+        )}
+      </span>
+      {pending !== null && note === null && <p className="terminal-input-note is-pending" role="status">{pending}</p>}
       {note !== null && <p className="terminal-input-note" role="alert">{note}</p>}
       {dictation.shown && <VoiceRecordingPill dictation={dictation} align="end" />}
     </div>

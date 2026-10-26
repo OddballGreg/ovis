@@ -14,7 +14,7 @@
  *
  * Whatever needs herdr runs on a herdr of its own. Its config, its plugin state and the web UI's
  * state live in a directory made for this run (XDG_CONFIG_HOME, XDG_STATE_HOME,
- * HERDR_WEB_STATE_DIR), under a session name made for this run. Nothing reads the user's herdr
+ * OVIS_STATE_DIR), under a session name made for this run. Nothing reads the user's herdr
  * config, so no plugin installed there starts with the test servers, and two runs on one PC
  * share no socket and no file. The run stops its herdr servers and removes the directory when
  * it ends, also when it is interrupted. CHECK_DIR names a directory to use and keep instead.
@@ -23,7 +23,9 @@
  *
  * A few herdr-backed runs at a time on this PC (CHECK_MAX_RUNS, see maxRuns): contract and browser
  * tests are bound by timing, so too many side by side fail each other. Each run holds a slot, a
- * loopback port it listens on (LOCK_PORT and the ports after it), so a run that died holds nothing.
+ * loopback port it listens on (CHECK_LOCK_PORT, default 41737, and the ports after it: the slots,
+ * the admission port, the queue's ticket desk and its ticket ports, MAX_RUNS_LIMIT + 2 + QUEUE_TICKETS
+ * in all), so a run that died holds nothing.
  * A run that finds every slot taken names the holders and exits, and so does a second run in the
  * same checkout, which would share its dist/ and generated types.
  *
@@ -31,9 +33,9 @@
  * while it checks it, and fast/lane modes build into dist/), herdr's worktree root, and Playwright's
  * browser cache. `run` does not rebuild dist/ unless asked with `--build`.
  */
-import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { chmodSync, createWriteStream, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, createWriteStream, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { connect, createServer } from "node:net";
 import { availableParallelism, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -115,13 +117,18 @@ export function sanitizeCommand(command: readonly string[]): string[] {
 const ACTIONLINT = { version: "1.7.12", sha256: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8" };
 
 /** A unix socket's path holds about 104 bytes on macOS and 108 on Linux. */
-const SOCKET_PATH_MAX = 100;
+export const SOCKET_PATH_MAX = 100;
 
-/** What a shell inside a herdr pane carries of that herdr: nothing in a run may reach it by these. */
-const LIVE_HERDR = ["HERDR_SOCKET", "HERDR_SOCKET_PATH", "HERDR_ENV", "HERDR_PANE_ID", "HERDR_TAB_ID", "HERDR_WORKSPACE_ID"];
+/**
+ * What a shell inside a herdr pane carries of that herdr, and what names the user's own herdr
+ * config: nothing in a run may reach either by these.
+ */
+const LIVE_HERDR = ["HERDR_SOCKET", "HERDR_SOCKET_PATH", "HERDR_ENV", "HERDR_PANE_ID", "HERDR_TAB_ID", "HERDR_WORKSPACE_ID", "HERDR_CONFIG_PATH"];
 
 export interface Isolation {
   env: Record<string, string>;
+  /** the absolute directory that holds the run's config and state */
+  dir: string;
   /** where the run's herdr keeps its sessions */
   sessions: string;
   /** removes the directory, unless the caller named it */
@@ -154,7 +161,8 @@ export function isolate(base: Record<string, string | undefined>, kept: string |
     throw new Error(`${socket} is too long for a unix socket (${socket.length} > ${SOCKET_PATH_MAX}); set CHECK_DIR to a shorter path`);
   }
   const env: Record<string, string> = {};
-  // not what names the herdr this was started from (a pane of the user's): its socket, its pane
+  // not what names the herdr this was started from (a pane of the user's): its socket, its pane,
+  // and the user's own herdr config
   for (const [name, value] of Object.entries(base)) if (value !== undefined && !LIVE_HERDR.includes(name)) env[name] = value;
   Object.assign(env, {
     ...testShellEnv(dir),
@@ -163,20 +171,96 @@ export function isolate(base: Record<string, string | undefined>, kept: string |
     LANGUAGE: "en_US:en",
     XDG_CONFIG_HOME: config,
     [DISPOSABLE_CONFIG_ENV]: config,
+    // the run's own session (where scripts/test-herdr.ts starts it), so a server started by hand
+    // inside `check run` never falls back to the herdr the user works in
+    HERDR_SOCKET: join(sessions, session, "herdr.sock"),
     XDG_STATE_HOME: join(dir, "state"),
-    HERDR_WEB_STATE_DIR: join(dir, "web-state"),
+    OVIS_STATE_DIR: join(dir, "web-state"),
     HERDR_TEST_SESSION: session,
     // One integration file at a time: four at once made the timing-bound contract tests fail in
     // turn on CI's four cores. HERDR_TEST_SHARDS raises it (scripts/ci-tests.ts).
     HERDR_TEST_SHARDS: base["HERDR_TEST_SHARDS"] || "1",
   });
-  return { env, sessions, remove: () => { if (!kept) rmSync(dir, { recursive: true, force: true }); } };
+  return { env, dir, sessions, remove: () => { if (!kept) rmSync(dir, { recursive: true, force: true }); } };
 }
 
-/** The first loopback port a herdr-backed run listens on while it runs: slot 1. Slot n is LOCK_PORT + n - 1. */
-export const LOCK_PORT = 41737;
+/**
+ * Stops every herdr server the run's sessions directory holds, trying each one even after another
+ * failed, and throws what failed. A crash or SIGKILL can leave a stale socket behind: after a
+ * failed stop, only a missing socket or a refused connection proves the session stopped.
+ */
+export async function stopSessions(
+  sessions: string,
+  stop: (session: string) => { error?: Error; status: number | null; signal: NodeJS.Signals | null; stderr?: string | null },
+  probe: (socket: string) => Promise<void> = (socket) => new Promise((resolve, reject) => {
+    const client = connect(socket);
+    client.once("connect", () => { client.destroy(); resolve(); });
+    client.once("error", reject);
+    client.setTimeout(2_000, () => client.destroy(new Error("session socket probe timed out")));
+  }),
+): Promise<void> {
+  const failed: string[] = [];
+  for (const session of existsSync(sessions) ? readdirSync(sessions).sort() : []) {
+    const socket = join(sessions, session, "herdr.sock");
+    if (!existsSync(socket)) continue;
+    const result = stop(session);
+    if (!result.error && !result.signal && result.status === 0) continue;
+    try { await probe(socket); }
+    catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ECONNREFUSED" || code === "ENOENT") continue;
+      failed.push(`${session} (stop failed and socket state is unproven: ${errorText(error)})`);
+      continue;
+    }
+    const said = result.stderr?.trim().replace(/\s+/g, " ").slice(0, 200);
+    if (result.error) failed.push(`${session} (${result.error.message})`);
+    else if (result.signal) failed.push(`${session} (herdr server stop was terminated by ${result.signal})`);
+    else if (result.status !== 0) failed.push(`${session} (herdr server stop exited with code ${result.status}${said ? `: ${said}` : ""})`);
+  }
+  if (failed.length > 0) throw new Error(`could not stop herdr session ${failed.join(", ")}`);
+}
+
+/** What a run's teardown found wrong, and the directory it kept for diagnosis because of it. */
+export interface Teardown { failures: string[]; retained: string | null }
+
+/**
+ * Stops what the run started, then removes its isolated state. Every stop is tried even after one
+ * fails. The directory is removed only when nothing failed, `earlier` (process groups that would
+ * not end) included; otherwise it is kept, and named, so what was left behind can be looked at.
+ */
+export async function teardown(stops: readonly (() => void | Promise<void>)[], isolation: Pick<Isolation, "dir" | "remove"> | null, earlier: readonly string[] = []): Promise<Teardown> {
+  const failures: string[] = [];
+  for (const stop of stops) {
+    try { await stop(); } catch (error) { failures.push(error instanceof Error ? error.message : String(error)); }
+  }
+  if (!isolation) return { failures, retained: null };
+  if (earlier.length > 0 || failures.length > 0) return { failures, retained: isolation.dir };
+  try { isolation.remove(); } catch (error) {
+    failures.push(`could not remove ${isolation.dir}: ${error instanceof Error ? error.message : String(error)}`);
+    return { failures, retained: isolation.dir };
+  }
+  return { failures, retained: null };
+}
+
+/** The first loopback port a herdr-backed run listens on while it runs: slot 1. */
+export const DEFAULT_LOCK_PORT = 41737;
+export function lockPort(env: Record<string, string | undefined>): number {
+  const asked = env["CHECK_LOCK_PORT"];
+  if (asked === undefined || asked === "") return DEFAULT_LOCK_PORT;
+  const port = /^\d+$/.test(asked) ? Number(asked) : Number.NaN;
+  if (!(port >= 1024 && port <= MAX_LOCK_PORT)) throw new Error(`CHECK_LOCK_PORT must be a whole number from 1024 to ${MAX_LOCK_PORT}, not "${asked}"`);
+  return port;
+}
 /** The most slots CHECK_MAX_RUNS may ask for; every run looks at all of them for its own checkout. */
 export const MAX_RUNS_LIMIT = 8;
+/** How many runs can hold a place in the queue for a slot at once (ticket ports above the admission port). */
+export const QUEUE_TICKETS = 24;
+/**
+ * The highest lock base: acquire() listens on the slots and on the admission port above them, up to
+ * base + MAX_RUNS_LIMIT, then the ticket desk and a waiting run on a ticket port above that, up to
+ * 1 + QUEUE_TICKETS more.
+ */
+export const MAX_LOCK_PORT = 65535 - MAX_RUNS_LIMIT - 1 - QUEUE_TICKETS;
 
 /**
  * How many herdr-backed runs may share this PC: CHECK_MAX_RUNS (1 to 8), else one per eight cores,
@@ -190,6 +274,26 @@ export function maxRuns(env: Record<string, string | undefined>, cores = availab
   const count = /^\d+$/.test(asked) ? Number(asked) : Number.NaN;
   if (!(count >= 1 && count <= MAX_RUNS_LIMIT)) throw new Error(`CHECK_MAX_RUNS must be a whole number from 1 to ${MAX_RUNS_LIMIT}, not "${asked}"`);
   return count;
+}
+
+/**
+ * What a CI host says it can take, each over the workflow's own value: a self-hosted runner's launcher
+ * puts these in its containers' environment (scripts/self-hosted-runner/run.sh --env-file), which the
+ * workflow's expressions cannot read. Every runner of a host shares its slots, so the host, not a job,
+ * knows how many fit. Unset or empty leaves the workflow's value; the named variable's own check
+ * still applies.
+ */
+export const HOST_LIMITS = {
+  CHECK_HOST_MAX_RUNS: "CHECK_MAX_RUNS",
+  CHECK_HOST_TEST_SHARDS: "HERDR_TEST_SHARDS",
+  CHECK_HOST_BROWSER_WORKERS: "BROWSER_WORKERS",
+  CHECK_HOST_UNIT_WORKERS: "UNIT_TEST_WORKERS",
+} as const;
+export function applyHostLimits(env: Record<string, string | undefined>): void {
+  for (const [host, name] of Object.entries(HOST_LIMITS)) {
+    const value = env[host];
+    if (value) env[name] = value;
+  }
 }
 
 /**
@@ -219,6 +323,15 @@ export function waitSeconds(env: Record<string, string | undefined>): number {
   return seconds;
 }
 
+/** The Node major CI's runners use (scripts/self-hosted-runner/Dockerfile's NODE_VERSION; a test keeps them equal). */
+export const CI_NODE_MAJOR = 22;
+export function warnNodeVersionMismatch(version: string | null, warn: (message: string) => void, ciMajor = CI_NODE_MAJOR): void {
+  const major = version?.match(/^v(\d+)\./)?.[1];
+  if (major !== undefined && Number(major) !== ciMajor) {
+    warn(`check: warning: local Node ${version} differs from CI Node ${ciMajor}`);
+  }
+}
+
 /** What a slot's holder says: its pid (NaN when what listens there is no run) and its checkout, when it names one. */
 export type Holder = { heldBy: number; checkout?: string };
 
@@ -246,7 +359,7 @@ function ask(port: number): Promise<Holder | null> {
  * holds it answers a connection with its pid and checkout. Resolves with the release, or with who
  * holds it (NaN when something else listens there).
  */
-export function lock(port = LOCK_PORT, pid = process.pid, checkout?: string): Promise<{ release: () => void } | Holder> {
+export function lock(port = DEFAULT_LOCK_PORT, pid = process.pid, checkout?: string): Promise<{ release: () => void } | Holder> {
   return new Promise((resolve, reject) => {
     const answer = checkout === undefined ? String(pid) : `${pid}\n${checkout}`;
     const server = createServer((socket) => { socket.on("error", () => undefined); socket.end(answer); });
@@ -262,19 +375,236 @@ export function lock(port = LOCK_PORT, pid = process.pid, checkout?: string): Pr
   });
 }
 
-export type SlotHolder = Holder & { port: number };
+/** A slot's holder, or a run waiting ahead in the queue (`queuedAt`, ms since 1970: when it first found the PC busy). */
+export type SlotHolder = Holder & { port: number; queuedAt?: number };
+type MarkerOwner = { pid: number; checkout: string };
+
+/** A waiting run's place in the queue: when it first found the PC busy, and the ticket port it holds. */
+export type Ticket = { at: number; port: number };
+
+/** The port a run holds while it takes a place, just above the admission port: one run at a time. */
+export function ticketDesk(base: number, slots: number, scan: number): number {
+  return base + Math.max(slots, scan) + 1;
+}
+
+/** The ticket ports, above the ticket desk: the same for every run of a base whatever its slot count. */
+export function ticketPorts(base: number, slots: number, scan: number): number[] {
+  const first = ticketDesk(base, slots, scan) + 1;
+  return Array.from({ length: QUEUE_TICKETS }, (_, index) => first + index);
+}
+
+/** How long one ticket lookup may take in all: a run holding the admission port asks every ticket port. */
+const TICKET_LOOKUP_MS = 1_500;
+/** How long a run waits for the ticket desk: a run there holds it for one ticket lookup and a bind. */
+export const DESK_WAIT_MS = 2 * TICKET_LOOKUP_MS;
+
+/**
+ * Who waits on a ticket port: null when nothing listens there, or when what listens is no ticket. A
+ * ticket answers with one short message and closes; a listener that says anything else is dropped at
+ * once, and none is waited on past TICKET_LOOKUP_MS, however it keeps talking.
+ */
+function askTicket(port: number): Promise<(SlotHolder & { queuedAt: number }) | null> {
+  return new Promise((resolve) => {
+    let said = "";
+    const client = connect(port, "127.0.0.1");
+    const deadline = setTimeout(() => client.destroy(), TICKET_LOOKUP_MS);
+    client.on("data", (chunk) => {
+      said += chunk.toString();
+      if (!"ticket\n".startsWith(said.slice(0, 7)) || said.length > 4_096) client.destroy();
+    });
+    client.on("error", () => undefined);
+    client.on("close", () => {
+      clearTimeout(deadline);
+      const match = /^ticket\n(\d+)\n(\d+)\n([^]+)$/.exec(said);
+      resolve(match ? { port, queuedAt: Number(match[1]), heldBy: Number(match[2]), checkout: match[3]! } : null);
+    });
+  });
+}
+
+/**
+ * Takes a place in the queue: the first free ticket port, listened on for as long as the run waits,
+ * so a run that dies leaves no place behind. Null when every ticket port is taken, or when the ticket
+ * desk stayed taken for `deskWaitMs`; the run then waits without one, behind every run that holds one,
+ * and tries again on its next round.
+ */
+export async function takeTicket(
+  { base, slots, scan = MAX_RUNS_LIMIT, at, pid = process.pid, checkout, deskWaitMs = DESK_WAIT_MS }: { base: number; slots: number; scan?: number; at: number; pid?: number; checkout: string; deskWaitMs?: number },
+): Promise<{ ticket: Ticket; release: () => void } | null> {
+  // One run at a time looks at the places taken and takes its own: two that looked at once could
+  // each miss the other, and the later one rank ahead on a clock stepped back between them.
+  // Bound directly: whoever holds it is never asked who it is, so nothing on that port can keep
+  // this run talking.
+  const bindDesk = (): Promise<{ release: () => void } | null> => new Promise((resolve, reject) => {
+    const server = createServer((socket) => { socket.destroy(); });
+    server.once("error", (error: NodeJS.ErrnoException) => { if (error.code === "EADDRINUSE") resolve(null); else reject(error); });
+    server.listen(ticketDesk(base, slots, scan), "127.0.0.1", () => { server.unref(); resolve({ release: () => { server.close(); } }); });
+  });
+  // A run at the desk holds it for one look at the tickets: wait for it, not for a whole round, in
+  // which a run that came later could take its place first and so rank ahead of this one. Runs that
+  // reach a free desk within one retry of each other (10 ms) may still swap places: their order is
+  // that of the desk, not of when they first found the PC busy.
+  // on the monotonic clock: a wall clock stepped back would stretch the wait by the step
+  const deadline = performance.now() + deskWaitMs;
+  let desk = await bindDesk();
+  while (desk === null && performance.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    desk = await bindDesk();
+  }
+  if (desk === null) return null;
+  try {
+    // after every place already taken, whatever the clock says: a clock stepped back must not put a
+    // run that came later ahead of one that waits
+    const waiting = await Promise.all(ticketPorts(base, slots, scan).map(askTicket));
+    for (const run of waiting) if (run !== null && run.queuedAt >= at) at = run.queuedAt + 1;
+    for (const port of ticketPorts(base, slots, scan)) {
+      const taken = await new Promise<{ release: () => void } | null>((resolve, reject) => {
+        const answer = `ticket\n${at}\n${pid}\n${checkout}`;
+        const server = createServer((socket) => { socket.on("error", () => undefined); socket.end(answer); });
+        server.once("error", (error: NodeJS.ErrnoException) => { if (error.code === "EADDRINUSE") resolve(null); else reject(error); });
+        server.listen(port, "127.0.0.1", () => { server.unref(); resolve({ release: () => { server.close(); } }); });
+      });
+      if (taken) return { ticket: { at, port }, release: taken.release };
+    }
+    return null;
+  } finally {
+    desk.release();
+  }
+}
+
+/** Whether queue place `a` comes before `b`: the earlier first refusal, then the lower ticket port. */
+const ahead = (a: Ticket, b: Ticket): boolean => a.at < b.at || (a.at === b.at && a.port < b.port);
+
+/** The runs waiting ahead of `ticket` (every waiting run, for a run without one), oldest first. */
+async function queuedAhead(base: number, slots: number, scan: number, ticket: Ticket | undefined): Promise<SlotHolder[]> {
+  const mine = ticket ?? { at: Number.POSITIVE_INFINITY, port: Number.POSITIVE_INFINITY };
+  const waiting = await Promise.all(ticketPorts(base, slots, scan).filter((port) => port !== ticket?.port).map(askTicket));
+  return waiting
+    .filter((run): run is SlotHolder & { queuedAt: number } => run !== null && ahead({ at: run.queuedAt, port: run.port }, mine))
+    .sort((a, b) => a.queuedAt - b.queuedAt || a.port - b.port);
+}
+
+/** Whether a pid names a live process. Any error but ESRCH (a pid this run may not signal) is thrown. */
+function pidAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+    return false;
+  }
+}
+
+/**
+ * Where a claim's marker is. A report is written by renaming over its name (check-report.ts), which
+ * replaces a symlink there whatever it points to: its lock is the name in its real directory, never
+ * the target. Null when the claim's directory does not exist yet (nothing can hold it).
+ */
+function claimTarget(path: string, report: boolean): { canonical: string; marker: string } | null {
+  const absolute = resolve(path);
+  if (!existsSync(dirname(absolute))) return null;
+  const isDir = !report && existsSync(absolute) && statSync(absolute).isDirectory();
+  const canonical = isDir ? realpathSync(absolute) : join(realpathSync(dirname(absolute)), basename(absolute));
+  return { canonical, marker: isDir ? join(canonical, ".check-lock") : `${canonical}.check-lock` };
+}
+
+/** The live run a marker names, without claiming it; null when it is gone, half written or dead. */
+function liveMarkerOwner(marker: string): MarkerOwner | null {
+  let owner: MarkerOwner;
+  try { owner = JSON.parse(readFileSync(marker, "utf8")) as MarkerOwner; } catch { return null; }
+  return owner !== null && typeof owner === "object" && Number.isSafeInteger(owner.pid) && owner.pid > 0 && pidAlive(owner.pid) ? owner : null;
+}
+
+/**
+ * Claims `marker` for this run, or names the live run that holds it. A marker a dead run left, or one
+ * an older check cut short, is taken over only by the run holding `<marker>.reclaim`, which reads the
+ * marker again under it: runs on other CHECK_LOCK_PORT bases are not serialized by this run's
+ * admission port. A marker that is gone is created again, never removed. Both files are written beside
+ * and linked into place, so a reader never sees one half written. A `.reclaim` a dead run left is not
+ * removed: no lock guards that removal, so two runs could each take the other's fresh claim. The run
+ * stops and names the file, to be deleted by hand once no check is running.
+ */
+function claimMarker(marker: string, pid: number, checkout: string, alive: (pid: number) => boolean): MarkerOwner | null {
+  const create = (path: string): boolean => {
+    const draft = `${path}.${pid}.draft`;
+    try {
+      writeFileSync(draft, JSON.stringify({ pid, checkout }), { mode: 0o600 });
+      linkSync(draft, path);
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+      throw error;
+    } finally { rmSync(draft, { force: true }); }
+  };
+  // who a file names: gone, a live run, or a dead run (a write cut short counts as dead). A file that
+  // cannot be read may be a live holder's, so that error is not swallowed
+  const state = (path: string): { gone: true } | { owner: MarkerOwner } | { dead: true } => {
+    let text: string;
+    try { text = readFileSync(path, "utf8"); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return { gone: true };
+      throw error;
+    }
+    let owner: MarkerOwner;
+    try { owner = JSON.parse(text) as MarkerOwner; } catch { return { dead: true }; }
+    if (owner === null || typeof owner !== "object" || !Number.isSafeInteger(owner.pid) || owner.pid <= 0) throw new Error(`invalid check lock owner: ${path}`);
+    return alive(owner.pid) ? { owner } : { dead: true };
+  };
+  const reclaim = `${marker}.reclaim`;
+  // other runs claiming and releasing at the same moment can make one attempt come back empty-handed
+  for (let attempt = 0; attempt < 5; attempt++) {
+    if (create(marker)) return null;
+    const found = state(marker);
+    if ("owner" in found) return found.owner;
+    if ("gone" in found) continue;
+    if (!create(reclaim)) {
+      const reclaimer = state(reclaim);
+      if ("owner" in reclaimer) return reclaimer.owner;
+      if ("dead" in reclaimer) throw new Error(`${reclaim} was left by a check that ended while taking over a lock; delete it if no \`bun run check\` is running`);
+      continue;
+    }
+    try {
+      const again = state(marker);
+      if ("owner" in again) return again.owner;
+      if ("gone" in again) continue;
+      // dead under the reclaim: no other run can replace it until it is removed
+      rmSync(marker, { force: true });
+      if (create(marker)) return null;
+      const winner = state(marker);
+      if ("owner" in winner) return winner.owner;
+    } finally {
+      rmSync(reclaim, { force: true });
+    }
+  }
+  throw new Error(`could not claim ${marker}`);
+}
 
 /**
  * Admission is serialized on the port after the slot range. While holding it, claim explicit
  * resources and take a candidate slot, then scan ALL slots again: an earlier holder may have
  * turned over while we asked it. Zero slots claims only resources (fast needs no herdr slot).
- * The admission port also serializes dead-pid marker reclamation, so two reclaimers cannot
- * unlink each other's newly acquired marker. A busy admission port refuses rather than waits.
+ * Taking over a dead run's marker is serialized by claimMarker's reclaim file, not by this port, since
+ * runs on other CHECK_LOCK_PORT bases do not share it. A busy admission port refuses rather than waits.
  */
 export async function acquire(
-  { slots, checkout, base = LOCK_PORT, pid = process.pid, scan = MAX_RUNS_LIMIT, resources = [], reports = [] }: { slots: number; checkout: string; base?: number; pid?: number; scan?: number; resources?: readonly string[]; reports?: readonly string[] },
+  { slots, checkout, base = DEFAULT_LOCK_PORT, pid = process.pid, scan = MAX_RUNS_LIMIT, resources = [], reports = [], checkoutLock, ticket, retry = false }: { slots: number; checkout: string; base?: number; pid?: number; scan?: number; resources?: readonly string[]; reports?: readonly string[]; checkoutLock?: string; ticket?: Ticket; retry?: boolean },
 ): Promise<{ release: () => void; port: number | null } | { refused: "busy" | "same-checkout" | "resource"; holders: SlotHolder[]; resource?: string }> {
   const admissionPort = base + Math.max(slots, scan);
+  const claims = [...resources.map((path) => ({ path, report: false, checkout: false })), ...reports.map((path) => ({ path, report: true, checkout: false }))];
+  if (slots > 0 && checkoutLock) claims.push({ path: checkoutLock, report: true, checkout: true });
+  // A waiting run (`retry`, with a ticket or without one when every ticket was held) with an older
+  // run ahead of it does not take the admission port at all: holding it only to find the queue would
+  // keep the head of the queue out of it, round after round. Its checkout and resources come first
+  // all the same, read without claiming them: a second run in its checkout, or a held resource, is
+  // told so at once, not after a turn in the queue. A run's first try claims them below.
+  if (slots > 0 && (retry || ticket !== undefined)) {
+    for (const { path, report, checkout: checkoutClaim } of claims) {
+      const target = claimTarget(path, report);
+      const owner = target && liveMarkerOwner(target.marker);
+      if (!target || !owner) continue;
+      if (checkoutClaim) return { refused: "same-checkout", holders: [{ port: admissionPort, heldBy: owner.pid, checkout: owner.checkout }] };
+      return { refused: "resource", resource: target.canonical, holders: [{ port: admissionPort, heldBy: owner.pid, checkout: owner.checkout }] };
+    }
+    const queued = await queuedAhead(base, slots, scan, ticket);
+    if (queued.length > 0) return { refused: "busy", holders: queued };
+  }
   const admission = await lock(admissionPort, pid, checkout);
   if (!("release" in admission)) return { refused: "busy", holders: [{ ...admission, port: admissionPort }] };
   let taken: { release: () => void; port: number } | null = null;
@@ -285,41 +615,26 @@ export async function acquire(
     for (const marker of markers.splice(0)) rmSync(marker);
   };
   try {
-    // A report is written by renaming over its name (check-report.ts), which replaces a symlink
-    // there whatever it points to: its lock is the name in its real directory, never the target.
-    const claims = [...resources.map((path) => ({ path, report: false })), ...reports.map((path) => ({ path, report: true }))];
-    for (const { path, report } of claims) {
-      const absolute = resolve(path);
-      mkdirSync(dirname(absolute), { recursive: true, mode: 0o700 });
-      const isDir = !report && existsSync(absolute) && statSync(absolute).isDirectory();
-      const canonical = isDir ? realpathSync(absolute) : join(realpathSync(dirname(absolute)), basename(absolute));
-      const marker = isDir ? join(canonical, ".check-lock") : `${canonical}.check-lock`;
+    for (const { path, report, checkout: checkoutClaim } of claims) {
+      mkdirSync(dirname(resolve(path)), { recursive: true, mode: 0o700 });
+      const { canonical, marker } = claimTarget(path, report)!;
       if (markers.includes(marker)) continue;
-      if (existsSync(marker)) {
-        // a marker that cannot be read may be a live holder's: only one that was read and is not
-        // JSON (a write cut short) is taken over
-        const text = readFileSync(marker, "utf8");
-        let owner: { pid: number; checkout: string };
-        try {
-          owner = JSON.parse(text) as { pid: number; checkout: string };
-        } catch {
-          rmSync(marker, { force: true });
-          writeFileSync(marker, JSON.stringify({ pid, checkout }), { flag: "wx", mode: 0o600 });
-          markers.push(marker);
-          continue;
-        }
-        if (owner === null || typeof owner !== "object" || !Number.isSafeInteger(owner.pid) || owner.pid <= 0) throw new Error(`invalid check lock owner: ${marker}`);
-        let dead = false;
-        try { process.kill(owner.pid, 0); }
-        catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
-          dead = true;
-        }
-        if (!dead) return { refused: "resource", resource: canonical, holders: [{ port: admissionPort, heldBy: owner.pid, checkout: owner.checkout }] };
-        rmSync(marker);
+      const owner = claimMarker(marker, pid, checkout, pidAlive);
+      if (owner) {
+        if (checkoutClaim) return { refused: "same-checkout", holders: [{ port: admissionPort, heldBy: owner.pid, checkout: owner.checkout }] };
+        return { refused: "resource", resource: canonical, holders: [{ port: admissionPort, heldBy: owner.pid, checkout: owner.checkout }] };
       }
-      writeFileSync(marker, JSON.stringify({ pid, checkout }), { flag: "wx", mode: 0o600 });
       markers.push(marker);
+    }
+    // First come, first served: a run waiting longer than this one gets the next free slot. A run
+    // with no ticket comes after every run that holds one, so a newer run cannot take the slot a
+    // waiting one is about to. Asked again under the admission port, like the slots below: a run
+    // may have started waiting since the look above. Runs asking for different slot counts (only
+    // while hosts change their CHECK_HOST_MAX_RUNS) still queue in one line: a head that does not
+    // fit yet holds back a later run that would.
+    if (slots > 0) {
+      const queued = await queuedAhead(base, slots, scan, ticket);
+      if (queued.length > 0) return { refused: "busy", holders: queued };
     }
     for (let index = 0; index < slots; index++) {
       const port = base + index;
@@ -351,30 +666,50 @@ export async function acquire(
 /**
  * acquire, asked again every `pollMs` while the only refusal is a busy PC, until `waitMs` has
  * passed. `onWait` hears the first busy refusal, so a waiting run says once whom it waits for.
+ * From that refusal on the run holds a ticket (takeTicket), its place in the queue: runs that
+ * arrive later wait behind it, so a long wait cannot be lost round after round to newer runs. The
+ * ticket goes when the run is admitted, refused for good or out of time. `now` and `sleep` are the
+ * clock and the wait between rounds, for tests to drive.
  */
 export async function acquireWaiting(
   options: Parameters<typeof acquire>[0],
-  { waitMs, pollMs = 2_000, onWait }: { waitMs: number; pollMs?: number; onWait?: (holders: SlotHolder[]) => void },
+  // fixed wait: the pause between rounds of a wait bounded by waitMs; other runs hold the slots, so there is no event to wait on
+  { waitMs, pollMs = 2_000, onWait, now = Date.now, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }: {
+    waitMs: number; pollMs?: number; onWait?: (holders: SlotHolder[]) => void; now?: () => number; sleep?: (ms: number) => Promise<unknown>;
+  },
 ): ReturnType<typeof acquire> {
-  const deadline = Date.now() + waitMs;
+  const deadline = now() + waitMs;
   let held = await acquire(options);
-  let told = false;
-  while ("refused" in held && held.refused === "busy" && Date.now() < deadline) {
-    if (!told) { onWait?.(held.holders); told = true; }
-    await new Promise((resolve) => setTimeout(resolve, Math.min(pollMs, Math.max(0, deadline - Date.now()))));
-    held = await acquire(options);
+  let queued: { ticket: Ticket; release: () => void } | null = null;
+  let queuedAt: number | null = null;
+  try {
+    while ("refused" in held && held.refused === "busy" && now() < deadline) {
+      if (queuedAt === null) { queuedAt = now(); onWait?.(held.holders); }
+      // a place taken late (every ticket was held) ranks after every run already waiting
+      // the desk is waited for within what is left of this run's own wait, never past it
+      queued ??= await takeTicket({ base: options.base ?? DEFAULT_LOCK_PORT, slots: options.slots, ...(options.scan === undefined ? {} : { scan: options.scan }), at: queuedAt, ...(options.pid === undefined ? {} : { pid: options.pid }), checkout: options.checkout, deskWaitMs: Math.min(DESK_WAIT_MS, Math.max(0, deadline - now())) });
+      if (now() >= deadline) break;
+      await sleep(Math.min(pollMs, Math.max(0, deadline - now())));
+      held = await acquire(queued ? { ...options, retry: true, ticket: queued.ticket } : { ...options, retry: true });
+    }
+    return held;
+  } finally {
+    queued?.release();
   }
-  return held;
 }
 
 /** One line per holder for a refusal. */
 export function describeHolders(holders: readonly SlotHolder[]): string {
   return holders.map((holder) => Number.isNaN(holder.heldBy)
     ? `port ${holder.port}: something that is no check run`
-    : `port ${holder.port}: pid ${holder.heldBy}${holder.checkout ? ` in ${holder.checkout}` : ""}`).join("; ");
+    : `port ${holder.port}: pid ${holder.heldBy}${holder.checkout ? ` in ${holder.checkout}` : ""}${holder.queuedAt === undefined ? "" : `, waiting since ${new Date(holder.queuedAt).toISOString()}`}`).join("; ");
 }
 
-async function main(): Promise<void> {
+export async function main(groupSeams: GroupSeams & {
+  probeSession?: (socket: string) => Promise<void>;
+  scheduleDrainTimeout?: (expire: () => void, ms: number) => () => void;
+} = {}): Promise<void> {
+  applyHostLimits(process.env);
   let todo: ReturnType<typeof plan>;
   const args = process.argv.slice(2);
   try { todo = plan(args); } catch (error) { console.error((error as Error).message); process.exit(2); }
@@ -389,13 +724,27 @@ async function main(): Promise<void> {
     resources.push(dir);
   }
   const reports = process.env["CHECK_REPORT"] || process.env["CHECK_DIR"] ? [paths.reportPath] : [];
-  const cleanups: (() => void)[] = [];
-  let cleaned = false;
-  const cleanup = (): void => {
-    if (cleaned) return;
-    cleaned = true;
-    for (const step of cleanups.reverse()) try { step(); } catch (error) { console.error(`check: cleanup failed: ${(error as Error).message}`); }
+  // Teardown: herdr sessions to stop, then the isolated state to remove. What fails here (a process
+  // group that would not end included) fails the run and keeps the state for diagnosis.
+  const stops: (() => void | Promise<void>)[] = [];
+  let isolated: Isolation | null = null;
+  const teardownFailures: string[] = [];
+  let retained: string | null = null;
+  const groupFailed = (outcome: GroupOutcome): void => {
+    const message = describeGroup(outcome);
+    teardownFailures.push(message);
+    console.error(`check: ${message}`);
   };
+  let cleaning: Promise<void> | null = null;
+  const cleanup = (): Promise<void> => cleaning ??= (async () => {
+    const result = await teardown(stops, isolated, teardownFailures);
+    for (const failure of result.failures) console.error(`check: teardown failed: ${failure}`);
+    teardownFailures.push(...result.failures);
+    if (result.retained) {
+      retained = result.retained;
+      console.error(`check: teardown failed; kept ${result.retained} for diagnosis`);
+    }
+  })();
   if (needsHerdr || resources.length > 0 || reports.length > 0) {
     try {
       let slots: number;
@@ -406,11 +755,17 @@ async function main(): Promise<void> {
       } catch (error) { console.error(`check: ${(error as Error).message}`); process.exit(2); }
       const waitStarted = Date.now();
       let waited = false;
-      const held = await acquireWaiting({ slots, checkout: checkoutIdentity(realpathSync(cwd)), resources, reports }, {
+      let base: number;
+      try { base = lockPort(process.env); } catch (error) { console.error(`check: ${(error as Error).message}`); process.exit(2); }
+      const checkout = checkoutIdentity(realpathSync(cwd));
+      const checkoutLock = needsHerdr ? join(realpathSync(cwd), "node_modules", ".cache", "check", "checkout.lock") : undefined;
+      if (checkoutLock) mkdirSync(dirname(checkoutLock), { recursive: true, mode: 0o700 });
+      const held = await acquireWaiting({ slots, checkout, base, resources, reports, ...(checkoutLock ? { checkoutLock } : {}) }, {
         waitMs: wait * 1000,
         onWait: (holders) => {
           waited = true;
-          console.error(`check: the ${slots}-run limit is reached (${describeHolders(holders)}); waiting up to ${wait}s for a slot`);
+          const queued = holders.some((holder) => holder.queuedAt !== undefined);
+          console.error(`check: ${queued ? `runs that came first are waiting for a slot (${describeHolders(holders)}); waiting in line` : `the ${slots}-run limit is reached (${describeHolders(holders)}); waiting`} up to ${wait}s for a slot`);
         },
       });
       if (waited && !("refused" in held)) console.error(`check: took a slot after ${Math.round((Date.now() - waitStarted) / 1000)}s`);
@@ -419,7 +774,11 @@ async function main(): Promise<void> {
           ? `another herdr-backed \`bun run check\` is running in this checkout, and the two would share dist/ and the generated types (${describeHolders(held.holders)}); wait for it to end or use another worktree`
           : held.refused === "resource"
             ? `check resource ${held.resource} is already held (${describeHolders(held.holders)}); use a different CHECK_DIR / CHECK_REPORT or wait for the holder`
-            : `herdr-backed check admission is busy or the ${slots}-run limit is reached (${describeHolders(held.holders)}); wait for one to end, or set CHECK_MAX_RUNS (1 to ${MAX_RUNS_LIMIT})`;
+            : held.holders.some((holder) => holder.queuedAt !== undefined)
+              ? wait > 0
+                ? `runs that came first were still waiting for a slot after ${wait}s (${describeHolders(held.holders)}); try again later, or wait longer with CHECK_WAIT_SECONDS`
+                : `runs that came first are waiting for a slot (${describeHolders(held.holders)}); wait your turn with CHECK_WAIT_SECONDS`
+              : `herdr-backed check admission is busy or the ${slots}-run limit is reached (${describeHolders(held.holders)}); wait for one to end, or set CHECK_MAX_RUNS (1 to ${MAX_RUNS_LIMIT})`;
         console.error(`check: ${message}`);
         process.exit(1);
       }
@@ -519,13 +878,14 @@ async function main(): Promise<void> {
   try { persistReport(paths.reportPath, report, logDirectory); }
   catch (error) {
     console.error(`check: could not create report ${paths.reportPath}: ${(error as Error).message}`);
-    cleanup();
+    await cleanup();
     process.exit(1);
   }
   console.log(`check: report ${paths.reportPath}`);
   const nodeVersion = spawnSync("node", ["--version"], { encoding: "utf8", timeout: 5_000 });
   const nodeVersionLine = nodeVersion.stdout?.trim().split(/\r?\n/, 1)[0] ?? "";
   report.toolchain.nodeVersion = nodeVersion.status === 0 && /^v\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$/.test(nodeVersionLine) ? nodeVersionLine : null;
+  warnNodeVersionMismatch(report.toolchain.nodeVersion, (warning) => console.warn(warning));
   try { sourceStart = sourceIdentity(cwd, sourceExcludes); }
   catch (error) {
     const reason = String((error as Error).message || error).replace(/[\r\n\t]+/g, " ").trim().slice(0, 512) || "source identity could not be captured";
@@ -543,16 +903,49 @@ async function main(): Promise<void> {
   report.browserArtifact.provenance = report.browserArtifact.identity ? "pre-existing-unknown" : "unavailable";
   saveReport();
 
-  let child: ChildProcess | null = null;
+  // Every step's process group, from its start until it is proved empty. A step's processes can
+  // outlive it (a command that exits while something it started runs on, with or without the
+  // output pipes): what is left is ended when the step ends, and again before the teardown.
+  const owned = new Set<number>();
+  const endingGroups = new Map<number, Promise<GroupOutcome>>();
+  const endTracked = (group: number, signal: NodeJS.Signals): Promise<GroupOutcome> => {
+    const pending = endingGroups.get(group);
+    if (pending) return pending;
+    const result = endGroup(group, signal, groupSeams).then((outcome) => {
+      owned.delete(group);
+      endingGroups.delete(group);
+      if (outcome.result !== "gone") groupFailed(outcome);
+      return outcome;
+    });
+    endingGroups.set(group, result);
+    return result;
+  };
+  /** Ends what is left in an owned group; true when processes were left in it. */
+  const endOwned = async (group: number): Promise<boolean> => {
+    if (!owned.has(group)) return false;
+    let left = false;
+    // Windows has no process groups to signal
+    if (process.platform !== "win32") {
+      try { (groupSeams.kill ?? process.kill)(-group, 0); left = true; }
+      catch (error) { left = (error as NodeJS.ErrnoException).code !== "ESRCH"; }
+      if (left) {
+        const outcome = await endTracked(group, "SIGTERM");
+        if (outcome.result === "gone") console.error(`check: ended processes left running in step process group ${group}`);
+      }
+    }
+    owned.delete(group);
+    return left;
+  };
   let activeStep: CheckStep | null = null;
   let activeStartedAtMs = 0;
   let activeStepFinished: Promise<void> | null = null;
   let ending = false;
   let interruptedBy: NodeJS.Signals | null = null;
-  // `check concurrent` runs the unit tests beside the lanes step, outside `run`'s single `child`.
-  let concurrentUnit: ChildProcess | null = null;
+  // `check concurrent` runs the unit tests beside the lanes step.
   let concurrentUnitFinished: Promise<number> | null = null;
   const finalize = (status: CheckReport["status"], exitCode: number): void => {
+    for (const failure of teardownFailures) if (!report.errors.includes(`teardown: ${failure}`)) report.errors.push(`teardown: ${failure}`);
+    if (retained && !report.evidence.retained.includes(retained)) report.evidence.retained.push(retained);
     const endedAtMs = Date.now();
     let sourceEnd = unavailableSource();
     try { sourceEnd = sourceIdentity(cwd, sourceExcludes); }
@@ -618,18 +1011,45 @@ async function main(): Promise<void> {
       }
       saveReport();
       void (async () => {
-        // The step runs in a process group of its own, and a lane starts processes of its own
-        // in it: the whole group gets the signal, and has ended before the herdr and the
-        // directory it uses are taken away.
-        await Promise.all([
-          child?.pid !== undefined ? endGroup(child.pid, signal) : undefined,
-          concurrentUnit?.pid !== undefined ? endGroup(concurrentUnit.pid, signal) : undefined,
-        ]);
-        if (activeStepFinished) await activeStepFinished;
-        if (concurrentUnitFinished) await concurrentUnitFinished;
-        cleanup();
-        finalize("interrupted", signal === "SIGINT" ? 130 : 143);
-        process.exit(signal === "SIGINT" ? 130 : 143);
+        try {
+          // The step runs in a process group of its own, and a lane starts processes of its own
+          // in it: the whole group gets the signal, and has ended before the herdr and the
+          // directory it uses are taken away.
+          const outcomes = await Promise.all([...owned].map((group) => endTracked(group, signal)));
+          const stuck = outcomes.filter((outcome) => outcome.result !== "gone");
+          // A step whose group ended settles at once. One that could not be stopped may never
+          // settle: its failure is recorded, and the run ends without it, keeping its state.
+          if (stuck.length === 0) {
+            // Even a gone group can leave output held outside it. Never wait indefinitely for
+            // step/log completion after interruption; keep evidence if draining cannot finish.
+            let cancelTimeout: (() => void) | undefined;
+            try {
+              await Promise.race([
+                Promise.all([activeStepFinished, concurrentUnitFinished]),
+                new Promise<never>((_, reject) => {
+                  const expire = () => reject(new Error("interrupted step output did not finish draining"));
+                  if (groupSeams.scheduleDrainTimeout) {
+                    cancelTimeout = groupSeams.scheduleDrainTimeout(expire, OUTPUT_DRAIN_GRACE_MS + END_GRACE_MS + KILL_GRACE_MS);
+                  } else {
+                    const timer = setTimeout(expire, OUTPUT_DRAIN_GRACE_MS + END_GRACE_MS + KILL_GRACE_MS);
+                    cancelTimeout = () => clearTimeout(timer);
+                  }
+                }),
+              ]);
+            } finally {
+              cancelTimeout?.();
+            }
+          }
+        } catch (error) {
+          const failure = `could not end the interrupted steps: ${(error as Error).message}`;
+          teardownFailures.push(failure);
+          console.error(`check: ${failure}`);
+        } finally {
+          // interrupted keeps its own code; a teardown failure is in the report beside it
+          await cleanup();
+          finalize("interrupted", signal === "SIGINT" ? 130 : 143);
+          process.exit(signal === "SIGINT" ? 130 : 143);
+        }
       })();
     });
   }
@@ -681,6 +1101,7 @@ async function main(): Promise<void> {
       activeStepFinished = stepFinished;
       let drainTimer: NodeJS.Timeout | null = null;
       let outputIncomplete = false;
+      let leftRunning = false;
       const stdout = createWriteStream(step.stdout, { flags: "w", mode: 0o600 });
       const stderr = createWriteStream(step.stderr, { flags: "w", mode: 0o600 });
       let logsFailed = false;
@@ -690,7 +1111,6 @@ async function main(): Promise<void> {
         if (settled) return;
         settled = true;
         if (drainTimer) clearTimeout(drainTimer);
-        child = null;
         if (launchError) {
           console.error(`check: ${command[0]}: ${launchError.message}`);
           stderr.write(`${launchError.message}\n`);
@@ -708,6 +1128,7 @@ async function main(): Promise<void> {
           else if (signal) step.reason = `process terminated by ${signal}`;
           else if (logsFailed) step.reason = "could not persist command output logs";
           else if (outputIncomplete) step.reason = "output may be incomplete: a process left running still held the output";
+          else if (leftRunning) step.reason = "ended processes the command left running";
           report.currentStep = null;
           if (step.status === "failure" && signal) report.errors.push(`${label} terminated by ${signal}`);
           else if (step.status === "failure" && !logsFailed) report.errors.push(`${label} exited with code ${step.exitCode}`);
@@ -721,7 +1142,7 @@ async function main(): Promise<void> {
       };
       try {
         const started = spawn(command[0]!, command.slice(1), { stdio: ["inherit", "pipe", "pipe"], env, cwd: commandCwd, detached: true });
-        child = started;
+        if (started.pid !== undefined) owned.add(started.pid);
         const stdoutStream = started.stdout;
         const stderrStream = started.stderr;
         let stdoutClosed = !stdoutStream;
@@ -730,24 +1151,34 @@ async function main(): Promise<void> {
         let terminatingGroup = false;
         let exitCode: number | null = null;
         let exitSignal: NodeJS.Signals | null = null;
+        // The command has exited: end what it left in its group, closed output or not, then settle.
+        const endLeftovers = (): void => {
+          if (terminatingGroup) return;
+          terminatingGroup = true;
+          void (async () => {
+            try {
+              if (started.pid !== undefined && await endOwned(started.pid)) leftRunning = true;
+            } catch (error) {
+              teardownFailures.push(`could not end ${label}'s process group: ${(error as Error).message}`);
+            } finally {
+              finish(exitCode, exitSignal);
+            }
+          })();
+        };
         const maybeFinishAfterExit = (): void => {
           if (!exited || settled || terminatingGroup) return;
           if (stdoutClosed && stderrClosed) {
-            finish(exitCode, exitSignal);
+            endLeftovers();
             return;
           }
           if (drainTimer) return;
           drainTimer = setTimeout(() => {
             drainTimer = null;
-            if (settled) return;
+            if (settled || terminatingGroup) return;
             outputIncomplete = true;
-            terminatingGroup = true;
             stdoutStream?.destroy();
             stderrStream?.destroy();
-            void (async () => {
-              if (started.pid !== undefined) await endGroup(started.pid, "SIGTERM");
-              finish(exitCode, exitSignal);
-            })();
+            endLeftovers();
           }, OUTPUT_DRAIN_GRACE_MS);
         };
         stdoutStream?.on("data", (chunk: Buffer) => { process.stdout.write(chunk); stdout.write(chunk); });
@@ -811,8 +1242,8 @@ async function main(): Promise<void> {
       if (todo.fast && code === 0 && !ending) code = await run("unit tests", [bun, "run", "test:unit"], plain);
     }
     if (todo.concurrent && code === 0 && !ending) {
-      const herdr = process.env["HERDR_WEB_HERDR_BIN"] || "herdr";
-      if (!Bun.which(herdr)) throw new Error("concurrent mode needs herdr on PATH (or HERDR_WEB_HERDR_BIN)");
+      const herdr = process.env["OVIS_HERDR_BIN"] || "herdr";
+      if (!Bun.which(herdr)) throw new Error("concurrent mode needs herdr on PATH (or OVIS_HERDR_BIN)");
       const herdrVersion = spawnSync(herdr, ["--version"], { encoding: "utf8", env: process.env, timeout: 5_000 });
       const herdrVersionLine = herdrVersion.stdout?.trim().split(/\r?\n/, 1)[0] ?? "";
       report.toolchain.herdrVersion = herdrVersion.status === 0 && /^herdr\s+v?\d+(?:\.\d+){1,3}(?:[-+][A-Za-z0-9.-]+)?$/i.test(herdrVersionLine)
@@ -820,18 +1251,14 @@ async function main(): Promise<void> {
         : null;
       saveReport();
       const isolation = isolate(process.env);
-      cleanups.push(isolation.remove);
+      isolated = isolation;
       const env: Record<string, string | undefined> = { ...isolation.env, ...identity };
       const shards = env["HERDR_TEST_SHARDS"]!;
       const shardCount = /^\d+$/.test(shards) ? Number(shards) : Number.NaN;
       report.toolchain.herdrTestShards = Number.isSafeInteger(shardCount) ? shardCount : null;
       saveReport();
-      cleanups.push(() => {
-        for (const session of existsSync(isolation.sessions) ? readdirSync(isolation.sessions) : []) {
-          spawnSync(herdr, ["--session", session, "server", "stop"], { env, stdio: "ignore", timeout: 10_000 });
-        }
-      });
-      console.log(`\ncheck: herdr session ${env["HERDR_TEST_SESSION"]}, config and state in ${resolve(isolation.sessions, "../../..")}`);
+      stops.push(() => stopSessions(isolation.sessions, (session) => spawnSync(herdr, ["--session", session, "server", "stop"], { env, stdio: ["ignore", "ignore", "pipe"], encoding: "utf8", timeout: 10_000 }), groupSeams.probeSession));
+      console.log(`\ncheck: herdr session ${env["HERDR_TEST_SESSION"]}, config and state in ${isolation.dir}`);
       console.log("check: running unit tests, integration and browser in parallel");
 
       // The unit tests run beside `run`'s lanes step: their process group is tracked in
@@ -849,7 +1276,7 @@ async function main(): Promise<void> {
       unitStdout.on("error", (error) => { unitLogsFailed = true; console.error(`check: unit stdout log failed: ${error.message}`); });
       unitStderr.on("error", (error) => { unitLogsFailed = true; console.error(`check: unit stderr log failed: ${error.message}`); });
       const unit = spawn(bun, ["run", "test:unit"], { stdio: ["inherit", "pipe", "pipe"], env: plain, cwd, detached: true });
-      concurrentUnit = unit;
+      if (unit.pid !== undefined) owned.add(unit.pid);
       unit.stdout?.on("data", (chunk: Buffer) => { process.stdout.write(chunk); unitStdout.write(chunk); });
       unit.stderr?.on("data", (chunk: Buffer) => { process.stderr.write(chunk); unitStderr.write(chunk); });
       concurrentUnitFinished = (async () => {
@@ -857,7 +1284,12 @@ async function main(): Promise<void> {
           unit.once("error", (error) => { unitStderr.write(`${error.message}\n`); done([127, null]); });
           unit.once("close", (closeCode, closeSignal) => done([closeCode, closeSignal]));
         });
-        concurrentUnit = null;
+        // the unit tests' output has closed, but something they started may still run in their group
+        try {
+          if (unit.pid !== undefined && await endOwned(unit.pid)) unitStep.reason = "ended processes the unit tests left running";
+        } catch (error) {
+          teardownFailures.push(`could not end the unit tests' process group: ${(error as Error).message}`);
+        }
         unitStdout.end();
         unitStderr.end();
         await Promise.all([finished(unitStdout).catch(() => undefined), finished(unitStderr).catch(() => undefined)]);
@@ -882,8 +1314,8 @@ async function main(): Promise<void> {
       code = unitCode !== 0 ? unitCode : lanesCode;
     }
     if (code === 0 && needsHerdr && !ending && !todo.concurrent) {
-      const herdr = process.env["HERDR_WEB_HERDR_BIN"] || "herdr";
-      if (!Bun.which(herdr)) throw new Error("this needs herdr on PATH (or HERDR_WEB_HERDR_BIN)");
+      const herdr = process.env["OVIS_HERDR_BIN"] || "herdr";
+      if (!Bun.which(herdr)) throw new Error("this needs herdr on PATH (or OVIS_HERDR_BIN)");
       const herdrVersion = spawnSync(herdr, ["--version"], { encoding: "utf8", env: process.env, timeout: 5_000 });
       const herdrVersionLine = herdrVersion.stdout?.trim().split(/\r?\n/, 1)[0] ?? "";
       report.toolchain.herdrVersion = herdrVersion.status === 0 && /^herdr\s+v?\d+(?:\.\d+){1,3}(?:[-+][A-Za-z0-9.-]+)?$/i.test(herdrVersionLine)
@@ -891,19 +1323,15 @@ async function main(): Promise<void> {
         : null;
       saveReport();
       const isolation = isolate(process.env);
-      cleanups.push(isolation.remove);
+      isolated = isolation;
       const env: Record<string, string | undefined> = { ...isolation.env, ...identity };
       const shards = env["HERDR_TEST_SHARDS"]!;
       const shardCount = /^\d+$/.test(shards) ? Number(shards) : Number.NaN;
       report.toolchain.herdrTestShards = Number.isSafeInteger(shardCount) ? shardCount : null;
       saveReport();
       // every session in the run's own config directory is the run's: the browser scripts leave theirs running
-      cleanups.push(() => {
-        for (const session of existsSync(isolation.sessions) ? readdirSync(isolation.sessions) : []) {
-          spawnSync(herdr, ["--session", session, "server", "stop"], { env, stdio: "ignore", timeout: 10_000 });
-        }
-      });
-      console.log(`\ncheck: herdr session ${env["HERDR_TEST_SESSION"]}, config and state in ${resolve(isolation.sessions, "../../..")}`);
+      stops.push(() => stopSessions(isolation.sessions, (session) => spawnSync(herdr, ["--session", session, "server", "stop"], { env, stdio: ["ignore", "ignore", "pipe"], encoding: "utf8", timeout: 10_000 }), groupSeams.probeSession));
+      console.log(`\ncheck: herdr session ${env["HERDR_TEST_SESSION"]}, config and state in ${isolation.dir}`);
       if (todo.command) {
         if (todo.build) code = await build(env);
         if (code === 0 && !ending) code = await run("run", todo.command, env);
@@ -920,9 +1348,19 @@ async function main(): Promise<void> {
     report.errors.push(message);
     code = 1;
   } finally {
-    cleanup();
+    // an interrupt tears down by itself; otherwise a group no step ended (one whose step threw)
+    // is ended before its herdr and directory go
+    if (!ending) {
+      for (const group of [...owned]) {
+        try { await endOwned(group); }
+        catch (error) { teardownFailures.push(`could not end step process group ${group}: ${(error as Error).message}`); }
+      }
+      await cleanup();
+    }
   }
   if (ending) return;
+  // the commands passed, but what they started was not cleaned up: no green result
+  if (code === 0 && teardownFailures.length > 0) code = 1;
   finalize(code === 0 ? "success" : "failure", code);
   const artifactVerificationRequired = report.browserArtifact.buildAttempted && report.browserArtifact.buildThisRun;
   const finalCode = reportExitCode(code, reportPersistFailed, report.source.unchanged, report.browserArtifact.unchangedAfterBuild, artifactVerificationRequired);
@@ -962,22 +1400,82 @@ const END_GRACE_MS = 5_000;
 /** How long to drain inherited output pipes after the direct child exits. */
 const OUTPUT_DRAIN_GRACE_MS = 2_000;
 
+/** How long a step's processes get to end after SIGKILL before the group counts as surviving. */
+const KILL_GRACE_MS = 2_000;
+/** How often an ending group is asked whether a process is left in it. */
+const GROUP_POLL_MS = 50;
+
+/**
+ * What ending a step's process group found. `gone` is proved only by "no such process" (ESRCH);
+ * `surviving` is a group with a process left after SIGKILL and its grace, or one that could not be
+ * asked (EPERM: a process that may not be signalled is still there); `error` is a signal that could
+ * not be sent.
+ */
+export interface GroupOutcome {
+  pgid: number;
+  result: "gone" | "surviving" | "error";
+  /** every signal tried, in order: the step's own, then SIGKILL if the group outlasted its grace */
+  signals: NodeJS.Signals[];
+  cause: string | null;
+}
+
+/** The seams the tests drive endGroup through; production uses process.kill, the clock and a timer. */
+export interface GroupSeams {
+  kill?: (pid: number, signal: NodeJS.Signals | 0) => void;
+  now?: () => number;
+  wait?: (ms: number) => Promise<void>;
+}
+
+const errorText = (error: unknown): string => {
+  const code = (error as NodeJS.ErrnoException).code;
+  const message = error instanceof Error ? error.message : String(error);
+  return code && !message.includes(code) ? `${code}: ${message}` : message;
+};
+
 /** Signals a process group and waits until no process is left in it, killing what outlasts the grace. */
-async function endGroup(group: number, signal: NodeJS.Signals): Promise<void> {
-  // only "no such process" says the group is empty: a process that may not be signalled is still there
-  const none = (error: unknown): boolean => (error as NodeJS.ErrnoException).code === "ESRCH";
-  const left = (): boolean => { try { process.kill(-group, 0); return true; } catch (error) { return !none(error); } };
-  const gone = async (ms: number): Promise<boolean> => {
-    for (const deadline = Date.now() + ms; left();) {
-      if (Date.now() > deadline) return false;
-      await new Promise((resolve) => setTimeout(resolve, 50));
+export async function endGroup(
+  group: number,
+  signal: NodeJS.Signals,
+  { kill = (pid, sent) => { process.kill(pid, sent); }, now = Date.now, wait }: GroupSeams = {},
+): Promise<GroupOutcome> {
+  const signals: NodeJS.Signals[] = [];
+  let cause: string | null = null;
+  const outcome = (result: GroupOutcome["result"]): GroupOutcome => ({ pgid: group, result, signals, cause: result === "gone" ? null : cause });
+  const noSuchProcess = (error: unknown): boolean => (error as NodeJS.ErrnoException).code === "ESRCH";
+  const send = (sent: NodeJS.Signals): "sent" | "gone" | "failed" => {
+    signals.push(sent);
+    try { kill(-group, sent); return "sent"; }
+    catch (error) {
+      if (noSuchProcess(error)) return "gone";
+      cause = `${sent} could not be sent: ${errorText(error)}`;
+      return "failed";
     }
-    return true;
   };
-  try { process.kill(-group, signal); } catch (error) { if (none(error)) return; }
-  if (await gone(END_GRACE_MS)) return;
-  try { process.kill(-group, "SIGKILL"); } catch (error) { if (none(error)) return; }
-  if (!(await gone(2_000))) console.error(`check: processes in step process group ${group} are still running`);
+  const emptied = async (ms: number): Promise<boolean> => {
+    for (const deadline = now() + ms; ;) {
+      try { kill(-group, 0); }
+      catch (error) {
+        if (noSuchProcess(error)) return true;
+        cause = `the group could not be probed: ${errorText(error)}`;
+      }
+      if (now() > deadline) return false;
+      if (wait) await wait(GROUP_POLL_MS);
+      else await new Promise((resolve) => setTimeout(resolve, GROUP_POLL_MS));
+    }
+  };
+  const first = send(signal);
+  if (first !== "sent") return outcome(first === "gone" ? "gone" : "error");
+  if (await emptied(END_GRACE_MS)) return outcome("gone");
+  const killed = send("SIGKILL");
+  if (killed !== "sent") return outcome(killed === "gone" ? "gone" : "error");
+  if (await emptied(KILL_GRACE_MS)) return outcome("gone");
+  cause = `still running after SIGKILL${cause ? ` (${cause})` : ""}`;
+  return outcome("surviving");
+}
+
+/** One line for a group that did not end. */
+export function describeGroup(outcome: GroupOutcome): string {
+  return `step process group ${outcome.pgid} did not end: ${outcome.cause ?? outcome.result} (sent ${outcome.signals.join(", ")})`;
 }
 
 /**

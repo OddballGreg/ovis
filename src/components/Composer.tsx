@@ -132,7 +132,7 @@ const ATTACH_LIMIT = 100;
  * and the message mentions its path. These image types also get a thumbnail.
  */
 const PREVIEW_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml"] as const;
-const SLASH_USAGE_KEY = "herdr-web-ui:slash-usage";
+const SLASH_USAGE_KEY = "ovis:slash-usage";
 /** How long a Send tapped mid-composition waits for the keyboard to commit the word (as in TerminalInput). */
 const COMMIT_WAIT_MS = 300;
 export const SOURCE_LABEL: Record<SlashCommand["source"], string> = {
@@ -296,7 +296,7 @@ export function Composer({
   const attachmentsRef = useRef<Attachment[]>([]);
   const removedAttachments = useRef(new Set<number>());
   const fileRequest = useRef(0);
-  const draftKey = `herdr-web-ui:composer-draft:${paneStorageId(machineId, paneId)}`;
+  const draftKey = `ovis:composer-draft:${paneStorageId(machineId, paneId)}`;
   const { text, sending } = useSyncExternalStore(composerDrafts.subscribe, () => composerDrafts.read(draftKey));
   const setText = useCallback((value: string | ((previous: string) => string)) => composerDrafts.set(draftKey, value), [draftKey]);
   const mounted = useRef(true);
@@ -1050,7 +1050,7 @@ export function Composer({
   useLayoutEffect(fitStatus, [fitStatus, agent, modelId, model?.text, reasoning,
     metadata?.context?.window, contextShown && !mobile && metadata?.context ? contextLeftPercent(metadata.context) : null,
     contextShown, mobile, usageCaption, usage?.problem, hintText, dictation.shown, backgroundTasks,
-    plan?.done, plan?.total, statusCompact, compactNow !== undefined, facesLoaded, t]);
+    plan?.done, plan?.total, plan?.current, statusCompact, compactNow !== undefined, facesLoaded, t]);
   const menuId = `composer-menu-${paneId}`;
   // the suggestions' own close, for a pointer or a phone, which has no Escape: it does what Escape does, and the
   // text and the focus stay in the box (a press never takes the focus; a key on it hands it back)

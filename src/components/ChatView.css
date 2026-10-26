@@ -590,6 +590,17 @@
   font-size: var(--fs-2xs);
 }
 
+/* The block's chrome is not code: its language label, "Show all" toggle, copy error and "Too
+   long to highlight" note stay out of a selection dragged across the block, so a copy gives the
+   code alone, as the block's own Copy does. Selection.toString() skips unselectable text. */
+.markdown-code-header,
+.markdown-code-more,
+.markdown-code-error,
+.markdown-code .hl-note {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
 /* With a mouse a code block has no header strip: its language and copy control sit over the
    top right corner and show on hover or focus. Touch keeps the strip, where nothing can
    cover the code. */
@@ -1287,6 +1298,56 @@
   font-weight: var(--fw-semibold);
 }
 
+/* how one todo update went, in words: outlined, so it never reads by colour alone */
+.work-row-state {
+  flex: none;
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-sm);
+  box-shadow: inset 0 0 0 var(--hairline) var(--border);
+  color: var(--text-dim);
+  font-family: var(--font-ui);
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-semibold);
+  white-space: nowrap;
+}
+
+.work-row-head .work-row-failed {
+  font-family: var(--font-ui);
+  white-space: nowrap;
+}
+
+/* a run of todo updates reads as words, in the interface face of the verb before it, not as a command */
+.work-todo-group > .work-row-head .work-row-summary {
+  font-family: var(--font-ui);
+  font-size: var(--fs-sm);
+}
+
+/* a run of todo updates, opened: the list it stands for, then every update in order */
+.work-todo-caption {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+  overflow-wrap: anywhere;
+}
+
+.work-todo-detail .todo-list {
+  padding: 0;
+}
+
+.work-todo-attempts {
+  display: flex;
+  flex-direction: column;
+}
+
+.work-todo-attempts h4 {
+  margin: 0 0 var(--space-1);
+  color: var(--text-dim);
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-semibold);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-caps);
+}
+
 /* a file a tool call names opens in the viewer: a link in look, a button underneath */
 .chat-tool-file-link {
   padding: 0;
@@ -1304,6 +1365,17 @@
 .chat-tool-file-link:hover {
   color: var(--accent);
   text-decoration-style: solid;
+}
+
+/* a finger's floor: the link itself grows to it, so the files of a patch, one per line, never share
+   a hit area */
+@media (pointer: coarse) {
+  .chat-tool-file-link {
+    display: inline-flex;
+    align-items: center;
+    min-width: var(--touch-target);
+    min-height: var(--touch-target);
+  }
 }
 
 /* the way back to the end while reading up: the pill's round, wordless form */

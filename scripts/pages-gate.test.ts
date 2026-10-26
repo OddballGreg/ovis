@@ -140,7 +140,7 @@ describe("Pages deployment gate", () => {
     expect(deploy).toContain("set -euo pipefail");
     expect(deploy).toContain('gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq \'.sha\'');
     expect(deploy).toContain('if [[ "$latest_sha" != "$EXPECTED_SHA" ]]');
-    expect(deploy.indexOf("Verify deployment SHA is current")).toBeLessThan(deploy.indexOf("actions/deploy-pages@v5"));
+    expect(deploy.indexOf("Verify deployment SHA is current")).toBeLessThan(deploy.indexOf("actions/deploy-pages@"));
   });
 
   it("summarizes the validated, built, and deployed source SHAs", () => {
@@ -295,7 +295,7 @@ describe("Extracted UI checks", () => {
           encoding: "utf8", timeout: 5_000,
           env: {
             ...process.env, TMPDIR: root, XDG_CONFIG_HOME: root,
-            HERDR_WEB_HERDR_BIN: herdr, HERDR_GUARD_LOG: invoked,
+            OVIS_HERDR_BIN: herdr, HERDR_GUARD_LOG: invoked,
             HERDR_SOCKET: join(root, "no-parent.sock"),
             HERDR_TEST_MODE: mode === "unit" ? "unit" : "integration",
             HERDR_TEST_LIVE: mode === "live" ? "1" : "",

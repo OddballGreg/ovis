@@ -1,6 +1,6 @@
 import { createContext, useContext, useMemo } from "react";
 import * as api from "./api.ts";
-import type { CreateWorktreeRequest, OpenWorktreeRequest, PaneDirection, PluginActionRequest, RemoveWorktreeRequest, SessionHistoryAgent, SplitPaneDirection } from "../../shared/protocol.ts";
+import type { CreateWorktreeRequest, OpenWorktreeRequest, PaneDirection, PluginActionRequest, RemoveWorktreeRequest, SessionHistoryAgent, SessionResumeRequest, SplitPaneDirection } from "../../shared/protocol.ts";
 import type { ZoomMode } from "./layoutMap.ts";
 import { ReorderCoordinator } from "./workspaceOrder.ts";
 export const MachineContext = createContext("local");
@@ -26,6 +26,7 @@ export function useMachineApi() {
     fetchPaneScroll: (pane: string) => api.fetchPaneScroll(pane, id),
     scrollPane: (pane: string, offset: number) => api.scrollPane(pane, offset, id),
     fetchPaneOmoActivity: (pane: string) => api.fetchPaneOmoActivity(pane, id),
+    fetchPaneBackgroundAgent: (pane: string, agent: string) => api.fetchPaneBackgroundAgent(pane, agent, id),
     fetchPanePlan: (pane: string) => api.fetchPanePlan(pane, id),
     fetchPaneOpencodeModels: (pane: string) => api.fetchPaneOpencodeModels(pane, id),
     fetchAgentModels: (agent: string) => api.fetchAgentModels(agent, id),
@@ -56,9 +57,11 @@ export function useMachineApi() {
     fileUrl: (path: string, pane: string | null, download = false) => api.fileUrl(path, pane, id, download),
     fetchRepoDiffFiles: (query: api.RepoDiffQuery) => api.fetchRepoDiffFiles(query, id),
     fetchRepoDiffFile: (query: api.RepoDiffQuery, path: string, oldPath: string | null) => api.fetchRepoDiffFile(query, path, oldPath, id),
+    fetchRepoDiffRefs: (query: Pick<api.RepoDiffQuery, "paneId" | "directory">) => api.fetchRepoDiffRefs(query, id),
     createWorkspace: (request: api.CreateWorkspaceRequest) => api.createWorkspace(request, id),
     createTab: (request: api.CreateTabRequest) => api.createTab(request, id),
-    fetchSessionHistory: (workspace: string, agent: SessionHistoryAgent) => api.fetchSessionHistory(workspace, agent, id),
+    fetchSessionHistory: (workspace: string, agent: SessionHistoryAgent, pane: string | null = null) => api.fetchSessionHistory(workspace, agent, id, pane),
+    resumeSession: (request: SessionResumeRequest) => api.resumeSession(request, id),
     sessionHistoryOffered: () => api.sessionHistoryOffered(id),
     renameTab: (tab: string, label: string) => api.renameTab(tab, label, id),
     closeTab: (tab: string) => api.closeTab(tab, id),

@@ -1,4 +1,238 @@
 {
+  "0.4.16": {
+    "en": {
+      "fixed": [
+        "A new 0.4.14 or 0.4.15 install keeps its sign-in gate and paired devices after an update.",
+        "An in-app update from such an install stays on the new version after it restarts."
+      ]
+    },
+    "ko": {
+      "fixed": [
+        "0.4.14나 0.4.15로 새로 설치한 PC가 업데이트 후에도 로그인 보호와 연결된 기기를 유지합니다.",
+        "이런 설치에서 앱 안 업데이트가 재시작 후에도 새 버전에 머뭅니다."
+      ]
+    },
+    "ja": {
+      "fixed": [
+        "0.4.14 か 0.4.15 で新しく入れた PC が、更新後もサインインの保護と接続済みの端末を保ちます。",
+        "そうした環境でのアプリ内更新が、再起動後も新しいバージョンのままになります。"
+      ]
+    },
+    "zh": {
+      "fixed": [
+        "用 0.4.14 或 0.4.15 全新安装的电脑，更新后仍保留登录保护和已配对的设备。",
+        "这类安装的应用内更新，重启后会停留在新版本上。"
+      ]
+    }
+  },
+  "0.4.15": {
+    "en": {
+      "new": [
+        "Ovis for Mac opens Ovis in its own window, no browser needed; phone setup is in a menu.",
+        "Files → Changes now compares a branch against a base you pick, untracked files included.",
+        "Mute alerts for a single agent from its row in the Agents list, on every browser at once.",
+        "A filter field above the sidebar narrows the PC, workspace and agent rows as you type.",
+        "On a phone, the terminal's key bar gets a Paste key that fills the input line.",
+        "ovis.sh has a Beta page that walks testers into the iPhone TestFlight or the Android test."
+      ],
+      "improved": [
+        "A chat tool card names files from the pane's folder, the way the file browser does.",
+        "Todo updates an agent makes one after another fold into one row in the chat's work block.",
+        "The chat claims a plan update succeeded only when the agent's transcript records it."
+      ],
+      "fixed": [
+        "Pasted and attached files no longer show up in your project's Git status.",
+        "Sending from Chat while you read older turns takes you back to the end for the reply.",
+        "Dictation into the terminal in Safari types the corrected phrase once, not every draft.",
+        "The Android app's message box and key bar no longer sit under the navigation buttons.",
+        "An app updated from 0.4.13 or older now gets the Rust PTY host its terminals need.",
+        "Chat's command menu comes back on its own after the pane's command list failed to load."
+      ]
+    },
+    "ko": {
+      "new": [
+        "Mac용 Ovis가 브라우저 없이 자체 앱 창으로 열리고, 휴대폰 설정은 메뉴로 옮겼습니다.",
+        "Files → Changes에서 원하는 기준과 브랜치를 비교하며, 추적되지 않은 파일도 함께 봅니다.",
+        "에이전트 목록의 행 메뉴에서 그 에이전트의 알림만 모든 브라우저에서 끌 수 있습니다.",
+        "사이드바 위 필터 칸에 입력하면 PC와 워크스페이스, 에이전트 행이 그에 맞게 좁혀집니다.",
+        "휴대폰 터미널 키 바에 붙여넣기 키가 생겨 클립보드 내용을 입력 줄에 넣어 줍니다.",
+        "ovis.sh에 베타 페이지가 생겨 iPhone TestFlight나 Android 비공개 테스트 참여를 안내합니다."
+      ],
+      "improved": [
+        "채팅의 도구 카드가 파일 브라우저처럼 패널 폴더를 기준으로 파일 이름을 적습니다.",
+        "에이전트가 잇따라 보낸 할 일 업데이트가 채팅 작업 블록에서 한 줄로 묶입니다.",
+        "채팅은 기록에 남은 경우에만 계획 업데이트가 성공했다고 알립니다."
+      ],
+      "fixed": [
+        "붙여넣거나 첨부한 파일이 더는 프로젝트의 Git 상태에 나타나지 않습니다.",
+        "이전 대화를 보던 중 채팅에서 보내면 맨 끝으로 돌아가 답을 따라갑니다.",
+        "Safari 터미널 받아쓰기가 초안을 늘어놓지 않고 교정된 문장을 한 번만 입력합니다.",
+        "Android 앱의 메시지 상자와 키 바가 더는 내비게이션 버튼 아래에 깔리지 않습니다.",
+        "0.4.13 이하에서 업데이트한 앱도 터미널에 필요한 Rust PTY 호스트를 받습니다.",
+        "패널의 명령 목록을 불러오지 못해도 채팅의 명령 메뉴가 저절로 다시 나옵니다."
+      ]
+    },
+    "ja": {
+      "new": [
+        "Mac 版 Ovis がブラウザなしで専用のアプリウィンドウで開き、スマホ設定はメニューに移りました。",
+        "Files → Changes で選んだベースとブランチを比較でき、未追跡のファイルも含まれます。",
+        "エージェント一覧の行メニューから、そのエージェントの通知だけを全ブラウザでミュートできます。",
+        "サイドバー上部のフィルタ欄に入力すると、PC・ワークスペース・エージェントの行が絞り込まれます。",
+        "スマホのターミナルのキーバーに貼り付けキーが加わり、入力行にクリップボードを入れられます。",
+        "ovis.sh にベータページができ、iPhone の TestFlight や Android の限定テストへの参加を案内します。"
+      ],
+      "improved": [
+        "チャットのツールカードが、ファイルブラウザと同じくペインのフォルダを基準に表示します。",
+        "エージェントが続けて出した Todo の更新が、チャットの作業ブロックで 1 行にまとまります。",
+        "チャットは記録に残っているときだけ、プランの更新が成功したと伝えます。"
+      ],
+      "fixed": [
+        "貼り付けたファイルや添付したファイルが、プロジェクトの Git の状態に出なくなりました。",
+        "過去のやり取りを見ている間にチャットから送ると、末尾に戻って返信を追いかけます。",
+        "Safari のターミナルでの音声入力が、下書きを並べず修正後の文を一度だけ入力します。",
+        "Android アプリのメッセージ欄とキーバーが、ナビゲーションボタンの下に隠れなくなりました。",
+        "0.4.13 以前から更新したアプリにも、ターミナルに必要な Rust PTY ホストが届きます。",
+        "ペインのコマンド一覧の読み込みに失敗しても、チャットのコマンドメニューが自動で戻ります。"
+      ]
+    },
+    "zh": {
+      "new": [
+        "Mac 版 Ovis 无需浏览器，直接在自己的应用窗口中打开，手机设置移到了菜单里。",
+        "Files → Changes 现在可以把分支与你选定的基准比较，并包含未跟踪的文件。",
+        "可在代理列表的行菜单中单独静音某个代理的提醒，所有浏览器一起生效。",
+        "侧栏上方新增筛选框，输入后电脑、工作区和代理的行会随之缩小范围。",
+        "在手机上，终端按键栏新增粘贴键，可把剪贴板内容放进输入行。",
+        "ovis.sh 新增 Beta 页面，指引测试者加入 iPhone TestFlight 或 Android 封闭测试。"
+      ],
+      "improved": [
+        "聊天的工具卡片像文件浏览器一样，以窗格所在文件夹为基准写出文件名。",
+        "代理接连发出的待办更新，会在聊天的工作块中合并成一行。",
+        "只有记录中确实留下结果时，聊天才会说计划更新成功。"
+      ],
+      "fixed": [
+        "粘贴和附加的文件不再出现在项目的 Git 状态中。",
+        "在翻看早前对话时从聊天发送消息，会回到末尾并跟随回复。",
+        "在 Safari 的终端里听写，只输入修正后的句子，而不是每一版草稿。",
+        "Android 应用的消息框和按键栏不再压在导航按钮下方。",
+        "从 0.4.13 或更早版本更新的应用，也会获得终端所需的 Rust PTY 主机。",
+        "即使窗格的命令列表加载失败，聊天的命令菜单也会自动恢复。"
+      ]
+    }
+  },
+  "0.4.14": {
+    "en": {
+      "new": [
+        "Terminals now run on a built-in Rust PTY host, so Linux and macOS no longer need Node.",
+        "Ovis for Windows: a one-click Ovis.exe setup app, plus an MSIX for the Microsoft Store.",
+        "Ovis for Mac comes as a signed Ovis.dmg from ovis.sh, so it opens without a warning.",
+        "Find text in the diff viewer with Ctrl/Cmd+F, including folded and hidden lines.",
+        "Letta Code shows up in the agent picker when it's installed on your PC.",
+        "The command palette finds settings by name and opens Settings right on them."
+      ],
+      "improved": [
+        "The chat's plan chip shows the step the agent is on, so you don't have to open the plan.",
+        "The plugin and settings now use the Ovis name, and your sign-in and settings carry over.",
+        "The connect screen warns before sending a pairing code over plain http on the internet.",
+        "Turn off herdr's copy_on_select and dragging in the terminal only selects until you copy.",
+        "Following herdr's focus no longer takes your view while you're typing or have a draft.",
+        "Each plugin start begins a fresh server.log instead of growing one file forever."
+      ],
+      "fixed": [
+        "Ovis for Mac no longer hangs on \"Starting herdr\", and Restart really starts the server.",
+        "Updating from 0.4.13 inside the app starts the new release instead of falling back.",
+        "The phone app keeps a PC that redirects (say, http to https) in the app, not the browser.",
+        "The iOS app shows which PC it's opening instead of a black screen, with Try again.",
+        "Long messages typed from the terminal's input line now reach Claude Code whole.",
+        "Chat no longer types into a screen an agent has open in the terminal, like /config.",
+        "On a phone, key bar taps no longer pop the keyboard back up after you hide it.",
+        "Starting Ovis on Windows with Bun from npm no longer opens Notepad and hangs."
+      ]
+    },
+    "ko": {
+      "new": [
+        "터미널이 내장 Rust PTY 호스트로 돌아가, Linux와 macOS에서 더는 Node가 필요 없습니다.",
+        "Windows용 Ovis: 클릭 한 번으로 설치하는 Ovis.exe와 Microsoft Store용 MSIX가 나왔습니다.",
+        "Mac용 Ovis를 ovis.sh에서 서명된 Ovis.dmg로 받아 경고 없이 열 수 있습니다.",
+        "diff 뷰어에서 Ctrl/Cmd+F로 접히거나 가려진 줄까지 텍스트를 찾습니다.",
+        "PC에 Letta Code가 설치돼 있으면 에이전트 선택에 나옵니다.",
+        "명령 팔레트가 설정을 이름으로 찾아 설정 화면의 그 항목을 바로 엽니다."
+      ],
+      "improved": [
+        "채팅의 계획 칩이 에이전트가 하고 있는 단계를 보여 줘, 계획을 열지 않아도 됩니다.",
+        "플러그인과 설정이 Ovis 이름을 쓰며, 로그인과 설정은 그대로 이어집니다.",
+        "인터넷에서 평문 http로 페어링 코드를 보내기 전에 연결 화면이 경고합니다.",
+        "herdr의 copy_on_select를 끄면 터미널에서 드래그는 복사할 때까지 선택만 합니다.",
+        "herdr 포커스 따라가기가 입력 중이거나 초안이 있을 때 화면을 가져가지 않습니다.",
+        "플러그인이 시작할 때마다 server.log를 새로 시작해 파일이 끝없이 커지지 않습니다."
+      ],
+      "fixed": [
+        "Mac용 Ovis가 \"Starting herdr\"에서 멈추지 않고, 다시 시작이 서버를 실제로 켭니다.",
+        "0.4.13에서 앱 안 업데이트를 하면 이전 버전으로 돌아가지 않고 새 릴리스가 시작됩니다.",
+        "리다이렉트하는 PC(http에서 https 등)를 휴대폰 앱이 브라우저가 아닌 앱에서 엽니다.",
+        "iOS 앱이 검은 화면 대신 여는 중인 PC를 보여 주고, 다시 시도를 제공합니다.",
+        "터미널 입력 줄에서 보낸 긴 메시지가 Claude Code에 온전히 전달됩니다.",
+        "에이전트가 /config 같은 화면을 터미널에 열어 두면 채팅이 거기에 입력하지 않습니다.",
+        "휴대폰에서 키보드를 내린 뒤 키 바를 눌러도 키보드가 다시 올라오지 않습니다.",
+        "npm으로 설치한 Bun으로 Windows에서 Ovis를 시작해도 메모장이 열리며 멈추지 않습니다."
+      ]
+    },
+    "ja": {
+      "new": [
+        "ターミナルが内蔵の Rust PTY ホストで動き、Linux と macOS で Node が不要になりました。",
+        "Windows 版 Ovis：ワンクリックで設定できる Ovis.exe と、Microsoft Store 用の MSIX が登場。",
+        "Mac 版 Ovis は署名済みの Ovis.dmg として ovis.sh から入手でき、警告なしで開けます。",
+        "差分ビューアで Ctrl/Cmd+F を押すと、折りたたまれた行も含めて検索できます。",
+        "PC に Letta Code が入っていれば、エージェント選択に表示されます。",
+        "コマンドパレットで設定を名前で探し、設定画面のその項目をすぐ開けます。"
+      ],
+      "improved": [
+        "チャットのプランチップに今のステップが出るので、プランを開かずに済みます。",
+        "プラグインと設定が Ovis の名前になり、ログインと設定はそのまま引き継がれます。",
+        "インターネット越しに平文の http でペアリングコードを送る前に、接続画面が警告します。",
+        "herdr の copy_on_select をオフにすると、ドラッグはコピーするまで選択だけになります。",
+        "herdr のフォーカス追従が、入力中や下書きがあるときに表示を奪わなくなりました。",
+        "プラグインは起動ごとに新しい server.log を始め、ファイルが際限なく大きくなりません。"
+      ],
+      "fixed": [
+        "Mac 版 Ovis が「Starting herdr」で止まらず、再起動で実際にサーバーが起動します。",
+        "0.4.13 からアプリ内で更新すると、古い版に戻らず新しいリリースが起動します。",
+        "リダイレクトする PC（http から https など）を、スマホアプリがブラウザでなくアプリで開きます。",
+        "iOS アプリが黒い画面ではなく開いている PC を表示し、再試行もできます。",
+        "ターミナルの入力行から送った長いメッセージが Claude Code に欠けずに届きます。",
+        "エージェントが /config などの画面を開いている間、チャットはそこに入力しません。",
+        "スマホでキーボードを閉じたあと、キーバーを押してもキーボードが再び出なくなりました。",
+        "npm で入れた Bun で Windows の Ovis を起動しても、メモ帳が開いて止まらなくなりました。"
+      ]
+    },
+    "zh": {
+      "new": [
+        "终端现在运行在内置的 Rust PTY 主机上，Linux 和 macOS 不再需要 Node。",
+        "Windows 版 Ovis：一键安装的 Ovis.exe，以及用于 Microsoft Store 的 MSIX。",
+        "Mac 版 Ovis 可从 ovis.sh 下载已签名的 Ovis.dmg，打开时不再有警告。",
+        "在差异查看器中按 Ctrl/Cmd+F 查找文本，包括折叠和隐藏的行。",
+        "电脑上装有 Letta Code 时，它会出现在代理选择中。",
+        "命令面板可按名称查找设置，并直接打开设置中的对应项。"
+      ],
+      "improved": [
+        "聊天的计划标签会显示代理当前的步骤，无需打开计划。",
+        "插件和设置改用 Ovis 名称，登录状态和设置都会保留。",
+        "在互联网上用明文 http 发送配对码之前，连接界面会发出警告。",
+        "关闭 herdr 的 copy_on_select 后，在终端拖动只会选中，直到你复制。",
+        "跟随 herdr 焦点时，正在输入或有草稿的界面不会被切走。",
+        "插件每次启动都会新建 server.log，日志文件不再无限增长。"
+      ],
+      "fixed": [
+        "Mac 版 Ovis 不再卡在“Starting herdr”，重启也会真正启动服务器。",
+        "从 0.4.13 在应用内更新后，会启动新版本，而不是退回旧版本。",
+        "会重定向的电脑（如 http 转 https）在手机应用内打开，而不是跳到浏览器。",
+        "iOS 应用不再黑屏，而是显示正在打开的电脑，并可重试。",
+        "从终端输入行发送的长消息现在能完整送达 Claude Code。",
+        "代理在终端中打开 /config 等界面时，聊天不会再往里面输入。",
+        "在手机上收起键盘后，点击按键栏不再让键盘重新弹出。",
+        "在 Windows 上使用通过 npm 安装的 Bun 启动 Ovis，不再打开记事本并卡住。"
+      ]
+    }
+  },
   "0.4.13": {
     "en": {
       "new": [

@@ -1,7 +1,9 @@
 import { expect, it, spyOn } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DEVICE_COOKIE } from "./auth.ts";
 import { DeviceStore } from "./devices.ts";
 import { privateStateFs } from "./private-state.ts";
 import { MachineRelay } from "./machine-relay.ts";
@@ -40,6 +42,71 @@ async function until(check: () => boolean): Promise<void> {
   }
 }
 
+it("keeps the gate closed, and a device paired in the install's other state dir signed in, on a fresh state dir", async () => {
+  const root = mkdtempSync(join(tmpdir(), "herdr-device-access-"));
+  // an update from a fresh 0.4.14 install starts on the old dir, while the phone was paired in the new one
+  const [active, sibling] = [join(root, "herdr-web-ui"), join(root, "ovis")];
+  for (const dir of [active, sibling]) mkdirSync(dir);
+  const token = "7".repeat(64);
+  const created = "2026-10-25T05:20:00.000Z";
+  writeFileSync(join(sibling, "devices.json"), JSON.stringify({ gate_closed_at: created, devices: [{ id: "0123456789abcdef", label: "Phone", role: "drive", token_hash: createHash("sha256").update(token).digest("hex"), created_at: created, last_seen_at: null }] }));
+  writeFileSync(join(sibling, "preferences.json"), JSON.stringify({ revision: 1, settings: { language: "en", sidebarRows: "two" } }));
+  const server = createServer({ port: 0, stateDir: active, siblingStateDir: sibling, tailscaleOwner: null });
+  const base = `http://127.0.0.1:${server.port}`;
+  // a request through a proxy on this PC stands for one from another device
+  const remote = { "x-forwarded-for": "100.64.0.9" };
+  try {
+    expect((await fetch(`${base}/api/preferences`, { headers: remote })).status).toBe(401);
+    const anonymous = await (await fetch(`${base}/api/health`, { headers: remote })).json() as { auth: unknown };
+    expect(anonymous.auth).toMatchObject({ required: true, authenticated: false });
+    const cookie = `${DEVICE_COOKIE}=${token}`;
+    const paired = await (await fetch(`${base}/api/health`, { headers: { ...remote, cookie } })).json() as { auth: unknown };
+    expect(paired.auth).toMatchObject({ authenticated: true, via: "device" });
+    const preferences = await fetch(`${base}/api/preferences`, { headers: { ...remote, cookie } });
+    expect(await preferences.json()).toMatchObject({ settings: { language: "en", sidebarRows: "two" } });
+  } finally {
+    server.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+it("serves the state dir it merged into, even when the merge gave the old dir files of its own", async () => {
+  const root = mkdtempSync(join(tmpdir(), "herdr-device-access-"));
+  // the old name holds only the bridge registry; the phone is paired in the new dir
+  const [legacy, next] = [join(root, "herdr-web-ui"), join(root, "ovis")];
+  mkdirSync(join(legacy, "bridges"), { recursive: true });
+  writeFileSync(join(legacy, "bridges", "local.json"), "{}");
+  mkdirSync(next);
+  const token = "8".repeat(64);
+  const created = "2026-10-25T05:20:00.000Z";
+  writeFileSync(join(next, "devices.json"), JSON.stringify({ gate_closed_at: created, devices: [{ id: "0123456789abcdef", label: "Phone", role: "drive", token_hash: createHash("sha256").update(token).digest("hex"), created_at: created, last_seen_at: null }] }));
+  const env = { XDG_CONFIG_HOME: process.env["XDG_CONFIG_HOME"], OVIS_STATE_DIR: process.env["OVIS_STATE_DIR"] };
+  process.env["XDG_CONFIG_HOME"] = root;
+  delete process.env["OVIS_STATE_DIR"];
+  // the copy of the registry for the old dir fails; its merge record does not, and gives it files of its own
+  const rename = privateStateFs.renameSync;
+  const failing = spyOn(privateStateFs, "renameSync").mockImplementation((from, to) => {
+    if (to === join(legacy, "devices.json")) throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+    rename(from, to);
+  });
+  let server: ReturnType<typeof createServer> | undefined;
+  try {
+    server = createServer({ port: 0, siblingStateDir: legacy, tailscaleOwner: null, machines: false });
+    const base = `http://127.0.0.1:${server.port}`;
+    const remote = { "x-forwarded-for": "100.64.0.9" };
+    expect((await fetch(`${base}/api/preferences`, { headers: remote })).status).toBe(401);
+    expect((await fetch(`${base}/api/preferences`, { headers: { ...remote, cookie: `${DEVICE_COOKIE}=${token}` } })).status).toBe(200);
+  } finally {
+    failing.mockRestore();
+    server?.stop();
+    for (const [name, value] of Object.entries(env)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 it("revocation closes an active device's terminal and roster stream without disconnecting another device", async () => {
   const root = mkdtempSync(join(tmpdir(), "herdr-device-access-"));
   const server = createServer({ port: 0, stateDir: root, token: "test-device-access", tailscaleOwner: null });
@@ -60,7 +127,7 @@ it("revocation closes an active device's terminal and roster stream without disc
     const cookieA = await pair("A");
     const cookieB = await pair("B");
     const { devices } = await (await fetch(`${base}/api/devices`, { headers: admin })).json() as { devices: { id: string; label: string }[] };
-    const created = await workspaceCreate({ cwd: root, label: "herdr-web-ui-test-device-revocation" });
+    const created = await workspaceCreate({ cwd: root, label: "ovis-test-device-revocation" });
     workspaceId = created.workspace.workspace_id;
     const paneId = created.root_pane.pane_id;
     const a = await connect(`${base.replace("http:", "ws:")}/ws`, cookieA); sockets.push(a.socket);
@@ -169,7 +236,7 @@ it("watch credentials cannot mutate HTTP state, read credential files, or elevat
   store.match(watch.token);
   const server = createServer({ port: 0, stateDir: root, token: "test-watch", tailscaleOwner: null, machines: false });
   const base = `http://127.0.0.1:${server.port}`;
-  const cookie = `herdr_web_device=${watch.token}`;
+  const cookie = `ovis_device=${watch.token}`;
   const headers = { ...guard, cookie };
   const sockets: WebSocket[] = [];
   const relays: MachineRelay[] = [];
@@ -188,6 +255,8 @@ it("watch credentials cannot mutate HTTP state, read credential files, or elevat
     // the shared settings: a watching device reads them, and cannot change them for every browser
     expect((await fetch(`${base}/api/preferences`, { headers })).status).toBe(200);
     expect((await fetch(`${base}/api/preferences`, { method: "PUT", headers, body: JSON.stringify({ settings: { theme: "light" }, pins: [] }) })).status).toBe(403);
+    // herdr's copy_on_select: a watching device selects text too, so it reads it (#1559)
+    expect((await fetch(`${base}/api/herdr-ui`, { headers })).status).toBe(200);
     // what was read in the other browsers: a watching device sees it, and its own views stay its own
     expect((await fetch(`${base}/api/seen`, { headers })).status).toBe(200);
     const told = await fetch(`${base}/api/seen`, { method: "POST", headers, body: JSON.stringify({ pc: "local", epoch: "e", pane: "p", id: 1 }) });
@@ -201,7 +270,7 @@ it("watch credentials cannot mutate HTTP state, read credential files, or elevat
       if (method === "GET") expect(await response.json()).toMatchObject({ error: { code: "read_only" } });
     }
     // a repository's changes are file contents: refused like a file read, on this PC and through a PC's route
-    for (const path of ["workspace/diff/files", "workspace/diff/file", "machines/pc1/workspace/diff/files", "machines/pc1/workspace/diff/file", "machines/local/workspace/diff/file"]) {
+    for (const path of ["workspace/diff/files", "workspace/diff/file", "workspace/diff/refs", "machines/pc1/workspace/diff/files", "machines/pc1/workspace/diff/file", "machines/pc1/workspace/diff/refs", "machines/local/workspace/diff/file"]) {
       const response = await fetch(`${base}/api/${path}?directory=${encodeURIComponent(root)}&path=devices.json`, { headers });
       expect([path, response.status]).toEqual([path, 403]);
       expect(await response.json()).toMatchObject({ error: { code: "read_only" } });
@@ -253,7 +322,7 @@ it("a route spelled with a trailing, doubled or encoded slash is no route, for a
       "api/machines/pc1/workspace/directories/", "api/machines/pc1/pane/commands/",
     ];
     for (const [label, token] of [["watch", watch.token], ["drive", drive.token]] as const) {
-      const headers = { cookie: `herdr_web_device=${token}` };
+      const headers = { cookie: `ovis_device=${token}` };
       for (const path of spellings) {
         const response = await fetch(`${base}/${path}${query}`, { headers });
         expect([label, path, response.status]).toEqual([label, path, 404]);
@@ -261,12 +330,12 @@ it("a route spelled with a trailing, doubled or encoded slash is no route, for a
     }
     // the canonical spellings: refused to a watching device on this PC, its alias and another PC's route
     for (const path of ["api/sessions/history", "api/machines/local/sessions/history", "api/machines/pc1/sessions/history"]) {
-      const response = await fetch(`${base}/${path}${query}`, { headers: { cookie: `herdr_web_device=${watch.token}` } });
+      const response = await fetch(`${base}/${path}${query}`, { headers: { cookie: `ovis_device=${watch.token}` } });
       expect([path, response.status, ((await response.json()) as { error: { code: string } }).error.code]).toEqual([path, 403, "read_only"]);
     }
     // and answered for a driving one (no such workspace here; no such PC connected)
-    const driving = { cookie: `herdr_web_device=${drive.token}` };
-    const absent = await fetch(`${base}/api/sessions/history?workspace_id=herdr-web-ui-test-absent&agent=pi`, { headers: driving });
+    const driving = { cookie: `ovis_device=${drive.token}` };
+    const absent = await fetch(`${base}/api/sessions/history?workspace_id=ovis-test-absent&agent=pi`, { headers: driving });
     expect([absent.status, ((await absent.json()) as { error: { code: string } }).error.code]).toEqual([404, "workspace_not_found"]);
     expect((await fetch(`${base}/api/machines/pc1/sessions/history${query}`, { headers: driving })).status).toBe(503);
   } finally {

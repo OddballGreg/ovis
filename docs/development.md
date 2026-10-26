@@ -23,8 +23,12 @@ request ID with Herdr's own log; a timeout alone does not identify which process
 A later successful RPC or machine connection writes one `.recovered` line. Repeated failures are
 summarized at most once every 30 seconds per RPC method/peer or machine, with suppressed counts;
 bookkeeping retains at most 128 recent keys per logger, including healthy keys so flapping cannot
-reset the throttle. Only a visible failure episode emits a recovery. Abnormal browser WebSocket closes are
+reset the throttle. Only a visible failure episode emits a recovery; a silent one (every failure
+suppressed) keeps its `episode_id` and start into the next visible failure, so that line's
+`since_first_failure_ms` can span a healthy gap. Abnormal browser WebSocket closes are
 coalesced separately for local and relayed connections; normal closes and server shutdown are quiet.
+`websocket.failed` means any close other than 1000 or 1001, so it also covers closes the server starts
+itself (device revoke 1008, output stall 4008, a remote PC disconnecting 1012); `close_code` tells them apart.
 The close reason, input, credentials, peer names, socket paths and raw exception messages are never
 included. A remote machine's opaque UUID may appear, not its name or SSH address. These records are
 separate from the request-completion log and do not add timestamps to older console messages.
@@ -75,8 +79,8 @@ bun run check run --build bun scripts/ui-regression.ts                     # bui
 ```
 
 `fast` needs no herdr. The other modes run on a herdr of their own: its config, its plugin state
-and the web UI's state live in a directory made for the run (`XDG_CONFIG_HOME`, `XDG_STATE_HOME`,
-`HERDR_WEB_STATE_DIR`), under a session name made for the run. Nothing reads your herdr config,
+and Ovis's state live in a directory made for the run (`XDG_CONFIG_HOME`, `XDG_STATE_HOME`,
+`OVIS_STATE_DIR`), under a session name made for the run. Nothing reads your herdr config,
 so no plugin installed there starts with the test servers, and two runs on one PC share no
 socket and no file. The run stops its herdr servers and removes the directory when it ends, also
 when it is interrupted; `CHECK_DIR=<path>` keeps it there instead. A few lane or `check run`
@@ -128,6 +132,16 @@ Read the verification status and source identity, not just a zero exit code. Cha
 run invalidate its source verification; a later edit or restack requires new verification.
 An unavailable source fingerprint, or an unreadable artifact after a successful build, fails
 the check even when its commands returned zero.
+Whatever a step leaves running in its process group (with its output closed or not) is ended
+when the step ends, and the step's report says so.
+A teardown that did not finish also fails the check: a step's process group still there after
+SIGTERM, then SIGKILL and their grace (only "no such process" proves it gone; a process the run may not signal
+is still there), or a herdr session of the run whose stop failed. Every other stop is still
+tried. The run then keeps its isolated directory instead of removing it, prints its absolute
+path, lists it under `evidence.retained` in the report and adds the failures to `errors`. A
+run that passed exits 1 with status `failure`. An interrupted run keeps exit code 130 or 143
+and status `interrupted`, with the same errors and kept directory. Look through the kept
+directory, stop what is left, and remove the directory yourself.
 `check run --build` records the build made for the command. Without it, an existing `dist/`
 has unknown provenance and cannot establish that a browser tested current source. Report and
 log collection is for isolated fixtures: do not pass real credentials or live-user commands to
@@ -170,7 +184,7 @@ installers, a headless herdr, then `herdr plugin install` of a pushed ref (defau
 branch), the start action, `/api/health`, the PTY smoke test on the box's Node, and the startup hook
 after a herdr restart. It prints the time each step took. `KEEP=1` leaves the container for a look.
 
-Tests run against a herdr session of their own, `herdr-web-ui-test`. The first run starts a headless `herdr --session herdr-web-ui-test server` and later runs reuse it, so test workspaces never show in the herdr you work in (`scripts/test-herdr.ts`). Stop it with `herdr --session herdr-web-ui-test server stop`. `HERDR_TEST_SESSION` picks another name, and `HERDR_TEST_LIVE=1` runs against `HERDR_SOCKET` or your default session instead.
+Tests run against a herdr session of their own, `ovis-test`. The first run starts a headless `herdr --session ovis-test server` and later runs reuse it, so test workspaces never show in the herdr you work in (`scripts/test-herdr.ts`). Stop it with `herdr --session ovis-test server stop`. `HERDR_TEST_SESSION` picks another name, and `HERDR_TEST_LIVE=1` runs against `HERDR_SOCKET` or your default session instead.
 
 Browser checks launch `CHROME_PATH` when it is set, else Google Chrome at `/opt/google/chrome/chrome` where that exists, else the lockfile's Playwright Chromium (`scripts/chrome-path.ts`; install it with `bun node_modules/playwright-core/cli.js install chromium`). After a herdr upgrade, refresh the generated wire types with `bun run generate:types --refresh` (and `--check` to verify).
 
@@ -187,16 +201,21 @@ bun scripts/keyboard-viewport-demo-regression.ts # original real-app viewport su
 bun scripts/droplet-demo-regression.ts        # real-app alerts below the header, keyboard and landscape
 bun scripts/chat-greeting-demo-regression.ts  # an empty chat's greeting: centred on a desktop, docked on a phone
 bun scripts/composer-fit-demo-regression.ts   # one Send/Stop control, pending Send now actions, context/label fit and Chat font sizing
+bun scripts/plan-chip-demo-regression.ts      # the plan chip's step in progress: one row at 390 and 1440, cut when long, with tasks, the list's read states, offline and in a split, Korean too
 bun scripts/held-rows-demo-regression.ts      # held messages: the fold under an approval card, its button, a row's error
 bun scripts/sidebar-activity-demo-regression.ts # Agents order Activity and pins: blocked pinned, recency, Pin agent / Unpin agent and Pin workspace / Unpin workspace from a right-click and the context-menu key, the ⋯ on a phone, and a finish opened here drawn as ready until the next one
+bun scripts/sidebar-filter-demo-regression.ts # the roster's label filter on two demo PCs: fuzzy matches with their ancestors, the selection kept as context, pins and folds untouched, a live and an offline roster, the drawer and a reload clearing it; screenshots at 390 and 1440 in UI_EVIDENCE_DIR
 bun scripts/sidebar-branch-line-demo-regression.ts # herdr's branch line: a repository and an unmarked git folder say their branch under the name, worktrees and folders outside git stay one line, desktop and phone, dark and light
 bun scripts/sidebar-tokens-demo-regression.ts # herdr plugin tokens on agent rows: a dim line of their own on One line and Two lines, cut with the whole text in the tooltip and a phone's sheet, as text, following herdr's `$name` rows, and changing live
+bun scripts/pane-mute-demo-regression.ts    # Mute alerts from an agent's row menu: one shared list for push, droplet, chime and tab notification, two tabs of one server, a second PC's same-named pane, an older server and a watching device
 bun scripts/prompt-dock-demo-regression.ts    # the prompt card docked over the input card: its place, its height on a short phone, the grip, a typed pick
 bun scripts/plugin-actions-demo-regression.ts # a plugin action that ends after the server stopped waiting: the late failure said, a traceback's height on a phone with its keyboard up
+bun scripts/background-agent-detail-demo-regression.ts # a running Claude subagent's detail sheet from the background-task list on demo fixtures: open, Refresh, Escape, a phone's Back, focus return, late answers dropped, and the unsupported and older-bridge notes
 bun scripts/font-swap-demo-regression.ts      # the app's faces arriving late on a slow link: a reader at the end of a chat stays there, a tab strip the user scrolled stays put
 bun scripts/narrow-pane-demo-regression.ts    # a split pane under 80 columns: the smaller font, a zoom, and a pane no font can bring to 80
 bun scripts/agent-skill-menu-demo-regression.ts [agent …] # each agent's `/` (and `$`) skill menu, its origin groups and its skill chips at 1280 and 390px, one case file per agent in scripts/skill-menu-cases/, screenshots in evidence/agent-skill-menu/<agent>/
 bun scripts/install-state-demo-regression.ts  # Install app against a real CDP install on a throwaway profile and HOME: the help or the prompt before, gone in the app window and a tab of its origin, back after uninstall
+bun scripts/terminal-paste-insert-demo-regression.ts # a phone's Paste key into the terminal's input line and Insert without Enter on the demo shell: the caret, a held or refused clipboard read, the acknowledged clear, an older bridge; with UI_EVIDENCE_DIR, every state at 390 and 1440, light and dark, and Korean
 ```
 
 `FILE_VIEWER_CASE=landscape-notch` selects a viewer case; `FILE_VIEWER_CSS=/path/to/before.css` compares another stylesheet. These checks use Chromium mobile emulation and synthetic safe-area/keyboard geometry; they cannot verify actual iOS Safari keyboard dismissal or notch insets. The existing `bun scripts/file-viewer-regression.ts` separately checks history with an owned herdr pane. The original `scripts/mobile-viewport-regression.ts` exports `checkMobileViewport` for the real-app `bun run test:ui` suite; it also checks the command palette and xterm focus transitions. The demo runners build the real client into a temporary directory, inject the committed fictional-session transport and serve it only on loopback; they do not use a live herdr session or download website media. Run on its own, each builds the client itself (`scripts/demo-build.ts`); the browser lane builds it once and names the directory in `HERDR_DEMO_BUILD`, and each runner copies that instead. They exercise real-app viewport and alert geometry, but not live herdr connectivity.
@@ -401,36 +420,35 @@ in the historical table above. They were taken with a 2 s push-read bound; the b
 
 ## README media
 
-`bun run build && bun scripts/readme-media/capture.ts` regenerates the stills and demos in `docs/screenshots/` from a staged, fictional session in its own herdr session (`herdr-web-ui-demo`). Pass `shots` or `video` to redo only one of them. It needs ffmpeg.
+`bun run build && bun scripts/readme-media/capture.ts` regenerates the stills and demos in `docs/screenshots/` from a staged, fictional session in its own herdr session (`ovis-demo`). Pass `shots` or `video` to redo only one of them. It needs ffmpeg.
 
 - `stage.ts` builds the session from `site/demo/fixtures.ts`: two git repositories under `/tmp/herdr-demo`, each with two agent worktrees herdr adds, a release shell tab, curated chats served in place of transcripts, and the hostname rewritten.
 - `record.ts` records a walkthrough at 2x (Chrome's screencast, with `--force-device-scale-factor=2`), logging pointer moves, clicks, taps and camera cues as it drives the page.
 - `compose.ts` draws every output frame on a canvas: a backdrop, a browser window or a phone, the frame under an eased camera, and a vector cursor with click ripples or touch rings. It writes `demo-*.mp4` (1920×1200 and 1080×1920, 30 fps) and a GIF of each. Stills get the same window or phone on a transparent background.
 
 The MP4s are not committed: GitHub plays a README video only from an upload (`github.com/user-attachments/…`), so drop them into an issue or PR comment and use the link it gives.
-The website's page is built from the README's own artifacts: it downloads the README's top video (listed in `scripts/build-site.ts`, `videos`, so a new top video needs its link changed there as well), shows the feature grid's clips linking to their uploads (the same list of links is in `site/index.html` and `site/zh/index.html`), and uses `docs/screenshots/install.png`.
 The README's feature grid shows a looping ~7-second cut of each feature video (`docs/media/readme/*.webp`, 800×450, 15 fps), each linking to its upload. Cut one with
 `ffmpeg -ss <start> -t <seconds> -i clip.mp4 -vf "fps=15,scale=800:450:force_original_aspect_ratio=increase:flags=lanczos,crop=800:450" -c:v libwebp_anim -loop 0 -quality 72 -compression_level 6 -an out.webp`;
 the scale and crop fill 800×450 from any source aspect. Start on a sharp frame, not mid camera move. The top video stays a GitHub upload so it plays at full quality.
 
-The user guide's gallery and the retained banner assets are rendered from the film's stills (below): `bun scripts/readme-media/banner.ts [banner] [og] [look]`
-draws `banner.html` in headless Chrome into `docs/media/banner.png` (1920×800), `site/assets/og.png` (1280×640) and
+The user guide's gallery and the retained banner assets are rendered from the film's stills (below): `bun scripts/readme-media/banner.ts [banner] [look]`
+draws `banner.html` in headless Chrome into `docs/media/banner.png` (1920×800) and
 `docs/media/look-{chat,prompt,terminal}.png` (1760×1150), each quantized to 256 colours. `docs/media/chat-loop.gif`
 comes from `scripts/film/render.ts loop`.
 
 ## The film
 
-The film (`site/media/herdr-web-ui-film.mp4`, 56 s) and chat loop (`site/media/chat-loop.mp4`, with the README's
+The film (`site/media/ovis-film.mp4`, 56 s) and chat loop (`site/media/chat-loop.mp4`, with the README's
 `docs/media/chat-loop.gif`) are the real client on the demo's fixtures, recorded and composited by `scripts/film/`.
-Raw footage and renders go to `_film/` (gitignored); only the outputs under `site/media/`, `site/assets/` and
-`docs/media/` are committed. Needs ffmpeg and Chrome at `/usr/bin/google-chrome` (`CHROME_PATH` otherwise).
+Raw footage and renders go to `_film/` (gitignored); only the outputs under `docs/media/` are committed.
+herdrweb.dev no longer publishes `site/media/` (it forwards to ovis.sh), so the film and loop MP4s wait for a
+home on ovis.sh. Needs ffmpeg and Chrome at `/usr/bin/google-chrome` (`CHROME_PATH` otherwise).
 
 ```bash
 bun run build:site                              # the demo the takes are recorded from
 bun scripts/film/capture.ts [stills] [rec] [stepped] [R10 R11 … | still names]   # _film/footage/
-bun scripts/film/site-assets.ts                 # site/assets/*.webp|jpg|png from the stills
-bun scripts/readme-media/banner.ts              # banner, og.png, look-*.png from the stills
-bun scripts/film/render.ts film                 # site/media/herdr-web-ui-film.{mp4,jpg}
+bun scripts/readme-media/banner.ts              # banner, look-*.png from the stills
+bun scripts/film/render.ts film                 # site/media/ovis-film.{mp4,jpg}
 bun scripts/film/render.ts loop                 # site/media/chat-loop.{mp4,jpg}, docs/media/chat-loop.gif
 bun scripts/film/render.ts check                # acceptance frame grabs, sizes, loop seam
 ```
@@ -445,27 +463,19 @@ bun scripts/film/render.ts check                # acceptance frame grabs, sizes,
 - `render.ts` renders frames in parallel Chromes and encodes once. `render.ts report` prints the shot table with the
   maximum magnification (never above 1 source px per output px); `render.ts stills 8 13.6 …` grabs single frames.
 - After a re-capture, re-check what was placed by hand on the frames (the header of `render.ts` lists it), then
-  re-render. `build-site.ts` fails if a file in `site/media/` is over 4 MB (the film: 24 MB) or one in `site/assets/`
-  is over 750 KB.
+  re-render.
 
 ## Website
 
-<https://herdrweb.dev/> is `site/index.html`, a static page with desktop and phone
-demos, a screenshot gallery, supported agents, phone setup and a comparison table. `site/zh/index.html`
-is the same page in Simplified Chinese at `/zh/`, linked from the header; a change to one page belongs in
-the other. `bun run build:site`
-assembles it into `_site/` with icons, the social preview and scaled screenshots from `docs/screenshots/`.
-The two demo videos come from local `docs/screenshots/*.mp4` when present, otherwise the README's uploads;
-ffmpeg creates their poster frames. Without ffmpeg, the page omits unavailable posters.
+The project's website is <https://ovis.sh/>, served from `ovis-site/`. <https://herdrweb.dev/> (GitHub
+Pages, built from `site/`) keeps only what installed users and CI fetch from it: `install.sh`,
+`install.ps1` and the browser demo at `/demo/`. Its home page (`site/index.html`, and `site/zh/index.html`
+at `/zh/`) is a page whose canonical link, meta refresh and script forward to
+<https://ovis.sh/>; ovis.sh hands `/install.sh`, `/install.ps1` and `/demo/` back to herdrweb.dev
+(`ovis-site/_redirects`). `bun run build:site` assembles `_site/`: those pages, the Google site
+verification file, the installers, the favicons and the demo. It writes no sitemap.
 
-For search engines the build also writes `sitemap.xml` (the page only: the demo is `noindex`) and copies
-the page's FAQ rows (`<div class="qa">`) into its head as FAQPage structured data, so edit a question in
-the page and the data follows. The SoftwareApplication data is written in the page's head by hand.
-
-The build also copies the retained `site/assets/` and `site/media/` files, including the film linked
-from the README and its chat loop. These remain available at their existing URLs even though the
-homepage uses the desktop and phone demos.
-`.github/workflows/pages.yml` installs ffmpeg when the runner lacks it and runs after CI completes
+`.github/workflows/pages.yml` runs after CI completes
 on `main`, or on manual dispatches from `main`. A completed CI run only builds and deploys when it
 succeeded for a push from this repository; PR runs and forks cannot publish. It builds that CI run's
 head SHA without running validation again. Manual dispatches run reusable CI validation and the site
@@ -473,8 +483,12 @@ build in parallel against the dispatch SHA, and deployment requires both to succ
 Deployments are serialized. Immediately before deploying,
 the workflow checks that the validated SHA is still the latest `main` commit; it fails closed if it is
 stale or that check cannot be completed. This does not change the separate Release workflow.
-The standalone `main` CI supplies the validation for each main push, preserving its independent CI
-history while the Website workflow waits for its successful completion.
+The standalone `main` CI supplies that validation. Its push runs share one concurrency group: the
+running one finishes, and a newer push cancels the one still waiting, so a burst of merges runs
+main's checks at most twice and the newest run covers the merges in between. The Website workflow
+deploys only after a successful push run of main's newest commit; a cancelled run's Website run
+skips building. Re-running an older main run while a newer one waits cancels the newer one, and
+main's newest commit then waits for the next push or a manual Pages run.
 
 ### The browser demo
 
@@ -485,7 +499,7 @@ transport answers the app's `fetch("/api/…")`, the machines event stream and t
 socket from `site/demo/fixtures/`: the chats and the Codex approval are the README's
 (`site/demo/fixtures.ts`, shared with `scripts/readme-media/stage.ts`), and `machines.json`,
 `agents.json`, `commands.json` and the shell pane's `terminal.json` are captured from that staged
-session by `bun scripts/demo-fixtures.ts` (needs herdr; it uses the `herdr-web-ui-demo` session and
+session by `bun scripts/demo-fixtures.ts` (needs herdr; it uses the `ovis-demo` session and
 scrubs the hostname and login). Recapture them after a herdr upgrade changes the snapshot shapes, or
 after changing the staged session. Files, images, push and remote PCs are not part of the demo.
 
@@ -498,11 +512,13 @@ after changing the staged session. Files, images, push and remote PCs are not pa
    fragments; then add the `by @login` credits; a fragment merged later must be moved into the
    version by hand, since the release workflow refuses while one is left), and tells the release
    in [release-summaries.json](../release-summaries.json) the way a game's patch notes do: under
-   the version, for each language in `SUMMARY_LANGUAGES` (`shared/update.ts`: `en`, `ko`, `ja` and `zh`), the lists `new`, `improved` and `fixed` (a list with nothing to say is left out), each a few lines of
-   plain text, 90 characters at most, the same number of lines in every language. It is what
-   an install shows before and after the update, with the changelog section folded under it,
-   so a line names what changes for the people who use the app and leaves out PR numbers and
-   internals. The unit suite and the release workflow fail without every language.
+   the version, for each language in `SUMMARY_LANGUAGES` (`shared/update.ts`: `en`, `ko`, `ja` and `zh`), the lists `new`, `improved` and `fixed` (a list with nothing to say is left out), the same number of
+   lines in every language. From 0.5.0 the notes are short: at most five lines in a list, each one
+   plain sentence of at most 70 characters in English (about as short in the other languages),
+   naming the change most people will notice first. A change that does not make the cut stays in
+   the changelog section, so no line joins two changes to fit it in. It is what an install shows
+   before and after the update, with the changelog section folded under it, so a line names what
+   changes for the people who use the app and leaves out PR numbers and internals. The unit suite and the release workflow fail without every language.
    The GitHub release is written from the same files by `scripts/release-notes.ts`: the
    English lists under New features, Improvements and Bug fixes, then the version's whole
    changelog section folded under **Full changelog**.
@@ -520,7 +536,21 @@ after changing the staged session. Files, images, push and remote PCs are not pa
 
 The workflow validates metadata, then runs the same unit, integration and browser checks
 as PRs against the exact `main` commit selected when the run starts. Only after all checks
-pass does it create the tag and GitHub release. A failed validation creates neither.
+pass does it create the tag and GitHub release. A failed validation creates neither. Beside the
+checks it builds the Rust PTY host (**Rust PTY host binaries**, `.github/workflows/pty-sidecar.yml`):
+static Linux x64 and arm64 binaries, a universal macOS one, `ovis-pty-sidecar.json` (the version,
+the `crates/pty-sidecar` git tree they were built from, and each file's SHA-256) and `SHA256SUMS`,
+all attached when the release is created, so no tag is seen without them. `bun
+scripts/pty-sidecar.ts install` (herdr's plugin build, each update installed from the app, and
+`install.sh`) puts the binary for its PC in `bin/ovis-pty-sidecar` only when the release's crate
+tree matches the checkout and the SHA-256 matches; otherwise that install runs the Node sidecar where
+the PC has Node, and mirrors its panes where it has none.
+A release without them gets them from **Actions → Attach the Rust PTY host** with its tag. Then it
+attaches the signed Ovis for Mac `Ovis.dmg` to the release, or skips that with a notice while the
+signing secrets are unset ([app/mac/README.md](../app/mac/README.md#releases)), and Ovis for Windows'
+`Ovis.exe` ([app/windows/README.md](../app/windows/README.md#releases)); the release becomes GitHub's
+latest only once it has both. A red `mac-dmg` or `windows-app` job leaves the release published: run
+**Actions → Mac app** or **Actions → Windows app** for its tag instead of releasing again.
 Do not push release tags by hand: installed updaters read Git tags directly, so a tag is
 visible to them even without a GitHub release. Existing tags cannot be reused; fix a
 published version with a new patch release. If publishing fails after a tag was created,
@@ -547,7 +577,7 @@ before it uploads it, and its log shows totals only.
 It needs two repository secrets (Settings → Secrets and variables → Actions); without them the run
 says so and ends green:
 
-- `GROWTH_METRICS_TOKEN`: a fine-grained personal access token for devswha/herdr-web-ui only, with
+- `GROWTH_METRICS_TOKEN`: a fine-grained personal access token for devswha/ovis only, with
   the repository permissions **Administration: Read-only** (the traffic endpoints need it) and
   **Metadata: Read-only**. Such a token expires within a year: put the expiry date in the token's
   name. An expired or wrong token turns the run red (exit 1 for no access to the repository, exit
@@ -559,7 +589,7 @@ says so and ends green:
 Artifacts are kept 90 days. To read one:
 
 ```sh
-gh run download <run-id> -R devswha/herdr-web-ui -n growth-snapshot-<run-id>
+gh run download <run-id> -R devswha/ovis -n growth-snapshot-<run-id>
 GROWTH_SNAPSHOT_KEY=… openssl enc -d -aes-256-cbc -pbkdf2 -pass env:GROWTH_SNAPSHOT_KEY -in growth.tar.gz.enc | tar xzf -
 ```
 
@@ -587,6 +617,59 @@ are scheduling constraints, not reasons to stack; similar goals or shared CI res
 dependencies. Keep each PR focused on one change. Squash merge it after required checks pass, and
 delete its remote branch after merging only when dependent work is preserved. There is no permanent
 `develop` branch. Release metadata changes also go through a PR.
+
+### Stored-format changes
+
+These rules bind the next PR that changes the structure of a store this app owns: a browser record
+(an `ovis:` key in `localStorage`, such as `ovis:settings` or `ovis:themes`) or a bridge document in the
+state directory (`preferences.json`, `devices.json` and the others beside them). Renaming, moving,
+splitting or re-encoding a field, or changing what a stored value means, is structural. So is adding a field to a record an older
+writer rewrites whole: an old tab's next unrelated save writes the record back without the field
+it does not know, and erases it. Only an addition an older writer cannot erase, such as a value
+kept in its own key or document, is not structural and needs none of this.
+
+Most stores carry no schema version today. What follows is what the format-changing PR has to
+bring, not a description of what every store already does. The `revision` in `preferences.json`
+orders writes; it is not a schema version and says nothing about whether a reader understands
+the document. The layout check in [`server/session-history.ts`](../server/session-history.ts)
+validates a native agent transcript the bridge only reads; it is not a bridge-store migration and
+no precedent for one.
+
+The PR description names the store's owner (the key or file, and the module that writes it), the
+old and the new shape, which releases read and which write each shape (and what the oldest reader
+still running does with the new one), and the HTTP or WebSocket contract that carries the store,
+or that none does. Then the change keeps these rules:
+
+- **Tabs already open keep their old code.** An old tab that saves an unrelated setting after the
+  new code wrote must not erase the new shape. Already in place for the theme pair: it lives in
+  its own key, and the main record keeps the legacy mirrors an old sanitizer reads (`saveSettings`
+  in [`src/lib/settings.ts`](../src/lib/settings.ts), old code pinned in
+  [`settings.legacy-fixture.ts`](../src/lib/settings.legacy-fixture.ts)).
+- **Migrate passively.** A browser that reads an old shared document derives the new shape into
+  its own state and advances its baseline to it. It never sends a corrective PUT that writes its
+  interpretation back, and a value it cannot read stays the other browsers'. Already in place for
+  the theme sides (`takePreferences` in [`src/lib/preferencesSync.ts`](../src/lib/preferencesSync.ts)).
+- **Never write over data too new to read.** A reader that finds a structural version it does not
+  know keeps the bytes as they are and refuses to write that store. It does not treat the unknown
+  version as absent, and does not sanitize the document to defaults and save them over it.
+- **Devices fail closed.** A `devices.json` that is damaged or too new keeps the gate closed and
+  the registry unwritable. It is never a first installation or an empty registry, and nothing
+  reopens pairing. [`server/devices.ts`](../server/devices.ts) already does this for a damaged
+  file (`error`, `gated`, `assertWritable`); a too-new version must take the same path.
+- **Rollback restores code, not data.** The update supervisor restores the previous release when
+  a candidate bridge fails its startup health check
+  ([`server/supervisor.ts`](../server/supervisor.ts), [app updates](app-updates.md#boundaries)).
+  Both releases share one state directory, so this does not undo a rewrite the candidate already
+  made, and a later manual downgrade meets the new shape too. Make old readers safe before the new
+  shape is written: ship the reading side or the too-new refusal in a release before the one that
+  writes, or keep writing a shape the previous release reads.
+
+The PR's tests, on `mkdtempSync` state directories or a stand-in `localStorage` and event-driven,
+cover: an old-shape fixture loading into the new shape; an old tab's unrelated save after the new
+code wrote; old and new readers and writers side by side, each keeping the other's values with no
+corrective write; a too-new document read without being written (its bytes unchanged after a
+write is refused, and for devices the gate still closed); and a failed activation, where the
+previous release serves again and reads, or refuses, what the candidate left on disk.
 
 ### Coordinated work
 
@@ -647,7 +730,11 @@ The [CI workflow](../.github/workflows/ci.yml) runs on every PR and `main` push:
   `scripts/ci-browser.sh` (`BROWSER_SCRIPTS` picks from it, `BROWSER_EXCLUDE` leaves scripts out,
   and a name the list does not hold is an error). `scripts/pages-gate.test.ts` fails if the two
   jobs together do not run that list exactly once. A new browser script therefore only needs its
-  `run_script` line in `scripts/ci-browser.sh`.
+  `run_script` line in `scripts/ci-browser.sh`. `scripts/ci-browser.test.ts` fails if a
+  `*-regression.ts` or `*-browser-qa.ts` script is neither run by that list (itself, or through a
+  script that imports or spawns it) nor named in its list of scripts CI does not run, and if the
+  list names a script that does not exist; it pins no count, so PRs that add scripts do not
+  conflict on it.
 
 `bun run check browser` and `bun run check full` still run the serial lane, `scripts/ci-browser.sh`
 (`BROWSER_PARALLEL=1` hands it to the parallel runner).
@@ -692,20 +779,32 @@ pages or credentials.
 
 ### Self-hosted runner
 
-Linux CI/CD jobs run on GitHub-hosted `ubuntu-24.04` unless the repository variable
-`CI_SELF_HOSTED_LABELS` holds a JSON array of runner labels that contains `"self-hosted"`, for
-example `["self-hosted","linux","x64","herdr-ci"]`. Set, it routes:
+`ci.yml`'s Linux jobs of a push or a same-repository pull request run on the maintainer PC's runners
+(labels `["self-hosted","self-hosted-ovis"]`) by default; other events stay on `ubuntu-24.04`. The repository variable `CI_SELF_HOSTED_LABELS`
+overrides that with another JSON array of runner labels that contains `"self-hosted"`, or with the
+JSON string `"ubuntu-24.04"` to keep every job GitHub-hosted while that PC is offline. `pages.yml`
+and `release.yml` stay on `ubuntu-24.04` unless the variable holds labels. The variable routes:
 
 - in `ci.yml`: Fast checks, Integration tests and both Browser regression jobs;
 - in `pages.yml`: the site build and the deploy after successful same-repository main push CI,
   or on a manual dispatch with reusable CI validation;
 - in `release.yml`: the preflight and publish jobs.
 
+A push to main takes the repository variable `CI_MAIN_SELF_HOSTED_LABELS` over
+`CI_SELF_HOSTED_LABELS` when it is set: `["self-hosted","self-hosted-ovis-main"]` sends main's Linux
+jobs to the runners `run.sh --reserved` keeps for them, so a merge's CI does not queue behind pull
+request runs, and `"ubuntu-24.04"` keeps only main GitHub-hosted. `CI_SELF_HOSTED_LABELS` set to
+`"ubuntu-24.04"` still keeps every job hosted. Delete the variable while no reserved runner is online,
+or main's jobs wait for one.
+
 Detect changes, the Integration and browser summary, the Windows and macOS jobs,
-`remote-bundles.yml` and `windows-install.yml` always stay GitHub-hosted.
+`remote-bundles.yml`, `windows-install.yml` and `pr-title.yml` always stay GitHub-hosted.
 
 In `ci.yml`, Detect changes picks the runner with `scripts/ci-runner-route.sh`. A fork pull request
-always gets `ubuntu-24.04`, whatever the variable says. Otherwise the `self_hosted_labels`
+always gets `ubuntu-24.04`, whatever the variable says. Since that script runs from the pull
+request's own revision, the runner also refuses fork code itself: its job-started hook kills the
+job's worker before any step, `if: always()` ones included, can run
+(`scripts/self-hosted-runner/job-started.sh`). Otherwise the `self_hosted_labels`
 workflow_dispatch input, when not empty, overrides the variable for that one manual run. A value
 that is not a non-empty array of strings containing `"self-hosted"` fails the job instead of
 falling back. `pages.yml` and `release.yml` read the variable directly.
@@ -741,7 +840,8 @@ downloads on self-hosted jobs, but dependency installation, checkout and artifac
 do; measure setup, test execution and retries separately when comparing speed. Setup, routing and the security model are in
 [scripts/self-hosted-runner/README.md](../scripts/self-hosted-runner/README.md).
 
-`scripts/ci-tests.ts` discovers all `.test.ts` files under src/shared/server/scripts.
+`scripts/ci-tests.ts` discovers all `.test.ts` files under
+src/shared/server/scripts/telemetry/push-relay/integrations.
 Files named `*.contract.test.ts`, tests under `server/herdr/` and `server/pty/`, and
 `server/updater.test.ts` (which includes real bridge restart/rollback cases) belong
 to integration; everything else belongs to unit. Name new live-server tests
@@ -757,8 +857,10 @@ administrators. Branch protection does not require branches to be up to date bef
 does not enforce resolved review threads; resolve every review thread before merging anyway, as a
 practice. Force pushes and branch deletion are disabled. Human approvals are optional for this maintainer-led
 project; external contributions still need maintainer review. CodeRabbit is advisory, not a required
-check. It reviews a pull request once when it opens and not on later pushes;
-comment `@coderabbitai review` on the final head before merging and wait for it.
+check. It reviews a pull request once when it opens and not on later pushes; after a later
+commit that changes behaviour, comment `@coderabbitai review` on the final head and wait for it.
+Which PRs wait for a review, and what stands in when CodeRabbit skips one, is in
+[AGENTS.md](../AGENTS.md) (Maintainer workflow).
 Release tags must not be moved or deleted. These GitHub settings are separate from files
 in the checkout.
 
@@ -783,5 +885,5 @@ input regression matrix.
 | [`scripts/`](../scripts/) | Plugin lifecycle, type generation, remote bundles, README media, the film and browser checks |
 | [`public/`](../public/) | PWA manifest, service worker and icons |
 | [`docs/`](.) | Remote PCs, updates, flow control, chat audit, brand assets and README media (`docs/media/`) |
-| [`site/`](../site/) | The website, built by `scripts/build-site.ts` and deployed by GitHub Pages |
+| [`site/`](../site/) | herdrweb.dev (the installers, the browser demo and pages that forward to ovis.sh), built by `scripts/build-site.ts` and deployed by GitHub Pages |
 | [`DESIGN.md`](../DESIGN.md) | Design tokens and UI conventions |

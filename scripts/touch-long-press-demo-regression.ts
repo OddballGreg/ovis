@@ -49,7 +49,7 @@ try {
     const browser = await chromium.launch({ executablePath: chromePath(), headless: true, args: ["--no-sandbox"] });
     try {
       const context = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, locale: "en-US" });
-      await context.addInitScript(() => localStorage.setItem("herdr-web-ui:settings", JSON.stringify({ language: "en", defaultView: "chat" })));
+      await context.addInitScript(() => localStorage.setItem("ovis:settings", JSON.stringify({ language: "en", defaultView: "chat" })));
       const page = await context.newPage();
       const errors: string[] = [];
       page.on("pageerror", (error) => errors.push(error.message));
@@ -60,11 +60,11 @@ try {
 
       assert.equal(await press(page, "touch"), false, "a touch long press keeps the phone's own selection and copy");
       assert.equal(await press(page, "drag-select"), false, "the contextmenu typed mouse that ends a dragged selection is the touch's");
-      await page.waitForTimeout(300);
+      await page.waitForTimeout(300); // fixed wait: a touch long press may open no pane menu
       assert.equal(await paneMenu.count(), 0, "a touch long press opens no pane menu");
 
       assert.equal(await press(page, "legacy-touch"), false, "a contextmenu with no pointer type right after a touch is the touch's");
-      await page.waitForTimeout(300);
+      await page.waitForTimeout(300); // fixed wait: a legacy touch contextmenu may open no pane menu
       assert.equal(await paneMenu.count(), 0, "it opens no pane menu either");
 
       assert.equal(await press(page, "keyboard"), true, "a menu asked for from the keyboard after a touch is the app's");

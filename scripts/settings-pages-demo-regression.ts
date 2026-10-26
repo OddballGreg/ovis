@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium, type Page } from "playwright-core";
 import panes from "../site/demo/fixtures/panes.json";
-import { buildDemoApp } from "./demo-build.ts";
+import { buildDemoApp, buildDevelopmentDemoApp } from "./demo-build.ts";
 import { DEMO_FILE_PREVIEW_SCRIPT } from "./demo-file-preview.ts";
 import { openSettingsPage } from "./settings-page.ts";
 import { KO } from "../src/lib/i18n.ko.ts";
@@ -19,6 +19,7 @@ import { comboKey, LEGACY_COMBOS } from "./theme-baseline.ts";
 // the browser's Back button steps out of the dialog instead of out of the app. All files and
 // HTTP traffic stay in this disposable, loopback-only app; no herdr session is opened.
 const app = mkdtempSync(join(tmpdir(), "herdr-settings-demo-"));
+const devApp = mkdtempSync(join(tmpdir(), "herdr-settings-dev-"));
 const PAGES = ["Appearance", "Chat", "Terminal", "Alerts", "Voice input", "Subscription usage", "Shortcuts", "Phone & devices", "Remote PCs", "Agent integrations", "About"];
 const SETTINGS = { language: "en", showUsage: true, voiceInput: true, showQuickReplies: true, fileOpen: "panel" };
 
@@ -29,7 +30,7 @@ const openSettings = async (page: Page): Promise<void> => {
 };
 /** The Settings entry of the current history state, as the app wrote it. */
 const entryOf = (page: Page): Promise<{ page: string | null; keyBar: boolean; depth: number } | null> =>
-  page.evaluate(() => (history.state as Record<string, unknown> | null)?.["herdr-web-ui:settings"] as never ?? null);
+  page.evaluate(() => (history.state as Record<string, unknown> | null)?.["ovis:settings"] as never ?? null);
 /** Waits for the history to hold what a step left; a wait that runs out says what it holds instead, and how it came to. */
 const historyHolds = async (page: Page, step: string, holds: () => boolean): Promise<void> => {
   try { await page.waitForFunction(holds); }
@@ -53,23 +54,296 @@ const cutOff = (page: Page): Promise<string[]> => page.locator(".settings-body:n
   return body.scrollWidth > body.clientWidth ? [`the page scrolls sideways (${body.scrollWidth} > ${body.clientWidth})`, ...out] : out;
 });
 
+/** What a user types for a setting, by language, and the page (and group, or `-`) the first Settings result opens. */
+const MATRIX: readonly (readonly ["en" | "ko" | "ja" | "zh", string, string, string])[] = [
+  ["en", "theme", "appearance", "-"],
+  ["en", "palette", "appearance", "-"],
+  ["en", "interface font size", "appearance", "typography"],
+  ["en", "chat font size", "chat", "-"],
+  ["en", "chat width", "chat", "-"],
+  ["en", "Enter sends", "chat", "composer"],
+  ["en", "quick replies", "chat", "quick-replies"],
+  ["en", "terminal font", "terminal", "-"],
+  ["en", "notifications", "alerts", "-"],
+  ["en", "shortcuts", "shortcuts", "-"],
+  ["en", "phone", "devices", "-"],
+  ["en", "OpenAI API key", "voice", "openai-key"],
+  ["en", "Return inserts a new line", "chat", "composer"],
+  ["en", "Send queued messages automatically", "chat", "composer"],
+  ["en", "New tab button", "chat", "composer"],
+  ["en", "Suggestion chip", "chat", "composer"],
+  ["en", "Show above the message box", "chat", "quick-replies"],
+  ["ko", "인터페이스 글자 크기", "appearance", "typography"],
+  ["ko", "채팅 글자 크기", "chat", "-"],
+  ["ko", "Enter로 보내기", "chat", "composer"],
+  ["ko", "빠른 답장", "chat", "quick-replies"],
+  ["ko", "터미널 글자 크기", "terminal", "-"],
+  ["ko", "OpenAI API 키", "voice", "openai-key"],
+  ["ko", "단축키", "shortcuts", "-"],
+  ["ko", "알림", "alerts", "-"],
+  ["ko", "대기 메시지 자동 전송", "chat", "composer"],
+  ["ko", "입력창 위에 표시", "chat", "quick-replies"],
+  ["ja", "インターフェースの文字サイズ", "appearance", "typography"],
+  ["ja", "チャットのフォントサイズ", "chat", "-"],
+  ["ja", "Enter で送信", "chat", "composer"],
+  ["ja", "クイック返信", "chat", "quick-replies"],
+  ["ja", "ターミナルのフォントサイズ", "terminal", "-"],
+  ["ja", "OpenAI API キー", "voice", "openai-key"],
+  ["ja", "ショートカット", "shortcuts", "-"],
+  ["ja", "通知", "alerts", "-"],
+  ["ja", "送信待ちメッセージを自動で送信", "chat", "composer"],
+  ["ja", "入力欄の上に表示", "chat", "quick-replies"],
+  ["zh", "界面字号", "appearance", "typography"],
+  ["zh", "聊天字号", "chat", "-"],
+  ["zh", "按 Enter 发送", "chat", "composer"],
+  ["zh", "快捷回复", "chat", "quick-replies"],
+  ["zh", "终端字号", "terminal", "-"],
+  ["zh", "OpenAI API 密钥", "voice", "openai-key"],
+  ["zh", "快捷键", "shortcuts", "-"],
+  ["zh", "提醒", "alerts", "-"],
+  ["zh", "自动发送排队消息", "chat", "composer"],
+  ["zh", "显示在输入框上方", "chat", "quick-replies"],
+];
+
+interface SearchResult { width: number; language: string; query: string; expected: { page: string; section: string }; first: string | null; page: string | null; focusedSection: string | null; sectionVisible: boolean | null; overflow: string[]; focusReturned: boolean; pass: boolean }
+
+/** Where the focus is, as a selector-like name, so the one before the palette and the one after Settings closes compare. */
+const focusName = (page: Page): Promise<string> => page.evaluate(() => {
+  const node = document.activeElement as HTMLElement | null;
+  return node ? `${node.tagName.toLowerCase()}.${node.className}#${node.id}[${node.getAttribute("aria-label") ?? ""}]` : "none";
+});
+const openPalette = async (page: Page, query: string): Promise<void> => {
+  await page.keyboard.press("ControlOrMeta+Shift+K");
+  const input = page.locator(".command-palette input[type='search']");
+  await input.waitFor();
+  await input.fill(query);
+  // the list drawn for this query: its rows or its empty line, never the last query's
+  await page.waitForFunction((query) => document.querySelector<HTMLInputElement>(".command-palette input[type='search']")?.value === query, query);
+};
+/** The page Settings shows, by the selected tab's id, and the group the focus is on. */
+const landing = async (page: Page, label: (name: string) => string): Promise<{ page: string | null; section: string | null; visible: boolean | null }> => {
+  const shown = await page.evaluate(() => {
+  const id = document.querySelector<HTMLElement>(".settings-dialog [role='tabpanel']:not([hidden])")?.getAttribute("aria-label") ?? null;
+  const active = document.activeElement as HTMLElement | null;
+  const section = active?.dataset.section ?? null;
+  let visible: boolean | null = null;
+  if (section !== null && active) {
+    // the group's head and its first control, which may arrive after it opens (the OpenAI key's form)
+    const body = active.closest(".settings-body")?.getBoundingClientRect(), box = active.getBoundingClientRect();
+    const control = active.querySelector("input, select, button, textarea")?.getBoundingClientRect();
+    visible = body !== undefined && box.top >= body.top - 1 && box.top < body.bottom && control !== undefined && control.bottom <= body.bottom + 1;
+  }
+  return { page: id, section, visible };
+  });
+  // the panel is named by its page's label in the language shown: back to the page's id
+  const ids = ["appearance", "chat", "terminal", "alerts", "voice", "usage", "shortcuts", "devices", "remote", "integrations", "about"];
+  return { ...shown, page: shown.page === null ? null : ids[PAGES.findIndex((name) => label(name) === shown.page)] ?? `unknown: ${shown.page}` };
+};
+/** Anything in the palette or Settings wider than the window: a long query or label must not push the sheet sideways. */
+const sideways = (page: Page): Promise<string[]> => page.evaluate(() => [...document.querySelectorAll<HTMLElement>(".command-palette, .palette-results, .settings-dialog, .settings-body:not([hidden])")]
+  .filter((node) => node.scrollWidth > node.clientWidth + 1 || node.getBoundingClientRect().right > window.innerWidth + 0.5)
+  .map((node) => `${node.className} ${node.scrollWidth}>${node.clientWidth}`));
+
+/**
+ * Settings found through the palette: every row of the matrix in its language, on a desktop and on a
+ * phone with a hardware keyboard, opens on its page and, when it names one, on its group, focused
+ * and in view; closing returns the focus. A search that finds nothing, or one closed without
+ * picking a result, leaves no request behind: Settings opened next starts at its top, and Back
+ * and Forward do not land on a group either.
+ */
+async function settingsSearch(browser: import("playwright-core").Browser, url: string): Promise<void> {
+  const results: SearchResult[] = [];
+  const stale: { width: number; language: string; query: string; settingsRows: number; page: string | null; section: string | null; overflow: string[]; pass: boolean }[] = [];
+  for (const width of [1440, 390] as const) {
+    for (const language of ["en", "ko", "ja", "zh"] as const) {
+      const strings: Record<string, string> = language === "ko" ? KO : language === "ja" ? JA : language === "zh" ? ZH : {};
+      const label = (name: string): string => strings[name] ?? name;
+      const context = await browser.newContext(width === 390 ? { viewport: { width, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true, locale: language } : { viewport: { width, height: 900 }, locale: language });
+      try {
+        await context.addInitScript((settings) => localStorage.setItem("ovis:settings", settings), JSON.stringify({ ...SETTINGS, language }));
+        const page = await context.newPage();
+        const errors: string[] = [];
+        page.on("pageerror", (error) => errors.push(error.message));
+        await page.goto(url);
+        await page.locator(".conn-live").waitFor({ state: "attached" });
+        await page.locator(".composer-text").focus();
+        const close = async (): Promise<void> => {
+          await page.getByRole("button", { name: label("Close settings"), exact: true }).click();
+          await page.locator(".settings-dialog").waitFor({ state: "detached" });
+        };
+        for (const [rowLanguage, query, expectedPage, expectedSection] of MATRIX) {
+          if (rowLanguage !== language) continue;
+          const before = await focusName(page);
+          await openPalette(page, query);
+          const first = page.locator(".palette-section[data-section='settings-pages'] [role='option']").first();
+          const found = await first.count() > 0;
+          const firstText = found ? (await first.textContent())?.trim() ?? null : null;
+          let shown: { page: string | null; section: string | null; visible: boolean | null } = { page: null, section: null, visible: null };
+          let overflow: string[] = [];
+          let focusReturned = false;
+          if (found) {
+            await first.click();
+            await page.locator(".settings-dialog").waitFor();
+            await page.waitForFunction(() => document.querySelector(".settings-dialog [role='tabpanel']:not([hidden])") !== null);
+            if (expectedSection !== "-") await page.waitForFunction((section) => (document.activeElement as HTMLElement | null)?.dataset.section === section, expectedSection, { timeout: 3000 }).catch(() => undefined);
+            // a group's control drawn after the server answers is in view once it is there
+            if (expectedSection !== "-") await page.waitForFunction(() => {
+              const active = document.activeElement as HTMLElement | null;
+              const body = active?.closest(".settings-body")?.getBoundingClientRect();
+              const control = active?.querySelector("input, select, button, textarea")?.getBoundingClientRect();
+              return body !== undefined && control !== undefined && control.bottom <= body.bottom + 1;
+            }, undefined, { timeout: 3000 }).catch(() => undefined);
+            shown = await landing(page, label);
+            overflow = await sideways(page);
+            await close();
+          } else {
+            await page.keyboard.press("Escape");
+            await page.locator(".command-palette").waitFor({ state: "detached" });
+          }
+          focusReturned = await focusName(page) === before;
+          const pass = shown.page === expectedPage && (expectedSection === "-" || (shown.section === expectedSection && shown.visible === true)) && overflow.length === 0 && focusReturned;
+          results.push({ width, language, query, expected: { page: expectedPage, section: expectedSection }, first: firstText, page: shown.page, focusedSection: shown.section, sectionVisible: shown.visible, overflow, focusReturned, pass });
+        }
+        // a search that finds nothing, one closed without picking, and a 200-character unbroken one:
+        // none of them steers the Settings opened next, nor its Back and Forward
+        for (const query of ["zzqxv-nothing-matches", MATRIX.find(([rowLanguage, , , section]) => rowLanguage === language && section === "quick-replies")![1], "w".repeat(200)]) {
+          await openPalette(page, query);
+          const settingsRows = await page.locator(".palette-section[data-section='settings-pages'] [role='option']").count();
+          const overflow = await sideways(page);
+          await page.keyboard.press("Escape");
+          await page.locator(".command-palette").waitFor({ state: "detached" });
+          await openSettings(page);
+          const opened = await landing(page, label);
+          const steps: { page: string | null; section: string | null }[] = [opened];
+          if (width === 1440) {
+            await page.goBack();
+            await page.locator(".settings-dialog").waitFor({ state: "detached" });
+            await page.goForward();
+            await page.locator(".settings-dialog").waitFor();
+            await page.waitForFunction(() => document.querySelector(".settings-dialog [role='tabpanel']:not([hidden])") !== null);
+            steps.push(await landing(page, label));
+          }
+          await close();
+          const quiet = steps.every((step) => step.section === null) && (width === 390 ? opened.page === null : opened.page === "appearance");
+          const expectedRows = query.startsWith("zzq") || query.length === 200 ? 0 : 1;
+          stale.push({ width, language, query, settingsRows, page: opened.page, section: steps.find((step) => step.section !== null)?.section ?? null, overflow, pass: quiet && overflow.length === 0 && (expectedRows === 0 ? settingsRows === 0 : settingsRows > 0) });
+        }
+        assert.deepEqual(errors, [], `no page errors (${width}px, ${language})`);
+      } finally {
+        await context.close();
+      }
+    }
+  }
+  if (process.env.UI_EVIDENCE_DIR) writeFileSync(join(process.env.UI_EVIDENCE_DIR, "settings-search.json"), `${JSON.stringify({ rows: results, stale }, null, 1)}\n`);
+  assert.equal(results.length, MATRIX.length * 2, "every matrix row ran at both widths");
+  assert.deepEqual(results.filter((result) => !result.pass), [], "every matrix row opens its page and group from the first Settings result");
+  assert.deepEqual(stale.filter((result) => !result.pass), [], "no search steers a later opening of Settings");
+  console.log(`PASS ${MATRIX.length} settings searches at 1440 and 390px land on their page and group; no stale request in en, ko, ja, zh`);
+}
+
+/**
+ * Loaded after the demo's transport in the development app: the voice status the Voice input page
+ * asks for is held until the page releases it, and the observers made on the OpenAI key's group are
+ * counted, live and made.
+ */
+const HOLD_VOICE = `(() => {
+  const fetch = window.fetch, held = [];
+  let holding = true, asked = 0, made = 0;
+  window.voiceAsked = () => asked;
+  window.releaseVoice = () => { holding = false; for (const go of held.splice(0)) go(); };
+  window.fetch = (input, init) => {
+    const path = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url, location.href).pathname;
+    if (!holding || path !== "/api/voice") return fetch(input, init);
+    asked += 1;
+    return new Promise((resolve) => held.push(() => resolve(fetch(input, init))));
+  };
+  const Native = window.ResizeObserver, live = new Set();
+  window.groupObservers = () => ({ made, live: live.size });
+  window.ResizeObserver = class extends Native {
+    observe(node, options) { if (node.dataset && node.dataset.section === "openai-key") { made += 1; live.add(this); } return super.observe(node, options); }
+    disconnect() { live.delete(this); return super.disconnect(); }
+  };
+})();
+`;
+interface HeldVoice { voiceAsked: () => number; releaseVoice: () => void; groupObservers: () => { made: number; live: number } }
+
+/**
+ * The OpenAI key's group, whose form waits for the server's answer, on React's development build:
+ * StrictMode runs the landing's effect, its cleanup and the effect again, and the group is still
+ * followed into view when the held answer comes. A reader who scrolled before it came stays where
+ * they scrolled.
+ */
+async function heldGroupLanding(browser: import("playwright-core").Browser, url: string): Promise<void> {
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true, locale: "en" });
+  try {
+    await context.addInitScript((settings) => localStorage.setItem("ovis:settings", settings), JSON.stringify(SETTINGS));
+    const page = await context.newPage();
+    const errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    const body = page.locator(".settings-body:not([hidden])");
+    const observers = () => page.evaluate(() => (window as unknown as HeldVoice).groupObservers());
+    const land = async (): Promise<void> => {
+      await page.goto(url);
+      await page.locator(".conn-live").waitFor({ state: "attached" });
+      const asked = await page.evaluate(() => (window as unknown as HeldVoice).voiceAsked());
+      await openPalette(page, "OpenAI API key");
+      await page.locator(".palette-section[data-section='settings-pages'] [role='option']").first().click();
+      await page.waitForFunction((asked) => (document.activeElement as HTMLElement | null)?.dataset.section === "openai-key" && (window as unknown as HeldVoice).voiceAsked() > asked, asked);
+      assert.equal(await page.locator(".voice-key").count(), 0, "the key's form waits for the held answer");
+    };
+    await land();
+    const replayed = await observers();
+    assert.equal(replayed.live, 1, `one observer still follows the group after StrictMode's cleanup of the landing (${JSON.stringify(replayed)})`);
+    assert.ok(replayed.made >= 2, `the follow was set up again after the replay's cleanup (${replayed.made} observers made)`);
+    await page.evaluate(() => (window as unknown as HeldVoice).releaseVoice());
+    await page.locator(".voice-key input").waitFor();
+    await page.waitForFunction(() => {
+      const body = document.querySelector(".settings-body:not([hidden])")?.getBoundingClientRect();
+      const control = document.querySelector("[data-section='openai-key'] input")?.getBoundingClientRect();
+      return body !== undefined && control !== undefined && control.top >= body.top - 1 && control.bottom <= body.bottom + 1;
+    });
+
+    await land();
+    assert.ok(await body.evaluate((node) => node.scrollTop) > 0, "the landing scrolled to the group");
+    // the reader goes back to the page's top with the hardware keyboard before the answer comes
+    await page.keyboard.press("Home");
+    await page.waitForFunction(() => document.querySelector(".settings-body:not([hidden])")?.scrollTop === 0);
+    await page.evaluate(() => (window as unknown as HeldVoice).releaseVoice());
+    await page.locator(".voice-key input").waitFor();
+    // the frames after the form arrives, when an observer still following would have scrolled to it
+    await page.evaluate(() => new Promise<void>((done) => requestAnimationFrame(() => requestAnimationFrame(() => done()))));
+    assert.equal(await body.evaluate((node) => node.scrollTop), 0, "a reader who scrolled away is not pulled back");
+    assert.equal((await observers()).live, 0, "the reader's scroll ended the follow");
+    assert.deepEqual(errors, []);
+    console.log("PASS under development StrictMode the OpenAI key's group is followed into view when its held form arrives, and a reader's scroll ends it");
+  } finally {
+    await context.close();
+  }
+}
+
 try {
   await buildDemoApp(app);
-  const index = join(app, "index.html");
-  writeFileSync(index, readFileSync(index, "utf8").replace(/<script type="module"/, () => `<script src="./demo-transport.js"></script>${DEMO_FILE_PREVIEW_SCRIPT}\n    <script type="module"`));
+  await buildDevelopmentDemoApp(devApp);
+  writeFileSync(join(devApp, "hold-voice.js"), HOLD_VOICE);
+  for (const [dir, extra] of [[app, ""], [devApp, `<script src="./hold-voice.js"></script>`]] as const) {
+    const index = join(dir, "index.html");
+    writeFileSync(index, readFileSync(index, "utf8").replace(/<script type="module"/, () => `<script src="./demo-transport.js"></script>${extra}${DEMO_FILE_PREVIEW_SCRIPT}\n    <script type="module"`));
+  }
+  const roots = { "/herdr-web-ui/demo/app/": app, "/herdr-web-ui/demo/dev/": devApp };
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
     const path = new URL(request.url).pathname;
-    const prefix = "/herdr-web-ui/demo/app/";
-    if (!path.startsWith(prefix)) return new Response("not found", { status: 404 });
+    const [prefix, root] = Object.entries(roots).find(([prefix]) => path.startsWith(prefix)) ?? [];
+    if (prefix === undefined || root === undefined) return new Response("not found", { status: 404 });
     let file: string;
     try { file = decodeURIComponent(path.slice(prefix.length)); }
     catch { return new Response("bad path", { status: 400 }); }
     if (!file || file.endsWith("/")) file += "index.html";
     if (file.split("/").includes("..") || file.includes("\\")) return new Response("bad path", { status: 400 });
-    const body = Bun.file(join(app, file));
+    const body = Bun.file(join(root, file));
     return await body.exists() ? new Response(body) : new Response("not found", { status: 404 });
   } });
   const url = `http://127.0.0.1:${server.port}/herdr-web-ui/demo/app/`;
+  const devUrl = `http://127.0.0.1:${server.port}/herdr-web-ui/demo/dev/`;
   try {
     const browser = await chromium.launch({ executablePath: process.env.CHROME_PATH ?? chromium.executablePath(), headless: true, args: ["--no-sandbox"] });
     try {
@@ -80,7 +354,7 @@ try {
         const context = await browser.newContext({ viewport: { width, height: 760 }, isMobile: true, hasTouch: true, locale: language });
         try {
           await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: new URL(url).origin });
-          await context.addInitScript((settings) => { if (localStorage.getItem("herdr-web-ui:settings") === null) localStorage.setItem("herdr-web-ui:settings", settings); }, JSON.stringify({ ...SETTINGS, language }));
+          await context.addInitScript((settings) => { if (localStorage.getItem("ovis:settings") === null) localStorage.setItem("ovis:settings", settings); }, JSON.stringify({ ...SETTINGS, language }));
           const page = await context.newPage();
           const errors: string[] = [];
           page.on("pageerror", (error) => errors.push(error.message));
@@ -108,9 +382,9 @@ try {
               await page.locator(".voice-key").waitFor();
               const dictation = page.getByLabel(label("Dictation language"), { exact: true });
               await dictation.selectOption("hu-HU");
-              await page.waitForFunction(() => JSON.parse(localStorage.getItem("herdr-web-ui:settings")!).voiceLanguage === "hu-HU");
+              await page.waitForFunction(() => JSON.parse(localStorage.getItem("ovis:settings")!).voiceLanguage === "hu-HU");
               assert.equal(await dictation.inputValue(), "hu-HU");
-              assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("herdr-web-ui:settings")!).language), language,
+              assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("ovis:settings")!).language), language,
                 "dictation selection does not change the display language");
               await dictation.selectOption("auto");
             }
@@ -165,8 +439,8 @@ try {
               const drawn = (mode: string, id: string): Promise<unknown> => page.waitForFunction(([mode, id]) => document.documentElement.dataset.theme === mode && document.documentElement.dataset.palette === id && getComputedStyle(document.documentElement).colorScheme === mode, [mode, id]);
               /** The theme keys of the saved record and of the second key old code never touches. */
               const stored = () => page.evaluate(() => {
-                const record = JSON.parse(localStorage.getItem("herdr-web-ui:settings")!) as Record<string, string>;
-                const themes = JSON.parse(localStorage.getItem("herdr-web-ui:themes")!) as Record<string, string>;
+                const record = JSON.parse(localStorage.getItem("ovis:settings")!) as Record<string, string>;
+                const themes = JSON.parse(localStorage.getItem("ovis:themes")!) as Record<string, string>;
                 return { palette: record["palette"], darkTheme: record["darkTheme"], lightTheme: record["lightTheme"], second: { darkTheme: themes["darkTheme"], lightTheme: themes["lightTheme"] } };
               });
               const xtermTokens = (mode: "dark" | "light", id: ThemeId): (readonly [string, string])[] => {
@@ -219,7 +493,7 @@ try {
               await pickers.light.selectOption("tokyo-night");
               await drawn("dark", "tokyo-night");
               assert.deepEqual(await stored(), { palette: "tokyo-night", darkTheme: "tokyo-night", lightTheme: "tokyo-night", second: { darkTheme: "tokyo-night", lightTheme: "tokyo-night" } }, "a dark theme on the light side is kept as chosen");
-              assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("herdr-web-ui:settings")!).theme), "light", "the mode stays Light while the row drawn is dark");
+              assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("ovis:settings")!).theme), "light", "the mode stays Light while the row drawn is dark");
               // a side chosen by hand keeps its theme when the other side picks a pair
               await themes.getByRole("button", { name: "Dark", exact: true }).tap();
               await pickers.dark.selectOption("gruvbox");
@@ -243,7 +517,7 @@ try {
             const replies = page.locator(".quick-replies-list li");
             assert.ok(await replies.count() > 0);
             await page.getByRole("button", { name: "Remove quick reply 1", exact: true }).tap();
-            assert.equal(await replies.count(), (JSON.parse(await page.evaluate(() => localStorage.getItem("herdr-web-ui:settings")!)) as { quickReplies: string[] }).quickReplies.length);
+            assert.equal(await replies.count(), (JSON.parse(await page.evaluate(() => localStorage.getItem("ovis:settings")!)) as { quickReplies: string[] }).quickReplies.length);
             await page.getByRole("button", { name: "Restore defaults", exact: true }).tap();
           }
           assert.deepEqual(errors, []);
@@ -308,7 +582,7 @@ try {
 
       const phone = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, locale: "en-US" });
       try {
-        await phone.addInitScript((settings) => localStorage.setItem("herdr-web-ui:settings", settings), JSON.stringify(SETTINGS));
+        await phone.addInitScript((settings) => localStorage.setItem("ovis:settings", settings), JSON.stringify(SETTINGS));
         // every move of the history, for historyHolds to tell when a step never lands
         await phone.addInitScript(() => {
           const trace: string[] = [];
@@ -370,7 +644,7 @@ try {
         await openSettingsPage(page, "Chat");
         await dialog.getByRole("button", { name: "Back to settings", exact: true }).tap();
         await list.waitFor();
-        await historyHolds(page, "the Back control to the list", () => (history.state as Record<string, { depth: number }> | null)?.["herdr-web-ui:settings"]?.depth === 1);
+        await historyHolds(page, "the Back control to the list", () => (history.state as Record<string, { depth: number }> | null)?.["ovis:settings"]?.depth === 1);
         await page.goBack();
         await page.locator(".settings-dialog").waitFor({ state: "detached" });
         console.log("PASS the Back control in the dialog and the system Back button share one history");
@@ -381,11 +655,11 @@ try {
         await dialog.getByRole("button", { name: "Edit key bar", exact: true }).tap();
         await page.getByRole("button", { name: "Close settings", exact: true }).tap();
         await page.locator(".settings-dialog").waitFor({ state: "detached" });
-        await historyHolds(page, "the X from the key bar editor", () => (history.state as Record<string, unknown> | null)?.["herdr-web-ui:settings"] === undefined);
+        await historyHolds(page, "the X from the key bar editor", () => (history.state as Record<string, unknown> | null)?.["ovis:settings"] === undefined);
         // and a new opening starts on the list, with one entry
         await openSettings(page);
         await list.waitFor();
-        await historyHolds(page, "a new opening", () => (history.state as Record<string, { depth: number }> | null)?.["herdr-web-ui:settings"]?.depth === 1);
+        await historyHolds(page, "a new opening", () => (history.state as Record<string, { depth: number }> | null)?.["ovis:settings"]?.depth === 1);
         // a reload keeps the history but not the dialog: its entries are stepped out of. The step lands
         // when the browser gets to it, which on a slow device is after the app has drawn itself from an
         // address that still names Settings: held back until then here, it must not show the dialog
@@ -395,7 +669,7 @@ try {
         await page.reload();
         await page.locator(".conn-live").waitFor({ state: "attached" });
         await page.evaluate(() => (window as unknown as { releaseStepsBack: () => void }).releaseStepsBack());
-        await historyHolds(page, "the reload", () => (history.state as Record<string, unknown> | null)?.["herdr-web-ui:settings"] === undefined);
+        await historyHolds(page, "the reload", () => (history.state as Record<string, unknown> | null)?.["ovis:settings"] === undefined);
         assert.equal(await page.locator(".settings-dialog").count(), 0, "a reload does not reopen Settings");
         assert.equal(await page.evaluate(() => (window as unknown as { settingsShown: boolean }).settingsShown), false, "a reload never shows Settings, however late its step back lands");
         assert.deepEqual(errors, []);
@@ -405,10 +679,10 @@ try {
         // steps back to is the one the link opened, whose address names Settings still
         await page.goto(`${url}?settings=about`);
         await dialog.getByRole("tabpanel", { name: "About", exact: true }).waitFor();
-        await historyHolds(page, "a link to Settings", () => (history.state as Record<string, { page: string; depth: number }> | null)?.["herdr-web-ui:settings"]?.page === "about");
+        await historyHolds(page, "a link to Settings", () => (history.state as Record<string, { page: string; depth: number }> | null)?.["ovis:settings"]?.page === "about");
         await page.reload();
         await page.locator(".conn-live").waitFor({ state: "attached" });
-        await historyHolds(page, "the reload on a linked Settings", () => (history.state as Record<string, unknown> | null)?.["herdr-web-ui:settings"] === undefined && !new URLSearchParams(window.location.search).has("settings"));
+        await historyHolds(page, "the reload on a linked Settings", () => (history.state as Record<string, unknown> | null)?.["ovis:settings"] === undefined && !new URLSearchParams(window.location.search).has("settings"));
         assert.equal(await page.locator(".settings-dialog").count(), 0, "a reload closes the Settings a link opened");
         assert.deepEqual(errors, []);
         console.log("PASS a link to Settings opens it, and a reload there closes it");
@@ -421,7 +695,7 @@ try {
         await openSettingsPage(page, "Terminal");
         await dialog.getByRole("button", { name: "Edit key bar", exact: true }).tap();
         await page.getByRole("dialog", { name: "Key bar", exact: true }).waitFor();
-        await historyHolds(page, "the key bar editor", () => (history.state as Record<string, { depth: number }> | null)?.["herdr-web-ui:settings"]?.depth === 3);
+        await historyHolds(page, "the key bar editor", () => (history.state as Record<string, { depth: number }> | null)?.["ovis:settings"]?.depth === 3);
         await page.evaluate(() => { history.pushState({ route: "markerless" }, ""); history.pushState({ route: "after-markerless" }, ""); });
         await page.goBack();
         await page.locator(".settings-dialog").waitFor({ state: "detached" });
@@ -433,7 +707,7 @@ try {
         await page.goBack();
         await historyHolds(page, "Back over the buried entries", () => {
           const state = history.state as Record<string, unknown> | null;
-          return state?.["herdr-web-ui:settings"] === undefined && state?.["route"] === undefined;
+          return state?.["ovis:settings"] === undefined && state?.["route"] === undefined;
         });
         assert.equal(await page.locator(".settings-dialog").count(), 0, "Back under an unrelated entry does not reopen Settings");
         assert.equal(await page.evaluate(() => (window as unknown as { settingsShown: boolean }).settingsShown), false, "the buried entries are stepped over without showing Settings");
@@ -446,7 +720,7 @@ try {
       const desktop = await browser.newContext({ viewport: { width: 1280, height: 800 }, locale: "en-US" });
       try {
         await desktop.addInitScript((settings) => {
-          if (localStorage.getItem("herdr-web-ui:settings") === null) localStorage.setItem("herdr-web-ui:settings", settings);
+          if (localStorage.getItem("ovis:settings") === null) localStorage.setItem("ovis:settings", settings);
         }, JSON.stringify(SETTINGS));
         const page = await desktop.newPage();
         const errors: string[] = [];
@@ -478,12 +752,12 @@ try {
         await page.getByRole("group", { name: "Theme", exact: true }).getByRole("button", { name: "Light", exact: true }).click();
         await page.waitForFunction(() => document.documentElement.dataset.palette === "dracula" && document.documentElement.dataset.theme === "dark" && getComputedStyle(document.documentElement).colorScheme === "dark");
         assert.equal(await page.getByRole("group", { name: "Theme", exact: true }).getByRole("button", { name: "Light", exact: true }).getAttribute("aria-pressed"), "true");
-        assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("herdr-web-ui:settings")!).theme), "light");
+        assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("ovis:settings")!).theme), "light");
         if (process.env.UI_EVIDENCE_DIR) await page.screenshot({ path: join(process.env.UI_EVIDENCE_DIR, "dracula-light-side-1280.png"), animations: "disabled" });
         await page.evaluate(() => {
-          const settings = JSON.parse(localStorage.getItem("herdr-web-ui:settings")!);
-          localStorage.setItem("herdr-web-ui:settings", JSON.stringify({ ...settings, theme: "light", lightTheme: "not-a-theme" }));
-          localStorage.setItem("herdr-web-ui:themes", JSON.stringify({ darkTheme: "vesper", lightTheme: "not-a-theme" }));
+          const settings = JSON.parse(localStorage.getItem("ovis:settings")!);
+          localStorage.setItem("ovis:settings", JSON.stringify({ ...settings, theme: "light", lightTheme: "not-a-theme" }));
+          localStorage.setItem("ovis:themes", JSON.stringify({ darkTheme: "vesper", lightTheme: "not-a-theme" }));
         });
         await page.reload();
         await page.locator(".conn-live").waitFor({ state: "attached" });
@@ -493,7 +767,7 @@ try {
         await openSettings(page);
         // beside the list, turning pages is one step however many are turned
         for (const name of ["Chat", "Shortcuts", "About"]) await openSettingsPage(page, name);
-        await page.waitForFunction(() => (history.state as Record<string, { page: string; depth: number }> | null)?.["herdr-web-ui:settings"]?.page === "about");
+        await page.waitForFunction(() => (history.state as Record<string, { page: string; depth: number }> | null)?.["ovis:settings"]?.page === "about");
         assert.equal((await entryOf(page))?.depth, 1);
         await page.goBack();
         await page.locator(".settings-dialog").waitFor({ state: "detached" });
@@ -502,7 +776,7 @@ try {
         await dialogOf(page).getByRole("tabpanel", { name: "About", exact: true }).waitFor();
         await page.keyboard.press("Escape");
         await page.locator(".settings-dialog").waitFor({ state: "detached" });
-        await page.waitForFunction(() => (history.state as Record<string, unknown> | null)?.["herdr-web-ui:settings"] === undefined);
+        await page.waitForFunction(() => (history.state as Record<string, unknown> | null)?.["ovis:settings"] === undefined);
         assert.deepEqual(errors, []);
         console.log("PASS on a desktop Back closes Settings in one step, Forward reopens its page, Escape takes the entry off");
 
@@ -510,7 +784,7 @@ try {
         await openSettings(page);
         await openSettingsPage(page, "Terminal");
         await page.setViewportSize({ width: 390, height: 844 });
-        await page.waitForFunction(() => (history.state as Record<string, { depth: number }> | null)?.["herdr-web-ui:settings"]?.depth === 2);
+        await page.waitForFunction(() => (history.state as Record<string, { depth: number }> | null)?.["ovis:settings"]?.depth === 2);
         await page.goBack();
         await dialogOf(page).getByRole("tablist").waitFor();
         assert.equal(await dialogOf(page).getByRole("tabpanel").count(), 0, "narrowed, Back from the page shows the list");
@@ -522,13 +796,13 @@ try {
         await page.getByRole("dialog", { name: "Key bar", exact: true }).waitFor();
         await page.setViewportSize({ width: 1280, height: 800 });
         // the rebuilt stack, not the step the widening passes through
-        await page.waitForFunction(() => { const entry = (history.state as Record<string, { page: string; keyBar: boolean; depth: number }> | null)?.["herdr-web-ui:settings"]; return entry?.depth === 2 && entry.page === "terminal" && entry.keyBar === true; });
+        await page.waitForFunction(() => { const entry = (history.state as Record<string, { page: string; keyBar: boolean; depth: number }> | null)?.["ovis:settings"]; return entry?.depth === 2 && entry.page === "terminal" && entry.keyBar === true; });
         await page.goBack();
         await dialogOf(page).getByRole("tabpanel", { name: "Terminal", exact: true }).waitFor();
         assert.equal(await page.locator(".key-bar-settings").count(), 0, "widened, Back from the editor shows the Terminal page");
         await page.goBack();
         await page.locator(".settings-dialog").waitFor({ state: "detached" });
-        await page.waitForFunction(() => (history.state as Record<string, unknown> | null)?.["herdr-web-ui:settings"] === undefined);
+        await page.waitForFunction(() => (history.state as Record<string, unknown> | null)?.["ovis:settings"] === undefined);
         assert.deepEqual(errors, []);
         console.log("PASS a window that changes width with Settings open keeps Back to the steps it shows");
 
@@ -538,25 +812,28 @@ try {
         await page.goto(`${url}?ws=${infra.split(":")[0]}&pane=${encodeURIComponent(infra)}&file=README.md&settings=about`);
         await dialogOf(page).getByRole("tabpanel", { name: "About", exact: true }).waitFor();
         await page.locator("aside.file-panel .file-viewer").waitFor();
-        await historyHolds(page, "a link to a file and Settings", () => (history.state as Record<string, unknown> | null)?.["herdr-web-ui:file-preview"] !== undefined);
+        await historyHolds(page, "a link to a file and Settings", () => (history.state as Record<string, unknown> | null)?.["ovis:file-preview"] !== undefined);
         await page.reload();
         await page.locator(".conn-live").waitFor({ state: "attached" });
         await page.locator("aside.file-panel .file-viewer").waitFor();
         await historyHolds(page, "the reload on a preview over Settings", () => {
           const address = new URLSearchParams(window.location.search);
-          return address.get("file") === "README.md" && !address.has("settings") && (history.state as Record<string, unknown> | null)?.["herdr-web-ui:settings"] === undefined;
+          return address.get("file") === "README.md" && !address.has("settings") && (history.state as Record<string, unknown> | null)?.["ovis:settings"] === undefined;
         });
         assert.equal(await page.locator(".settings-dialog").count(), 0, "a reload on a preview over Settings closes Settings");
         assert.equal(await page.locator("aside.file-panel .file-viewer").count(), 1, "a reload on a preview over Settings keeps the file open");
         await page.goBack();
         await page.locator("aside.file-panel .file-viewer").waitFor({ state: "detached" });
-        await historyHolds(page, "Back from the reloaded preview", () => (history.state as Record<string, unknown> | null)?.["herdr-web-ui:settings"] === undefined);
+        await historyHolds(page, "Back from the reloaded preview", () => (history.state as Record<string, unknown> | null)?.["ovis:settings"] === undefined);
         assert.equal(await page.locator(".settings-dialog").count(), 0, "Back from the reloaded preview does not reopen Settings");
         assert.deepEqual(errors, []);
         console.log("PASS a reload on a preview opened over Settings closes Settings and keeps the file");
       } finally {
         await desktop.close();
       }
+
+      await settingsSearch(browser, url);
+      await heldGroupLanding(browser, devUrl);
     } finally {
       await browser.close();
       console.log("CLEANUP browser closed");
@@ -567,5 +844,6 @@ try {
   }
 } finally {
   rmSync(app, { recursive: true, force: true });
-  console.log("CLEANUP disposable demo app removed");
+  rmSync(devApp, { recursive: true, force: true });
+  console.log("CLEANUP disposable demo apps removed");
 }

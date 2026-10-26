@@ -46,7 +46,7 @@ function fixtureSettings() {
 
 /** A real app page and local API; the injected transport cannot reach the production receiver. */
 export async function checkTelemetrySettings(browser: Browser): Promise<void> {
-  const root = mkdtempSync(join(tmpdir(), "herdr-web-ui-telemetry-regression-"));
+  const root = mkdtempSync(join(tmpdir(), "ovis-telemetry-regression-"));
   const serverState = join(root, "server-state");
   const telemetryState = join(root, "telemetry-state");
   const sent: TelemetryEvent[] = [];
@@ -102,7 +102,7 @@ export async function checkTelemetrySettings(browser: Browser): Promise<void> {
 
     context = await browser.newContext({ viewport: { width: 1280, height: 800 }, locale: "en-US" });
     await context.addInitScript((settings) => {
-      localStorage.setItem("herdr-web-ui:settings", JSON.stringify(settings));
+      localStorage.setItem("ovis:settings", JSON.stringify(settings));
     }, fixture);
     const page = await context.newPage();
     page.setDefaultTimeout(10_000);
@@ -198,7 +198,7 @@ export async function checkTelemetrySettings(browser: Browser): Promise<void> {
     await page.reload();
     await statusRead;
     await page.locator(".conn-live").waitFor();
-    await page.waitForTimeout(500);
+    await page.waitForTimeout(500); // fixed wait: an opted-out install may send no settings snapshot
     assert.equal(changes.slice(beforeReload).some((change) => change.settings !== undefined), false, "an opted-out install sends no settings snapshot to its server");
     assert.deepEqual(errors, []);
     console.log("PASS telemetry settings: current notice reacknowledged, snapshot first with the acknowledgement, safe preview and snapshot update, opt-out stops pending delivery and later snapshots");

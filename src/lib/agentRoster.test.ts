@@ -22,7 +22,7 @@ function machine(id: string, state: MachineState, panes: [id: string, status: Ag
 
 describe("agent roster", () => {
   it("keeps the pinned card first in pin order and each PC's rows in its own Activity order", () => {
-    const machines = [machine("local", "connected", [["a", "done", 1], ["b", "blocked"], ["c", "working"]]), machine("remote", "connected", [["d", "idle"], ["e", "blocked"]])];
+    const machines = [machine("local", "connected", [["a", "done"], ["b", "blocked"], ["c", "working"]]), machine("remote", "connected", [["d", "idle"], ["e", "blocked"]])];
     const seqs = new Map<string, ReadonlyMap<string, number>>([["local", new Map([["a", 1], ["b", 2], ["c", 3]])], ["remote", new Map([["d", 9], ["e", 1]])]]);
     const split = agentRoster(machines, { order: "activity", seqs: (id) => seqs.get(id) ?? new Map(), status: (_id, pane) => pane.agent_status, pinned: [sidebarPinKey("remote", "d"), sidebarPinKey("local", "c")] });
     const key = ({ machine, entry }: { machine: Machine; entry: { pane: HerdrPane } }) => `${machine.id}/${entry.pane.pane_id}`;

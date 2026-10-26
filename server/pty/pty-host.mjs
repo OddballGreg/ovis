@@ -21,7 +21,12 @@
  *   exit:   mirrors the child's exit code
  */
 
-import * as pty from "@lydell/node-pty";
+// node-pty must never load inside Bun (AGENTS.md): a `node` that is Bun stops here, before the import
+if (process.versions.bun) {
+  process.stderr.write("pty-host: this is Bun, not Node; node-pty must not load here\n");
+  process.exit(70);
+}
+const pty = await import("@lydell/node-pty");
 
 const [colsRaw, rowsRaw, command, ...args] = process.argv.slice(2);
 if (!command) {
@@ -34,6 +39,7 @@ const rows = Number.parseInt(rowsRaw ?? "", 10);
 
 // The bridge's bearer token never reaches the attach, however this host was launched.
 const env = { ...process.env, TERM: "xterm-256color" };
+delete env.OVIS_TOKEN;
 delete env.HERDR_WEB_TOKEN;
 
 const term = pty.spawn(command, args, {

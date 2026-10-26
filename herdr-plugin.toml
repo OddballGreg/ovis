@@ -1,6 +1,6 @@
-id = "devswha.herdr-web-ui"
+id = "devswha.ovis"
 name = "Ovis"
-version = "0.4.13"
+version = "0.4.16"
 min_herdr_version = "0.9.0"
 description = "Ovis, the browser and phone client for herdr: chat and live terminal for every agent pane, remote PCs over SSH, web push alerts"
 platforms = ["linux", "macos", "windows"]
@@ -29,6 +29,11 @@ platforms = ["linux", "macos"]
 [[build]]
 command = ["bun", "run", "build"]
 platforms = ["windows"]
+
+# the release's Rust PTY host, checked against its SHA-256; without one, terminals use the Node sidecar
+[[build]]
+command = ["sh", "scripts/with-bun.sh", "scripts/pty-sidecar.ts", "install"]
+platforms = ["linux", "macos"]
 
 # One-shot per herdr start: brings the bridge up if it is not already answering.
 [[startup]]
@@ -99,12 +104,12 @@ platforms = ["windows"]
 id = "phone"
 title = "Phone setup"
 contexts = ["workspace"]
-command = ["herdr", "plugin", "pane", "open", "--plugin", "devswha.herdr-web-ui", "--entrypoint", "phone", "--placement", "zoomed", "--focus"]
+command = ["herdr", "plugin", "pane", "open", "--plugin", "devswha.ovis", "--entrypoint", "phone", "--placement", "zoomed", "--focus"]
 platforms = ["linux", "macos"]
 
 [[actions]]
 id = "phone-windows"
 title = "Phone setup"
 contexts = ["workspace"]
-command = ["herdr", "plugin", "pane", "open", "--plugin", "devswha.herdr-web-ui", "--entrypoint", "phone-windows", "--placement", "zoomed", "--focus"]
+command = ["herdr", "plugin", "pane", "open", "--plugin", "devswha.ovis", "--entrypoint", "phone-windows", "--placement", "zoomed", "--focus"]
 platforms = ["windows"]

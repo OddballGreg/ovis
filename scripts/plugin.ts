@@ -20,10 +20,12 @@
  *   token and any overrides are read from `env` and `.env` in HERDR_PLUGIN_CONFIG_DIR.
  */
 
+import { mergeEnvLayers } from "../server/legacy-env.ts";
+import { defaultStateDir } from "../server/update-state.ts";
 import { spawn, spawnSync } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, copyFileSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
-import { delimiter, join, resolve } from "node:path";
+import { basename, delimiter, dirname, join, resolve } from "node:path";
 
 import qrcode from "qrcode-generator";
 
@@ -42,13 +44,24 @@ import { descendantProcesses, windowsArgv, windowsProcessTable } from "../server
  */
 const ENV_FILES = ["env", ".env"];
 const ROOT = resolve(process.env["HERDR_PLUGIN_ROOT"] ?? join(import.meta.dir, ".."));
-const DEFAULT_STATE_DIR = join(homedir(), ".local", "state", "herdr-web-ui");
-const MANAGED_STATE_DIR = join(herdrStateDir(process.env, platform(), homedir()), "plugins", "devswha.herdr-web-ui");
+/** the dir under its Ovis name, or under the name before the rename while only that one exists */
+function ownDir(parent: string): string {
+  const legacy = join(parent, "herdr-web-ui");
+  const next = join(parent, "ovis");
+  return existsSync(next) || !existsSync(legacy) ? next : legacy;
+}
+const DEFAULT_STATE_DIR = ownDir(join(homedir(), ".local", "state"));
+const PLUGIN_ID = "devswha.ovis";
+/** the id before the rename: an install from then keeps it until the installer moves it to PLUGIN_ID */
+const LEGACY_PLUGIN_ID = "devswha.herdr-web-ui";
+const HERDR_PLUGIN_STATE = join(herdrStateDir(process.env, platform(), homedir()), "plugins");
+const MANAGED_STATE_DIR = [PLUGIN_ID, LEGACY_PLUGIN_ID].map((id) => join(HERDR_PLUGIN_STATE, id)).find((dir) => existsSync(dir)) ?? join(HERDR_PLUGIN_STATE, PLUGIN_ID);
 // run by hand, without herdr's HERDR_PLUGIN_STATE_DIR: a server started from a checkout keeps its
 // own dir while it runs; otherwise the dir herdr gives the plugin, where its startup hook wrote
-const STATE_DIR = process.env["HERDR_PLUGIN_STATE_DIR"]
-  ?? (pidIn(join(DEFAULT_STATE_DIR, "server.pid")) !== null || !existsSync(MANAGED_STATE_DIR) ? DEFAULT_STATE_DIR : MANAGED_STATE_DIR);
-const CONFIG_DIR = process.env["HERDR_PLUGIN_CONFIG_DIR"] ?? herdrConfigDir() ?? join(homedir(), ".config", "herdr-web-ui");
+const STATE_DIR = runningStateDir(process.env["HERDR_PLUGIN_STATE_DIR"]
+  ?? (pidIn(join(DEFAULT_STATE_DIR, "server.pid")) !== null || !existsSync(MANAGED_STATE_DIR) ? DEFAULT_STATE_DIR : MANAGED_STATE_DIR));
+const CONFIG_DIR = process.env["HERDR_PLUGIN_CONFIG_DIR"] ?? herdrConfigDir() ?? ownDir(join(homedir(), ".config"));
+adoptLegacyConfig(CONFIG_DIR);
 const PID_FILE = join(STATE_DIR, "server.pid");
 const LOG_FILE = join(STATE_DIR, "server.log");
 /** the server needs a moment to bind and open its first herdr connection */
@@ -61,8 +74,8 @@ const KILL_WAIT_MS = 3_000;
 const SERVE_TIMEOUT_MS = 180_000;
 /** how to come back to `phone` once Tailscale is set up: an action's output goes to herdr's log, not a terminal */
 const PHONE_AGAIN = platform() === "win32"
-  ? "irm https://herdrweb.dev/install.ps1 | iex"
-  : "curl -fsSL https://herdrweb.dev/install.sh | sh";
+  ? "irm https://ovis.sh/install.ps1 | iex"
+  : "curl -fsSL https://ovis.sh/install.sh | sh";
 
 /**
  * Run by hand (`pair` on a headless PC), herdr's env is not there to name the config dir:
@@ -71,12 +84,34 @@ const PHONE_AGAIN = platform() === "win32"
 function herdrConfigDir(): string | null {
   const herdr = Bun.which("herdr");
   if (herdr === null) return null;
-  try {
-    const result = Bun.spawnSync([herdr, "plugin", "config-dir", "devswha.herdr-web-ui"], { windowsHide: true, stdout: "pipe", stderr: "ignore", timeout: 3000 });
-    const dir = result.exitCode === 0 ? result.stdout.toString().trim() : "";
-    return dir !== "" && ENV_FILES.some((name) => existsSync(join(dir, name))) ? dir : null;
-  } catch {
-    return null;
+  for (const id of [PLUGIN_ID, LEGACY_PLUGIN_ID]) {
+    try {
+      const result = Bun.spawnSync([herdr, "plugin", "config-dir", id], { windowsHide: true, stdout: "pipe", stderr: "ignore", timeout: 3000 });
+      const dir = result.exitCode === 0 ? result.stdout.toString().trim() : "";
+      if (dir !== "" && ENV_FILES.some((name) => existsSync(join(dir, name)))) return dir;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/**
+ * herdr keeps a plugin's config dir by its id (`plugins/config/<id>`), so the settings and token
+ * an install wrote under the old id are copied to the new id's dir the first time it has none.
+ * The old dir stays: the plugin under the old id, still installed until the installer removes
+ * it, reads it too.
+ */
+function adoptLegacyConfig(dir: string): void {
+  if (basename(dir) !== PLUGIN_ID || ENV_FILES.some((name) => existsSync(join(dir, name)))) return;
+  const legacy = join(dirname(dir), LEGACY_PLUGIN_ID);
+  for (const name of ENV_FILES) {
+    const from = join(legacy, name);
+    if (!existsSync(from)) continue;
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    copyFileSync(from, join(dir, name));
+    // the token is in there: keep the old file's owner-only mode
+    chmodSync(join(dir, name), statSync(from).mode & 0o777);
   }
 }
 
@@ -98,12 +133,12 @@ const CONFIG_FILES = ENV_FILES.map((name) => join(CONFIG_DIR, name)).filter((fil
 const fileVars = CONFIG_FILES.map(readEnvFile);
 /** keys both files set to different values: `.env` wins, which someone editing `env` would not expect */
 const shadowed = fileVars.length === 2 ? Object.keys(fileVars[0]!).filter((key) => key in fileVars[1]! && fileVars[0]![key] !== fileVars[1]![key]) : [];
-const env = { ...process.env, ...Object.assign({}, ...fileVars) as Record<string, string> };
+const env = mergeEnvLayers([process.env, ...fileVars]);
 /** HERDR_SOCKET the user put in the config files: it names the session to show, so herdr's own socket does not replace it */
 const configuredSocket = fileVars.some((vars) => (vars["HERDR_SOCKET"] ?? "") !== "");
 const PATH_KEY = platform() === "win32" ? Object.keys(env).sort().find(key => key.toLowerCase() === "path") ?? "PATH" : "PATH";
 /** the app's own state, as the server finds it (server/update-state.ts): the same path with or without herdr's env */
-const APP_STATE_DIR = env["HERDR_WEB_STATE_DIR"] || join(env["XDG_CONFIG_HOME"] || join(homedir(), ".config"), "herdr-web-ui");
+const APP_STATE_DIR = defaultStateDir(env);
 /** the port a start took because the default could not be opened; absent while the default serves */
 const PORT_FILE = join(APP_STATE_DIR, "plugin-port");
 /** a PORT the user set is theirs: it is never swapped for another */
@@ -121,7 +156,7 @@ let origin = originOf(port);
 function toolPath(): string {
   const current = (env[PATH_KEY] ?? "").split(delimiter).filter(Boolean);
   const home = homedir();
-  const extra = [join(home, ".bun", "bin"), join(home, ".local", "bin"), join(home, ".local", "share", "herdr-web-ui", "node", "bin")];
+  const extra = [join(home, ".bun", "bin"), join(home, ".local", "bin"), join(home, ".local", "share", "ovis", "node", "bin"), join(home, ".local", "share", "herdr-web-ui", "node", "bin")];
   return [...current, ...extra.filter((dir) => existsSync(dir) && !current.includes(dir))].join(delimiter);
 }
 
@@ -187,6 +222,17 @@ function recordedPid(): number | null {
 }
 
 /** the live process a pid file names, or null */
+/**
+ * herdr keeps a plugin's state dir by its id too. A server started under the old id keeps its pid
+ * in the old id's dir until it stops (the installer stops it before moving the install to the new
+ * id; `herdr plugin update` never moves the id), so `stop` and `status` read that dir while it runs.
+ */
+function runningStateDir(dir: string): string {
+  if (basename(dir) !== PLUGIN_ID || pidIn(join(dir, "server.pid")) !== null) return dir;
+  const legacy = join(dirname(dir), LEGACY_PLUGIN_ID);
+  return pidIn(join(legacy, "server.pid")) !== null ? legacy : dir;
+}
+
 function pidIn(file: string): number | null {
   if (!existsSync(file)) return null;
   const pid = Number(readFileSync(file, "utf8").trim());
@@ -208,18 +254,53 @@ function warnShadowed(): void {
 
 /**
  * A start's failure, in full to herdr's plugin log and in one line to server.log: the Windows
- * launcher runs this in a hidden console, so the log is all it can show.
+ * launcher runs this in a hidden console, so the log is all it can show. A start that opened its
+ * server's log passes that handle, so the line stays with its run if the log has moved meanwhile.
  */
-function failStart(message: string, detail = ""): number {
+function failStart(message: string, detail = "", log: number | string = LOG_FILE): number {
   process.stderr.write(`${message}${detail}\n`);
-  appendFileSync(LOG_FILE, `start: ${message}\n`);
+  appendFileSync(log, `start: ${message}\n`);
   return 1;
 }
 
-/** What the server wrote since `offset`: its own error is in the last lines. */
-function logSince(offset: number): string {
-  const lines = readFileSync(LOG_FILE).subarray(offset).toString("utf8").split("\n").filter((line) => line.trim() !== "");
+/** A failed start reads at most this much of the log's end, so a log of any size costs the same. */
+const LOG_TAIL_BYTES = 64 * 1024;
+
+/**
+ * What the server wrote to `log` since `offset`: its own error is in the last lines. Read through
+ * the start's own handle, so a log another start has moved meanwhile is still this run's.
+ */
+function logSince(log: number, offset: number): string {
+  const size = fstatSync(log).size;
+  // a cut read's first byte only shows whether the next one starts a line
+  const from = Math.max(offset, size - LOG_TAIL_BYTES);
+  const bytes = Buffer.alloc(Math.max(0, size - from));
+  let text = bytes.subarray(0, readSync(log, bytes, 0, bytes.length, from)).toString("utf8");
+  // a read that starts mid-file drops its cut-off first piece, unless that piece is all there is
+  if (from > offset) {
+    const rest = text.slice(text.indexOf("\n") + 1);
+    if (rest.trim() !== "") text = rest;
+  }
+  const lines = text.split("\n").filter((line) => line.trim() !== "");
   return lines.length === 0 ? "(nothing)" : lines.slice(-15).join("\n");
+}
+
+/**
+ * Keeps the run before this one as server.log.1 rather than appending every run to one file. A
+ * recorded server that is still alive may still write the log, so it is appended to then, as is a
+ * log that cannot be moved (Windows refuses while some program holds it open without sharing).
+ */
+function keepPreviousLog(): void {
+  if (recordedPid() !== null) return;
+  try {
+    renameSync(LOG_FILE, `${LOG_FILE}.1`);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    const message = `appending to ${LOG_FILE}: it could not be moved to ${LOG_FILE}.1 (${(error as Error).message})`;
+    process.stdout.write(`${message}\n`);
+    // the Windows launcher's console is hidden: the log is where this can be read
+    appendFileSync(LOG_FILE, `start: ${message}\n`);
+  }
 }
 
 /**
@@ -290,8 +371,10 @@ async function start(): Promise<number> {
       renameSync(`${PORT_FILE}.tmp`, PORT_FILE);
     }
   }
-  const log = openSync(LOG_FILE, "a");
-  const logged = statSync(LOG_FILE).size;
+  keepPreviousLog();
+  // readable too: a failed start reads its server's last lines back through this handle
+  const log = openSync(LOG_FILE, "a+");
+  const logged = fstatSync(log).size;
   const child = spawn(process.execPath, [join(ROOT, "server", "managed.ts")], {
     cwd: ROOT,
     detached: true,
@@ -319,8 +402,8 @@ async function start(): Promise<number> {
   while (Date.now() < deadline && child.exitCode === null) {
     if (await health()) {
       process.stdout.write(`Ovis listening at ${origin}\n`);
-      if ((env["HERDR_WEB_TOKEN"] ?? "") === "") {
-        process.stdout.write(`no token set: your own Tailscale devices get in as you; pair any other device in Settings → Devices, or put HERDR_WEB_TOKEN=<token> in ${join(CONFIG_DIR, "env")}\n`);
+      if ((env["OVIS_TOKEN"] ?? "") === "") {
+        process.stdout.write(`no token set: your own Tailscale devices get in as you; pair any other device in Settings → Devices, or put OVIS_TOKEN=<token> in ${join(CONFIG_DIR, "env")}\n`);
       }
       return 0;
     }
@@ -329,7 +412,7 @@ async function start(): Promise<number> {
   const why = child.exitCode === null
     ? `server did not answer ${origin}/api/health within ${READY_TIMEOUT_MS / 1000}s`
     : `the server stopped (exit ${child.exitCode}) before it answered ${origin}/api/health`;
-  return failStart(why, `; ${LOG_FILE} ends with:\n${logSince(logged)}`);
+  return failStart(why, `; ${LOG_FILE} ends with:\n${logSince(log, logged)}`, log);
 }
 
 /**
@@ -425,8 +508,12 @@ export async function stop(dependencies: StopDependencies = stopDependencies): P
     const deadline = Date.now() + 10_000;
     let exited = false;
     while (Date.now() < deadline) {
+      // the process table (a PowerShell query, seconds on a busy PC) only tells a reused number from
+      // a member still running: once every number is free, the tree is gone without asking it
+      const alive = tree.filter(member => dependencies.isAlive(member.pid));
+      if (alive.length === 0) { exited = true; break; }
       const currentProcesses = await dependencies.processTable(Math.max(1, deadline - Date.now()));
-      const running = tree.some(member => {
+      const running = alive.some(member => {
         if (!dependencies.isAlive(member.pid)) return false;
         const current = currentProcesses.find(row => row.pid === member.pid);
         return !(member.started !== undefined && current?.started !== undefined && current.started !== member.started);
@@ -490,7 +577,7 @@ async function pair(): Promise<number> {
     return 1;
   }
   const headers: Record<string, string> = { "content-type": "application/json", "x-herdr-machine": "1" };
-  if ((env["HERDR_WEB_TOKEN"] ?? "") !== "") headers["authorization"] = `Bearer ${env["HERDR_WEB_TOKEN"]}`;
+  if ((env["OVIS_TOKEN"] ?? "") !== "") headers["authorization"] = `Bearer ${env["OVIS_TOKEN"]}`;
   const started = await fetch(`${origin}/api/devices/pair/start`, { method: "POST", headers, body: "{}" });
   if (!started.ok) {
     process.stderr.write(`could not start a pairing (${started.status}): ${await started.text()}\n`);
@@ -516,7 +603,7 @@ async function pair(): Promise<number> {
 /**
  * The address a phone opens, as a QR code. When Tailscale runs on this PC but does not yet serve
  * the app, this is the one place that changes it: `tailscale serve` of the app's port on the first
- * free HTTPS port, or only on the one HERDR_WEB_TAILSCALE_HTTPS_PORT names, said out loud with the
+ * free HTTPS port, or only on the one OVIS_TAILSCALE_HTTPS_PORT names, said out loud with the
  * command that undoes it. Everything else only reads. Run by install.sh (and by hand); neither the
  * server nor startup ever calls it.
  */
@@ -578,7 +665,7 @@ async function phone(): Promise<number> {
   say(`On your phone: ${link(url)}`);
   // the name, not the IP, is what the HTTPS certificate is for: https://100.x.y.z would warn
   if (ip !== null) say(`Tailscale IP of this PC: ${ip}. Open the name above, not the IP: the HTTPS certificate is for the name.`);
-  say(`Scan this with a phone signed in to Tailscale${owner === null ? "" : ` as ${owner}`}; that login gets in without a code (with HERDR_WEB_TOKEN set, after entering the token once).`);
+  say(`Scan this with a phone signed in to Tailscale${owner === null ? "" : ` as ${owner}`}; that login gets in without a code (with OVIS_TOKEN set, after entering the token once).`);
   say("Anyone else on your tailnet needs a pairing code: Settings → Devices, or the pair command.");
   say(qr(url));
   return 0;
@@ -598,7 +685,7 @@ async function phoneSetup(): Promise<number> {
     code = 1;
   } else {
     const headers: Record<string, string> = {};
-    if (env["HERDR_WEB_TOKEN"]) headers["authorization"] = `Bearer ${env["HERDR_WEB_TOKEN"]}`;
+    if (env["OVIS_TOKEN"]) headers["authorization"] = `Bearer ${env["OVIS_TOKEN"]}`;
     try {
       const response = await fetch(`${origin}/api/access`, { headers, signal: AbortSignal.timeout(5000) });
       if (!response.ok) throw new Error(`access request failed (${response.status})`);

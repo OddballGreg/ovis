@@ -35,7 +35,8 @@ it("names a model and an effort for the agents whose CLI documents them, and a p
   expect(launchCapabilities("codex")).toEqual({ model: true, efforts: CODEX_EFFORTS, positionalPrompt: true });
   // OpenCode 1.x documents `-m, --model provider/model`, no effort and no prompt it is safe to pass
   expect(launchCapabilities("opencode")).toEqual({ model: true, efforts: [], positionalPrompt: false });
-  for (const kind of ["omp", "pi", "gemini", ""]) expect(launchCapabilities(kind)).toEqual({ model: false, efforts: [], positionalPrompt: false });
+  // Letta Code takes a prompt only with `-p`, its headless mode (letta-code 0.34.23, src/cli/args.ts)
+  for (const kind of ["omp", "pi", "gemini", "letta", ""]) expect(launchCapabilities(kind)).toEqual({ model: false, efforts: [], positionalPrompt: false });
   expect(modelSuggestions("claude")).toEqual(["sonnet", "opus", "haiku"]);
   expect(modelSuggestions("codex")).toEqual([]);
 });

@@ -10,8 +10,8 @@ export async function checkCommandBackspace(browser: Browser, origin: string, pa
   const context = await browser.newContext({ viewport: { width: 1100, height: 650 } });
   await context.addInitScript((id) => {
     Object.defineProperty(navigator, "platform", { get: () => "MacIntel" });
-    localStorage.setItem("herdr-web-ui:settings", JSON.stringify({ language: "en" }));
-    localStorage.setItem(`herdr-web-ui:view:${id}`, "terminal");
+    localStorage.setItem("ovis:settings", JSON.stringify({ language: "en" }));
+    localStorage.setItem(`ovis:view:${id}`, "terminal");
   }, paneId);
   try {
     const page = await context.newPage();
@@ -63,7 +63,7 @@ export async function checkCommandBackspace(browser: Browser, origin: string, pa
       await input.dispatchEvent("keydown", {
         key: "Backspace", code: "Backspace", metaKey: true, ...composition, bubbles: true, cancelable: true,
       });
-      await page.waitForTimeout(300);
+      await page.waitForTimeout(300); // fixed wait: a composing Backspace may send no line-delete byte
       assert.equal(inputs.slice(before).some(({ text }) => text === "\x15"), false,
         "an active composition must not receive a line-deletion sequence");
     }
@@ -114,7 +114,7 @@ process.stdin.on("data", (data) => {
   const nonMac = await browser.newContext();
   await nonMac.addInitScript((id) => {
     Object.defineProperty(navigator, "platform", { get: () => "Linux x86_64" });
-    localStorage.setItem(`herdr-web-ui:view:${id}`, "terminal");
+    localStorage.setItem(`ovis:view:${id}`, "terminal");
   }, paneId);
   try {
     const page = await nonMac.newPage();

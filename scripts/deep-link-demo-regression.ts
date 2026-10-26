@@ -25,7 +25,7 @@ const waitQuery = (page: Page, name: string, value: string | null) => page.waitF
 async function withPage(browser: Browser, search: string, run: (page: Page) => Promise<void>): Promise<void> {
   const context = await browser.newContext({ viewport: { width: 1280, height: 860 }, locale: "en-US" });
   try {
-    await context.addInitScript(() => localStorage.setItem("herdr-web-ui:settings", JSON.stringify({ language: "en", fileOpen: "panel" })));
+    await context.addInitScript(() => localStorage.setItem("ovis:settings", JSON.stringify({ language: "en", fileOpen: "panel" })));
     const page = await context.newPage();
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(error.message));
@@ -117,7 +117,7 @@ try {
         await waitQuery(page, "machine", null);
         await waitQuery(page, "pane", INFRA);
         assert.equal(await selected(page), INFRA, "the app stays on the pane it showed");
-        await page.waitForTimeout(300);
+        await page.waitForTimeout(300); // fixed wait: no New workspace dialog may open
         assert.equal(await page.getByRole("dialog", { name: /New workspace/ }).count(), 0, "no New workspace dialog for a PC that is gone");
         await page.goForward();
         await waitQuery(page, "pane", INFRA);
@@ -130,7 +130,7 @@ try {
       try {
         // after a reload marked to hold it, the PC list (its fetch and its stream) waits for __releaseRoster
         await heldContext.addInitScript(`
-          localStorage.setItem("herdr-web-ui:settings", JSON.stringify({ language: "en" }));
+          localStorage.setItem("ovis:settings", JSON.stringify({ language: "en" }));
           const hold = sessionStorage.getItem("hold-roster") === "1";
           sessionStorage.removeItem("hold-roster");
           let release = () => {};
@@ -285,7 +285,7 @@ try {
         await dialog.locator(".agent-picker-label", { hasText: /codex/i }).waitFor();
         const workspaces = async () => (await page.evaluate(async () => (await (await fetch("/api/session")).json()).snapshot.workspaces.length)) as number;
         const before = await workspaces();
-        await page.waitForTimeout(800);
+        await page.waitForTimeout(800); // fixed wait: no workspace may be created by the link
         assert.equal(await workspaces(), before, "a link fills the form; Create is still the user's");
         await waitQuery(page, "name", "Fix backup");
         await dialog.getByRole("textbox", { name: "Name" }).fill("Fix the nightly backup");
@@ -377,7 +377,7 @@ try {
       {
         const phone = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, locale: "en-US" });
         try {
-          await phone.addInitScript(() => localStorage.setItem("herdr-web-ui:settings", JSON.stringify({ language: "en" })));
+          await phone.addInitScript(() => localStorage.setItem("ovis:settings", JSON.stringify({ language: "en" })));
           const page = await phone.newPage();
           await page.goto(`${url}?ws=${wsOf(INFRA)}&pane=${encodeURIComponent(INFRA)}&sidebar=shown`);
           await page.locator('.drawer-toggle[aria-expanded="true"]').waitFor();
@@ -411,7 +411,7 @@ try {
       const delayedContext = await browser.newContext({ viewport: { width: 1280, height: 860 }, locale: "en-US" });
       try {
         await delayedContext.addInitScript(`
-          localStorage.setItem("herdr-web-ui:settings", JSON.stringify({ language: "en" }));
+          localStorage.setItem("ovis:settings", JSON.stringify({ language: "en" }));
           let released = false, fullMachines = null;
           const deliveries = [];
           const hold = machines => {
@@ -507,7 +507,7 @@ try {
       // Files offers no palette entry on a phone; resizing restores it.
       const palettePhone = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, locale: "en-US" });
       try {
-        await palettePhone.addInitScript(() => localStorage.setItem("herdr-web-ui:settings", JSON.stringify({ language: "en" })));
+        await palettePhone.addInitScript(() => localStorage.setItem("ovis:settings", JSON.stringify({ language: "en" })));
         const page = await palettePhone.newPage();
         await page.goto(`${url}?pane=${encodeURIComponent(INFRA)}`);
         await waitSelected(page, INFRA);
@@ -552,7 +552,7 @@ try {
       // closed by Cancel or by an item leaves no entry behind, so the next Back goes to the pane before
       const phone = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, locale: "en-US" });
       try {
-        await phone.addInitScript(() => localStorage.setItem("herdr-web-ui:settings", JSON.stringify({ language: "en" })));
+        await phone.addInitScript(() => localStorage.setItem("ovis:settings", JSON.stringify({ language: "en" })));
         const page = await phone.newPage();
         const errors: string[] = [];
         page.on("pageerror", (error) => errors.push(error.message));
@@ -576,7 +576,7 @@ try {
         await sheet.waitFor();
         await sheet.getByRole("button", { name: "Cancel", exact: true }).tap();
         await sheet.waitFor({ state: "detached" });
-        await page.waitForFunction(() => !Object.keys(history.state ?? {}).includes("herdr-web-ui:sheet"));
+        await page.waitForFunction(() => !Object.keys(history.state ?? {}).includes("ovis:sheet"));
         await page.goBack();
         await waitSelected(page, INFRA);
         await page.goForward();
@@ -587,7 +587,7 @@ try {
         await page.getByRole("button", { name: "Rename pane", exact: true }).tap();
         const creation = page.getByRole("dialog", { name: "Rename pane", exact: true });
         await creation.waitFor();
-        await page.waitForTimeout(150);
+        await page.waitForTimeout(150); // fixed wait: the Rename pane dialog may not close
         assert.equal(await creation.isVisible(), true, "the Rename pane dialog stays up after the sheet's entry settles");
         assert.equal(await page.evaluate(() => history.length), length + 1, "the dialog took the sheet's entry");
         await page.goBack();

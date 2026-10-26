@@ -11,12 +11,14 @@ export async function checkTerminalInput(browser: Browser, origin: string, pane:
   page.on("pageerror", (error) => errors.push(error.message));
   page.setDefaultTimeout(10_000);
   await context.addInitScript(() => {
-    if (!localStorage.getItem("herdr-web-ui:settings")) localStorage.setItem("herdr-web-ui:settings", JSON.stringify({ language: "en", terminalInputMode: "line" }));
+    if (!localStorage.getItem("ovis:settings")) localStorage.setItem("ovis:settings", JSON.stringify({ language: "en", terminalInputMode: "line" }));
   });
   const sent: any[] = [];
   const resizes: any[] = [];
   let acknowledge: (() => void) | undefined;
   let refuse: (() => void) | undefined;
+  // an Insert held here like a submit: the bridge's insert-result goes to the page only when the test says
+  let acknowledgeInsert: (() => void) | undefined;
   let ready: (() => void) | undefined;
   let delayReady = false;
   let refuseConnections = false;
@@ -47,6 +49,9 @@ export async function checkTerminalInput(browser: Browser, origin: string, pane:
         sent.push(frame);
         acknowledge = () => socket.send(JSON.stringify({ type: "submit-result", id: frame.id, pane_id: frame.pane_id, ok: true }));
         refuse = () => socket.send(JSON.stringify({ type: "submit-result", id: frame.id, pane_id: frame.pane_id, ok: false, code: "agent_blocked", message: "" }));
+      } else if (frame.type === "insert") {
+        sent.push(frame);
+        acknowledgeInsert = () => socket.send(JSON.stringify({ type: "insert-result", id: frame.id, pane_id: frame.pane_id, ok: true }));
       } else if (frame.type === "input") sent.push(frame);
       else if (frame.type === "ping" && holdPings) heldPings.push(String(raw));
       else {
@@ -145,6 +150,37 @@ export async function checkTerminalInput(browser: Browser, origin: string, pane:
     assert(Math.abs(await height(".terminal-input") - await height(".terminal-input-slot")) < 1, "a one-row line covers no grid row");
     // what PaneTerminal's observer would have sent comes 120 ms after a change, and none happened
     assert.equal(resizes.length, resizesBefore, "typing three lines and Send send no resize");
+
+    // Insert beside Send, in the still grid Send just used: the line typed with no Enter, in its own
+    // frame, and cleared only on the bridge's answer; what replaced it meanwhile stays, as after Send
+    const insertButton = page.getByRole("button", { name: "Insert text without Enter", exact: true });
+    await line.fill("cd");
+    await until(async () => !(await insertButton.isDisabled()));
+    await line.fill("");
+    await until(() => insertButton.isDisabled());
+    await line.fill("cd src/lib");
+    sent.length = 0;
+    acknowledgeInsert = undefined;
+    const resizesBeforeInsert = resizes.length;
+    await insertButton.click();
+    await until(() => sent.length === 1 && !!acknowledgeInsert);
+    assert.deepEqual([sent[0].type, sent[0].text, sent[0].pane_id], ["insert", "cd src/lib", sentPane], "Insert sends the line as one insert frame, no Enter");
+    assert.equal(await insertButton.isDisabled(), true, "Insert waits for the answer");
+    assert.equal(await page.getByRole("button", { name: "Send to the terminal", exact: true }).isDisabled(), true, "so does Send");
+    assert.equal(await line.inputValue(), "cd src/lib", "the line keeps its text until the bridge answers");
+    await line.fill("");
+    await line.fill("cd src/components");
+    acknowledgeInsert!();
+    await until(async () => !(await insertButton.isDisabled()));
+    assert.equal(await line.inputValue(), "cd src/components", "a late insert acknowledgement cannot erase replacement text");
+    assert.equal(sent.length, 1, "nothing but the insert frame went: no input, no submit, no Enter");
+    // in the same still grid as the Send above (its observer never fired): any resize now would be Insert's
+    assert.equal(await page.evaluate(() => (window as any).gridResized), 0, "the grid stayed still through Insert");
+    assert.equal(resizes.length, resizesBeforeInsert, "Insert takes no grid back: no resize went with it");
+    await line.fill("");
+    sent.length = 0;
+    acknowledgeInsert = undefined;
+
     sent.length = 0;
     acknowledge = undefined;
 
@@ -238,7 +274,7 @@ export async function checkTerminalInput(browser: Browser, origin: string, pane:
     assert.equal(sent.length, 1, "a Send during a real composition finishes the word and sends");
     assert.equal(sent[0].text, "real 한글");
     assert.equal(await line.evaluate((element) => element === document.activeElement), true, "the line keeps focus, so the keyboard stays up");
-    await page.waitForTimeout(50);
+    await page.waitForTimeout(50); // fixed wait: a committed word may add no note
     assert.equal(await page.evaluate(() => { (window as any).noteObserver.disconnect(); return (window as any).noteAdded; }), 0, "a word committed inside the tap mounts no note");
     await cdp.detach();
     acknowledge!();
@@ -274,7 +310,7 @@ export async function checkTerminalInput(browser: Browser, origin: string, pane:
       setValue.call(element, "");
       element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "deleteCompositionText" }));
     });
-    await page.waitForTimeout(400);
+    await page.waitForTimeout(400); // fixed wait: an empty commit may send no Enter
     assert.equal(sent.length, 2, "an empty commit after a text Send sends no Enter");
     assert.equal(await line.inputValue(), "");
     // Compositions that keep chaining after the tap cannot stretch its wait past the deadline.
@@ -293,7 +329,7 @@ export async function checkTerminalInput(browser: Browser, origin: string, pane:
     // already withdrawn when the chain ends: a wait re-armed per composition would still be open
     assert.equal(await noteText(), "Finish the word, then send.", "the tap's deadline holds through a chain of compositions");
     await line.dispatchEvent("compositionend", { data: "한" });
-    await page.waitForTimeout(100);
+    await page.waitForTimeout(100); // fixed wait: a chain of compositions past the deadline may send nothing
     assert.equal(sent.length, 2, "a chain of compositions past the deadline sends nothing");
     assert.equal(await noteText(), "Finish the word, then send.");
     // A drop and a quick reconnect while the word is still open withdraw the tap: the later
@@ -310,7 +346,7 @@ export async function checkTerminalInput(browser: Browser, origin: string, pane:
     refuseConnections = false;
     await until(async () => !(await sendButton.isDisabled()));
     await line.dispatchEvent("compositionend", { data: "한" });
-    await page.waitForTimeout(100);
+    await page.waitForTimeout(100); // fixed wait: a commit after reconnect may not send the withdrawn tap
     assert.equal(sent.length, 2, "a commit after a drop and reconnect does not send the withdrawn tap");
     assert.equal(await noteText(), "Not sent: the terminal is disconnected.");
     // The terminal drops while the word is still being finished: the commit says so instead of
@@ -369,9 +405,9 @@ export async function checkTerminalInput(browser: Browser, origin: string, pane:
     await page.getByRole("combobox", { name: "Next pane", exact: true }).selectOption("p");
     await page.getByRole("button", { name: "Close settings", exact: true }).click();
     await line.focus();
-    const selectionBefore = await page.evaluate(() => localStorage.getItem("herdr-web-ui:selection"));
+    const selectionBefore = await page.evaluate(() => localStorage.getItem("ovis:selection"));
     await page.keyboard.press("ControlOrMeta+Shift+p");
-    await until(async () => (await page.evaluate(() => localStorage.getItem("herdr-web-ui:selection"))) !== selectionBefore);
+    await until(async () => (await page.evaluate(() => localStorage.getItem("ovis:selection"))) !== selectionBefore);
     await page.goto(`${origin}/?pane=${encodeURIComponent(pane)}`);
     await line.waitFor();
     await page.keyboard.press("ControlOrMeta+Shift+Comma");
@@ -431,7 +467,7 @@ export async function checkTerminalInput(browser: Browser, origin: string, pane:
     assert.equal(await heldNotice.count(), 1);
     await until(() => !!ready);
     ready!();
-    await page.waitForTimeout(150);
+    await page.waitForTimeout(150); // fixed wait: ready may not replay the draft
     assert.equal(sent.length, before, "ready does not replay the draft");
     // Held input keeps later typing until Send or Discard, on a ready terminal too: a key sent beside
     // it would reach the pty without the held start, and an Enter would run that partial line. The
@@ -475,7 +511,7 @@ export async function checkTerminalInput(browser: Browser, origin: string, pane:
     }
     const beforeMultiLine = await draftText();
     await pasteIntoTerminal("x\ny");
-    await page.waitForTimeout(100);
+    await until(async () => (await banner.isVisible()) || (await draftText()) !== beforeMultiLine);
     assert.equal(sent.length, afterEscape, "a multi-line paste beside a held draft reaches nothing");
     // never a silent drop: refused with the note, or taken into the draft (a draft that folds line breaks)
     const multiLineNoted = await banner.isVisible();
@@ -510,7 +546,7 @@ export async function checkTerminalInput(browser: Browser, origin: string, pane:
       box.value = "한";
       box.dispatchEvent(new CompositionEvent("compositionupdate", { bubbles: true, data: "한" }));
     });
-    await page.waitForTimeout(50);
+    await page.waitForTimeout(50); // fixed wait: nothing may be sent mid-composition
     assert.equal(sent.length, imeBefore);
     await input.dispatchEvent("compositionend", { data: "한" });
     await until(() => sent.length > imeBefore);
@@ -581,19 +617,156 @@ export async function checkTerminalInput(browser: Browser, origin: string, pane:
       if (!row) throw new Error("owned destination pane missing");
       row.click();
     }, otherPane);
-    await until(async () => (await page.evaluate(() => JSON.parse(localStorage.getItem("herdr-web-ui:selection")!).pane_id)) === otherPane);
-    await page.waitForTimeout(75);
+    await until(async () => (await page.evaluate(() => JSON.parse(localStorage.getItem("ovis:selection")!).pane_id)) === otherPane);
+    await page.waitForTimeout(75); // fixed wait: the old composition may not send across a pane reset
     assert.equal(sent.length, switchBefore, "old composition cannot cross a pane reset");
     assert.equal(await page.locator(".draft-text").count(), 0, "old commit cannot enter the new pane's held draft");
     // A late end after reset is stale, not a second attempt to send the abandoned input.
     await page.locator(".pane-frame.is-current .xterm-helper-textarea").dispatchEvent("compositionend", { data: "한" });
-    await page.waitForTimeout(75);
+    await page.waitForTimeout(75); // fixed wait: a late compositionend after the reset may send nothing
     assert.equal(sent.length, switchBefore);
     console.log("PASS xterm composition: local preedit, delayed multi-commit burst, punctuation order, Korean final-consonant movement, pane-reset cancellation");
     assert.deepEqual(errors, []);
     console.log("PASS terminal input: desktop mode, owner drafts, reload, IME button, late ack, shortcuts, readiness, explicit send");
   } finally { await context.close(); }
   await checkKeyBarWhileLineComposes(browser, origin, pane);
+  await checkCanonicalSubmit(browser);
+}
+
+/**
+ * The terminal input line's multiline Unicode text, sent for real to a program that records its raw input: with
+ * bracketed paste on it gets one paste, with it off only the lines, and on a mirror (no PTY sidecar, so the browser
+ * never learns the mode) an agent's pane gets one paste the bridge adds, a plain one the lines; each time exactly
+ * one Enter of the bridge's own after them. The submit frames go to the bridge unchanged, which checks their framing.
+ */
+async function checkCanonicalSubmit(browser: Browser): Promise<void> {
+  const { createServer } = await import("../server/index.ts");
+  const { herdrRpc, workspaceCreate, workspaceClose } = await import("../server/herdr/client.ts");
+  const { existsSync, mkdtempSync, readFileSync, rmSync, watch, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const root = mkdtempSync(join(tmpdir(), "herdr-canonical-submit-"));
+  const script = join(root, "record.cjs");
+  // the recorder asks for its mode, then names its pid once that is written; SIGUSR2 has it ask again (after the
+  // browser attached) and draw "ready$"; every byte it reads goes to its log as one JSON string per chunk
+  writeFileSync(script, `const fs=require("node:fs");const [out,mode]=process.argv.slice(2);const seq=mode==="on"?"\\x1b[?2004h":"\\x1b[?2004l";process.stdin.setRawMode(true);process.stdin.resume();process.on("SIGUSR2",()=>process.stdout.write(seq+"\\r\\nready$ "));process.stdin.on("data",c=>fs.appendFileSync(out,JSON.stringify(c.toString("utf8"))+"\\n"));process.stdout.write(seq+"$ ",()=>{fs.writeFileSync(out,"");fs.writeFileSync(out+".pid",String(process.pid))});`);
+  /** Settles once `ready()` holds, checked now and on every change under `path` (subscribed at the call); throws at the deadline. */
+  const whenChanged = (path: string, ready: () => boolean, what: string, ms = 10_000): Promise<void> => new Promise((resolve, reject) => {
+    let settled = false;
+    const settle = (error?: unknown) => {
+      if (settled) return;
+      settled = true; clearTimeout(timer); watcher.close();
+      if (error) reject(error); else resolve();
+    };
+    const check = () => { try { if (ready()) settle(); } catch (error) { settle(error); } };
+    const watcher = watch(path, check);
+    const timer = setTimeout(() => settle(new Error(`${what}: not within ${ms} ms`)), ms);
+    check();
+  });
+  const servers = { attached: createServer({ port: 0, hostname: "127.0.0.1", token: "", stateDir: join(root, "attached") }), mirror: createServer({ port: 0, hostname: "127.0.0.1", token: "", stateDir: join(root, "mirror"), terminalAttach: false }) };
+  const owned: string[] = [];
+  const text = "check canonical commit 한글\tcolumn\nsecond line ✓ 🙂";
+  const lines = text.replace(/\n/g, "\r");
+  const paste = `\u001b[200~${lines}\u001b[201~`;
+  const cases = [
+    { name: "attached, bracketed paste on", server: "attached", mode: "on", agent: false, bytes: paste },
+    // herdr's attach reports bracketed paste on when it starts, whatever the program asked for (measured, herdr 0.9.5):
+    // the program asks for off again once the browser is attached, and the browser must see that before it sends
+    { name: "attached, bracketed paste off", server: "attached", mode: "off", agent: false, bytes: lines },
+    { name: "mirror fallback, agent pane", server: "mirror", mode: "on", agent: true, bytes: paste },
+    { name: "mirror fallback, plain pane", server: "mirror", mode: "off", agent: false, bytes: lines },
+  ] as const;
+  try {
+    for (const item of cases) {
+      const made = await workspaceCreate({ cwd: root, label: "herdr-web-ui-test-canonical-submit" });
+      owned.push(made.workspace.workspace_id);
+      const pane = made.root_pane.pane_id;
+      const log = join(root, `${owned.length}.jsonl`);
+      const pidFile = `${log}.pid`;
+      const started = whenChanged(root, () => existsSync(pidFile) && readFileSync(pidFile, "utf8") !== "", `${item.name}: the recorder started`);
+      await herdrRpc("pane.send_text", { pane_id: pane, text: `exec '${process.execPath}' '${script}' '${log}' ${item.mode}\n` });
+      await started;
+      const recorder = Number(readFileSync(pidFile, "utf8"));
+      if (item.agent) await herdrRpc("pane.report_agent", { pane_id: pane, source: "manual", agent: "claude", state: "idle" });
+      const bytes = () => readFileSync(log, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as string).join("");
+      const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+      await context.addInitScript((pane) => {
+        localStorage.setItem("ovis:settings", JSON.stringify({ language: "en", terminalInputMode: "line" }));
+        localStorage.setItem(`ovis:view:${pane}`, "terminal");
+      }, pane);
+      const page = await context.newPage();
+      const errors: string[] = [];
+      page.on("pageerror", (error) => errors.push(error.message));
+      page.setDefaultTimeout(10_000);
+      const submits: Array<{ text: string; payload: string; typed?: boolean }> = [];
+      page.on("websocket", (socket) => socket.on("framesent", ({ payload }) => {
+        const frame = JSON.parse(String(payload));
+        if (frame.type === "submit") submits.push(frame);
+      }));
+      const results: Array<{ ok: boolean; code?: string }> = [];
+      let resultArrived = () => {};
+      const resultSeen = new Promise<void>((resolve) => { resultArrived = resolve; });
+      // the attach stream as the browser's terminal got it: the last bracketed-paste request in it is the mode it holds
+      let drawn = "";
+      page.on("websocket", (socket) => socket.on("framereceived", ({ payload }) => {
+        const frame = JSON.parse(String(payload));
+        if (frame.type === "submit-result") { results.push(frame); resultArrived(); }
+        if (frame.type === "pty-data" && frame.pane_id === pane) drawn += frame.data;
+      }));
+      const browserMode = () => {
+        const on = drawn.lastIndexOf("\u001b[?2004h");
+        const off = drawn.lastIndexOf("\u001b[?2004l");
+        return on < 0 && off < 0 ? "none" : on > off ? "on" : "off";
+      };
+      try {
+        await page.goto(`http://127.0.0.1:${servers[item.server].port}/?pane=${encodeURIComponent(pane)}`);
+        await page.locator(".conn-live").waitFor();
+        const line = page.getByRole("textbox", { name: "Terminal input line", exact: true });
+        await line.waitFor();
+        // the input line holds the program's prompt once the pane is drawn: the mode the program asked for came before it
+        await page.locator(".xterm-rows", { hasText: "$" }).waitFor();
+        await page.waitForFunction(() => document.querySelector(".terminal-banner") === null);
+        // with the browser attached, the program asks for its mode again; its "ready$" comes after that request
+        process.kill(recorder, "SIGUSR2");
+        await page.locator(".xterm-rows", { hasText: "ready$" }).waitFor();
+        if (item.server === "attached") {
+          const mode = browserMode();
+          if (mode !== item.mode) {
+            // the scenario cannot be shown here: the browser's terminal never learned the program's mode
+            assert.equal(item.mode, "off", `${item.name}: the browser holds bracketed paste ${mode}`);
+            console.log(`BLOCKED canonical multiline submit, ${item.name}: the program asked for bracketed paste off after the attach, but the attach stream left the browser's terminal ${mode} (requests seen: ${JSON.stringify(drawn.match(/\u001b\[\?2004[hl]/g) ?? [])}); nothing was sent`);
+            assert.deepEqual(errors, []);
+            continue;
+          }
+        }
+        const expected = `${item.bytes}\r`;
+        const landed = whenChanged(log, () => {
+          const got = bytes();
+          assert(expected.startsWith(got), `${item.name}: the pane got ${JSON.stringify(got)}, not ${JSON.stringify(expected)}`);
+          return got === expected;
+        }, `${item.name}: the pane got ${JSON.stringify(expected)}`, 15_000);
+        landed.catch(() => {});
+        await line.fill(text);
+        await page.getByRole("button", { name: "Send to the terminal", exact: true }).click();
+        let resultDeadline: ReturnType<typeof setTimeout> | undefined;
+        await Promise.race([resultSeen, new Promise<never>((_, reject) => {
+          resultDeadline = setTimeout(() => reject(new Error(`${item.name}: no submit-result within 10000 ms`)), 10_000);
+        })]).finally(() => clearTimeout(resultDeadline));
+        assert.deepEqual(results, [{ ...results[0], ok: true }], `${item.name}: the bridge took the submit`);
+        assert.equal(submits.length, 1, `${item.name}: one submit`);
+        assert.equal(submits[0]!.text, text, `${item.name}: the text as written`);
+        // an attached pane's browser shapes the payload by the mode it saw; a mirror's always sends the bare lines
+        assert.equal(submits[0]!.payload, item.server === "attached" && item.mode === "on" ? paste : lines, `${item.name}: the canonical payload for the mode`);
+        await landed;
+        assert.deepEqual(errors, []);
+        console.log(`PASS canonical multiline submit, ${item.name}: browser mode ${item.server === "attached" ? browserMode() : "n/a (mirror)"}, frame ${JSON.stringify({ text: submits[0]!.text, payload: submits[0]!.payload })} -> pane ${JSON.stringify(bytes())}`);
+      } finally { await context.close(); }
+    }
+  } finally {
+    servers.attached.stop(); servers.mirror.stop();
+    for (const id of owned) await workspaceClose(id).catch(() => {});
+    rmSync(root, { recursive: true, force: true });
+  }
 }
 
 /** A composition in the input line must not grey out the phone key bar: Esc and ^C go to the pane at once. */
@@ -604,8 +777,8 @@ async function checkKeyBarWhileLineComposes(browser: Browser, origin: string, pa
   page.on("pageerror", (error) => errors.push(error.message));
   page.setDefaultTimeout(10_000);
   await context.addInitScript((pane) => {
-    localStorage.setItem("herdr-web-ui:settings", JSON.stringify({ language: "en", terminalInputMode: "line" }));
-    localStorage.setItem(`herdr-web-ui:view:${pane}`, "terminal");
+    localStorage.setItem("ovis:settings", JSON.stringify({ language: "en", terminalInputMode: "line" }));
+    localStorage.setItem(`ovis:view:${pane}`, "terminal");
   }, pane);
   const frames: any[] = [];
   await page.routeWebSocket(/\/ws(?:\?|$)/, (socket) => {
@@ -676,7 +849,7 @@ if (import.meta.main) {
   try {
     const panes: string[] = [];
     for (let i = 0; i < 2; i++) {
-      const made = await workspaceCreate({ cwd: root, label: "herdr-web-ui-test-input" });
+      const made = await workspaceCreate({ cwd: root, label: "ovis-test-input" });
       owned.push(made.workspace.workspace_id); panes.push(made.root_pane.pane_id);
     }
     await checkTerminalInput(browser, `http://127.0.0.1:${server.port}`, panes[0]!, panes[1]!);

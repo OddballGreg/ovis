@@ -90,8 +90,9 @@ async function managedFixture(supervisor?: string, slowHealth = false) {
     try {
       return Bun.spawn([process.execPath, "--eval",
         `import {runManaged} from ${JSON.stringify(join(import.meta.dir, "managed.ts"))}; await runManaged(${JSON.stringify(root)});`], {
-        env: { ...process.env, PORT: String(port), HOST: "127.0.0.1", HERDR_WEB_STATE_DIR: stateDir,
-          HERDR_WEB_TOKEN: "test-managed-token", HERDR_WEB_AUTO_UPDATE: "0", SUPERVISOR_MARKER: join(directory, "marker") },
+        // its own config home: the launcher links the default state dirs it finds there
+        env: { ...process.env, PORT: String(port), HOST: "127.0.0.1", OVIS_STATE_DIR: stateDir, XDG_CONFIG_HOME: join(directory, "config"),
+          OVIS_TOKEN: "test-managed-token", OVIS_AUTO_UPDATE: "0", SUPERVISOR_MARKER: join(directory, "marker") },
         stdout: output, stderr: output,
       });
     } finally {
@@ -130,7 +131,7 @@ const releaseSupervisor = (broken = false) => broken ? "process.exit(3);\n" : `
   import { appendFileSync } from "node:fs";
   appendFileSync(process.env.SUPERVISOR_MARKER, "release\\n");
   const { runSupervisor } = await import(${JSON.stringify(join(import.meta.dir, "supervisor.ts"))});
-  await runSupervisor(process.env.HERDR_WEB_SOURCE_ROOT);
+  await runSupervisor(process.env.OVIS_SOURCE_ROOT);
 `;
 const liveHerdr = existsSync(process.env["HERDR_SOCKET"] || HERDR_SOCKET_PATH);
 
@@ -533,7 +534,7 @@ describe("managed source updates with real Git repositories and builds", () => {
       let bootId = "";
       const realSpawn = Bun.spawn, realFetch = globalThis.fetch;
       Bun.spawn = ((_argv: string[], options: { env: Record<string, string>; ipc: (message: unknown) => void }) => {
-        bootId = options.env["HERDR_WEB_BOOT_ID"]!;
+        bootId = options.env["OVIS_BOOT_ID"]!;
         ipc = options.ipc;
         return { exitCode: null, kill() {}, exited: Promise.resolve(0), send(message: unknown) { sent.push(message); } };
       }) as unknown as typeof Bun.spawn;
@@ -553,7 +554,7 @@ describe("managed source updates with real Git repositories and builds", () => {
       process.exit(0);
     `);
     const child = Bun.spawn([process.execPath, script], { env: { ...process.env, PORT: "59999", HOST: "127.0.0.1",
-      HERDR_WEB_STATE_DIR: stateDir, HERDR_WEB_AUTO_UPDATE: "0" }, stdout: "pipe", stderr: "pipe" });
+      OVIS_STATE_DIR: stateDir, XDG_CONFIG_HOME: join(stateDir, "config"), OVIS_AUTO_UPDATE: "0" }, stdout: "pipe", stderr: "pipe" });
     const output = Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text()]);
     const timer = setTimeout(() => child.kill("SIGKILL"), 15_000); // a wedged stand-in must not hang the run
     try {
@@ -1086,7 +1087,9 @@ setInterval(() => {}, 1000);`);
       expect(() => process.kill(Number(readFileSync(pidFile, "utf8")), 0)).toThrow();
     } finally {
       // the child ignores SIGTERM: whatever happened above, it only ever ends by its own pid
-      if (existsSync(pidFile)) { try { process.kill(Number(readFileSync(pidFile, "utf8")), "SIGKILL"); } catch { /* already dead */ } }
+      // a pid file caught half written reads 0, and kill(0) would end this run's whole process group
+      const pid = existsSync(pidFile) ? Number(readFileSync(pidFile, "utf8")) : 0;
+      if (pid > 0) { try { process.kill(pid, "SIGKILL"); } catch { /* already dead */ } }
     }
   });
 

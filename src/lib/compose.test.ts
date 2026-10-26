@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 
 import { skillSyntax } from "../../shared/skill-syntax.ts";
-import { agentDisplayLabel, composerDelivery, composerMessage, composerSendShown, composerPayload, composerModelDraw, composerStatusCompact, composerStatusHint, composerStatusWord, COMPOSER_STATUS_COMPACT_BELOW, contextLeftPercent, formatTokens, imageMention, insertLeadingMention, MAX_COMPOSER_CHARS, QUEUE_READY_STATUS, rankSlashCommands, submitNote, submitNotTyped, submitRefusal, sameMessage, pendingActionUncertain } from "./compose.ts";
+import { agentDisplayLabel, composerDelivery, composerMessage, composerSendShown, composerPayload, composerModelDraw, composerStatusCompact, composerStatusHint, composerStatusWord, COMPOSER_STATUS_COMPACT_BELOW, contextLeftPercent, formatTokens, imageMention, insertLeadingMention, insertNote, MAX_COMPOSER_CHARS, QUEUE_READY_STATUS, rankSlashCommands, submitNote, submitNotTyped, submitRefusal, sameMessage, pendingActionUncertain } from "./compose.ts";
 import { briefDescription, COMMAND_GROUPS, commandGroup, commandsForTrigger, slashCommandReplacement, terminalCommand, typedTerminalCommand } from "./compose.ts";
 import type { SlashCommand } from "../../shared/protocol.ts";
 import { activeTrigger, applyCompletion, type ActiveTrigger } from "./mentions.ts";
@@ -145,6 +145,12 @@ describe("composerMessage and submitNote", () => {
     // regression #541: a send dropped before its frame left the browser typed nothing
     expect(submitNotTyped("not_transmitted")).toBe(true);
     expect(submitNote("not_transmitted", "the connection dropped before this message was sent")).toBe("Not sent: the connection dropped before this message left. Send it again.");
+    // a send whose wait ended before the PC said what it supports typed nothing, and the note names that, not a drop (#1806)
+    expect(submitNotTyped("capabilities_unknown")).toBe(true);
+    expect(submitNote("capabilities_unknown", "this PC has not said yet what it supports; nothing was sent")).toBe("Not sent: this PC has not said yet what it supports. Send it again.");
+    // an Insert refused for a control character says so, not that the terminal is not ready: a retry would be refused the same
+    expect(insertNote("invalid_insert_text", "the text holds a control character")).toBe("Not inserted: the line holds a control character. Remove it, then insert again.");
+    expect(insertNote("capabilities_unknown", "this PC has not said yet what it supports; nothing was sent")).toBe("Not inserted: this PC has not said yet what it supports. Insert it again.");
     // a Send now that never left proves a held row unsent, not a queued one its turn's end may still type
     expect(pendingActionUncertain("not_transmitted", "held")).toBe(false);
     expect(pendingActionUncertain("not_transmitted", "queued")).toBe(true);
@@ -214,6 +220,23 @@ describe("composerPayload", () => {
     expect(composerPayload("", false)).toBe("");
   });
 
+  it("drops whole paste markers from the message, so its text and its paste agree and neither ends early", () => {
+    const pasted = "run this\u001b[201~\rtouch /tmp/x\n\u001b[200~next";
+    expect(composerMessage(pasted)).toBe("run this\ntouch /tmp/x\nnext");
+    expect(composerPayload(pasted, true)).toBe("\u001b[200~run this\rtouch /tmp/x\rnext\u001b[201~");
+    expect(composerPayload(pasted, false)).toBe("run this\rtouch /tmp/x\rnext");
+    // dropping one marker cannot leave another made of the bytes around it
+    expect(composerMessage("a\u001b[20\u001b[201~0~b")).toBe("ab");
+    // a marker at the end goes before the trailing newlines it hid
+    expect(composerMessage("ls\n\u001b[201~")).toBe("ls");
+  });
+
+  it("keeps every other escape byte, which the bridge refuses rather than having it rewritten here", () => {
+    expect(composerMessage("\u001b[31mred\u001b[0m")).toBe("\u001b[31mred\u001b[0m");
+    expect(composerMessage("half \u001b[201")).toBe("half \u001b[201");
+    expect(composerPayload("tab\there 한글 ✓", true)).toBe("\u001b[200~tab\there 한글 ✓\u001b[201~");
+  });
+
   it("caps what one send can carry", () => {
     expect(MAX_COMPOSER_CHARS).toBeLessThanOrEqual(20_000);
     expect(composerPayload("x".repeat(MAX_COMPOSER_CHARS), false)).toHaveLength(MAX_COMPOSER_CHARS);
@@ -222,8 +245,8 @@ describe("composerPayload", () => {
 
 describe("imageMention", () => {
   it("references the stored file as an editable @path with a trailing space", () => {
-    expect(imageMention("/tmp/proj/.herdr-web-ui/paste-1.png")).toBe(
-      "@/tmp/proj/.herdr-web-ui/paste-1.png ",
+    expect(imageMention("/tmp/proj/.ovis/paste-1.png")).toBe(
+      "@/tmp/proj/.ovis/paste-1.png ",
     );
   });
 });

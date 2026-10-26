@@ -15,7 +15,7 @@ import * as agentLaunchModule from "./agent-launch.ts";
 
 type PendingUpdate = Extract<ServerMessage, { type: "pending-messages" }>;
 
-const root = mkdtempSync(join(tmpdir(), "herdr-web-ui-pending-"));
+const root = mkdtempSync(join(tmpdir(), "ovis-pending-"));
 const active: Array<{ stop: () => void; sockets: Socket[]; workspace: string }> = [];
 let next = 0;
 const paste = (text: string) => `\u001b[200~${text}\u001b[201~`;
@@ -29,10 +29,14 @@ const holding = async (rpc: "text" | "keys"): Promise<void> => {
   if (hold?.rpc !== rpc) return;
   connectHold = null; hold.reached(); await hold.release;
 };
+/** Each text, key (a draft clear's among them) and agent.prompt write the bridge asks herdr for, as `<kind> <pane>`. */
+const herdrWrites: string[] = [];
+const agentPrompt = herdrClient.agentPrompt;
 mock.module("./herdr/client.ts", () => ({
   ...herdrClient,
-  paneSendText: async (...args: Parameters<typeof sendText>) => { if (args[1].startsWith("\u001b[200~")) await holding("text"); return sendText(...args); },
-  paneSendKeys: async (...args: Parameters<typeof sendKeys>) => { await holding("keys"); return sendKeys(...args); },
+  agentPrompt: async (...args: Parameters<typeof agentPrompt>) => { herdrWrites.push(`prompt ${args[0]}`); return agentPrompt(...args); },
+  paneSendText: async (...args: Parameters<typeof sendText>) => { herdrWrites.push(`text ${args[0]}`); if (args[1].startsWith("\u001b[200~")) await holding("text"); return sendText(...args); },
+  paneSendKeys: async (...args: Parameters<typeof sendKeys>) => { herdrWrites.push(`keys ${args[0]}`); await holding("keys"); return sendKeys(...args); },
 }));
 // The create routes' launch, for the first-message cases: nothing is started (an agent kind may be a
 // real program on this PC); the case starts its recorder in the pane itself, after the route answered,
@@ -112,7 +116,7 @@ beforeAll(() => {
   // The recorder polls its screen file: fs.watch can drop the change that follows writeFileSync's
   // truncation, leaving the cleared screen it read in between up for good.
   writeFileSync(join(root, "record.cjs"), `const fs=require("node:fs");const out=process.argv[2];process.stdin.setRawMode(true);process.stdin.resume();process.stdout.write("\\x1b[?2004h"+(process.argv[3]||"").replace(/\\\\x1b/g,"\\x1b"),()=>fs.writeFileSync(out,""));process.stdin.on("data",c=>fs.appendFileSync(out,JSON.stringify(c.toString("utf8"))+"\\n"));let shown="";setInterval(()=>{const next=fs.readFileSync(process.argv[4],"utf8");if(next!==shown){shown=next;process.stdout.write("\\x1b[2J\\x1b[H"+next);}},20);`);
-  for (const name of ["claude", "codex", "plain"]) { copyFileSync(process.execPath, join(root, name)); chmodSync(join(root, name), 0o755); }
+  for (const name of ["claude", "codex", "omp", "plain"]) { copyFileSync(process.execPath, join(root, name)); chmodSync(join(root, name), 0o755); }
 });
 afterEach(async () => {
   for (const item of active.splice(0)) { for (const socket of item.sockets) socket.close(); item.stop(); await herdrRpc("workspace.close", { workspace_id: item.workspace }).catch(() => undefined); }
@@ -121,7 +125,7 @@ afterAll(() => rmSync(root, { recursive: true, force: true }));
 
 async function setup(label: string, agent = "claude", screen = "› Message\n", options: Parameters<typeof createServer>[0] = {}, replaceable = false) {
   const id = ++next;
-  const created = await herdrRpc<{ workspace: { workspace_id: string }; root_pane: { pane_id: string } }>("workspace.create", { label: `herdr-web-ui-test-pending-${label}`, cwd: root, focus: false });
+  const created = await herdrRpc<{ workspace: { workspace_id: string }; root_pane: { pane_id: string } }>("workspace.create", { label: `ovis-test-pending-${label}`, cwd: root, focus: false });
   // registered before anything below can throw, so afterEach closes the workspace of a setup that failed
   const entry: (typeof active)[number] = { stop: () => {}, sockets: [], workspace: created.workspace.workspace_id }; active.push(entry);
   const pane = created.root_pane.pane_id;
@@ -174,6 +178,29 @@ async function setup(label: string, agent = "claude", screen = "› Message\n", 
 }
 
 describe("connection-owned pending input", () => {
+  it.each([
+    { agent: "omp", text: "/model", expected: "/switch" },
+    { agent: "codex", text: "/model", expected: "/model" },
+    { agent: "omp", text: "/model x", expected: "/model x" },
+  ])("delivers queued $text as $expected to $agent", async ({ agent, text, expected }) => {
+    // Given a command queued while the agent is working.
+    const f = await setup("queued-model", agent, "");
+    const message = await f.queue(1476, text);
+    const delivered = f.socket.event((frame) => frame.removed?.some((entry) => entry.id === message.id && entry.outcome === "sent") === true);
+    const recorded = new Promise<void>((resolve, reject) => {
+      const watcher = watch(root, () => {
+        if (!f.bytes().endsWith("\r")) return;
+        clearTimeout(timeout); watcher.close(); resolve();
+      });
+      const timeout = setTimeout(() => { watcher.close(); reject(new Error("queued command was not recorded")); }, 8_000);
+    });
+    // When the agent finishes its turn.
+    await f.state("idle");
+    await Promise.all([delivered, recorded]);
+    // Then the terminal receives the same command the immediate path would send.
+    expect(f.bytes()).toBe(`${paste(expected)}\r`);
+  });
+
   it("holds a queued message when a hookless agent process is replaced in the same terminal (regression #540)", async () => {
     const f = await setup("process-replaced", "claude", "SESSION1", {}, true);
     const before = await herdrClient.paneGet(f.pane);
@@ -806,6 +833,76 @@ describe("connection-owned pending input", () => {
     expect(f.bytes()).toBe(""); expect(f.socket.seen.some((frame) => frame.type === "pending-messages")).toBe(false);
   }, 30_000);
 
+  for (const mirror of [false, true]) it(`rejects malformed immediate framing on shell and mirror paths (${mirror ? "mirror" : "attached shell"})`, async () => {
+    const f = await setup(mirror ? "framing-mirror" : "framing-shell", "plain", "$ ", mirror ? { terminalAttach: false } : {});
+    const writes = () => herdrWrites.filter((write) => write.endsWith(` ${f.pane}`)).length;
+    const sentinel = "touch /tmp/herdr-web-ui-framing-sentinel";
+    const forged = [
+      // its own terminator, then a CR that would run the line after it
+      { text: `ok\u001b[201~\r${sentinel}`, payload: `${paste("ok")}\r${sentinel}\u001b[201~` },
+      { text: "ok", payload: `${paste("ok")}\r${sentinel}` },
+      // a payload its text does not name, and markers twice over
+      { text: "ls", payload: sentinel },
+      { text: "ls", payload: paste(paste("ls")) },
+      { text: "ls", payload: `\u001b[201~ls\u001b[200~` },
+      // a hidden trailing CR: an Enter of its own besides the bridge's
+      { text: "ls", payload: "ls\r" },
+    ];
+    let id = 100;
+    const refused = async (frame: Record<string, unknown>, code = "invalid_submit_text", socket = f.socket) => {
+      socket.send({ type: "submit", id: ++id, pane_id: f.pane, ...frame });
+      expect(await socket.result(id), JSON.stringify(frame).slice(0, 120)).toMatchObject({ ok: false, code });
+    };
+    for (const typed of [false, true]) for (const frame of forged) await refused({ ...frame, ...(typed ? { typed: true } : {}) });
+    // a forged send over a named draft clears nothing; one under a held-copy id reserves nothing
+    await refused({ text: "ls", payload: "ls\r", clear_draft: "old draft" });
+    await refused({ text: "ls", payload: "ls\r", resend_id: "forged-copy" });
+    // over either cap, by one character
+    await refused({ text: "x".repeat(20_001), payload: "x".repeat(20_001) });
+    await refused({ text: "x".repeat(32_769), payload: "x".repeat(32_769), typed: true });
+    // an observing connection is refused for its role, forged or not
+    const watcher = await f.another();
+    watcher.send({ type: "role", mode: "observe" }); await watcher.wait((frame) => frame.type === "role-ack" && frame.mode === "observe");
+    await refused({ text: "ls", payload: "ls" }, "read_only", watcher);
+    await refused(forged[0]!, "read_only", watcher);
+    expect(writes(), "no text, key or draft-clear write").toBe(0);
+    expect(f.bytes()).toBe("");
+
+    // ordinary keys still go as typed
+    f.socket.send({ type: "input", pane_id: f.pane, text: "\u001b[A" }); await f.waitBytes("\u001b[A");
+    f.socket.send({ type: "input", pane_id: f.pane, text: "\u001b" }); await f.waitBytes("\u001b[A\u001b");
+    // and the caps take what they allow: chat 20000, the input line 20001 and 32768
+    let expected = "\u001b[A\u001b";
+    for (const [length, typed] of [[20_000, false], [20_001, true], [32_768, true]] as const) {
+      const text = "x".repeat(length);
+      f.socket.send({ type: "submit", id: ++id, pane_id: f.pane, text, payload: text, ...(typed ? { typed: true } : {}) });
+      expect(await f.socket.result(id)).toMatchObject({ ok: true });
+      expected += `${text}\r`; await f.waitBytes(expected);
+    }
+    // a canonical multiline paste goes as one paste and one Enter
+    f.socket.send({ type: "submit", id: ++id, pane_id: f.pane, text: "첫 줄\tone\nsecond ✓", payload: paste("첫 줄\tone\rsecond ✓"), typed: true });
+    expect(await f.socket.result(id)).toMatchObject({ ok: true });
+    expected += `${paste("첫 줄\tone\rsecond ✓")}\r`; await f.waitBytes(expected);
+
+    // a sender that leaves while its submits wait behind earlier input: the forged one types nothing, the one
+    // the bridge had already taken goes once, and nothing is typed again when another connection comes
+    const keeper = await f.another();
+    const hold = holdConnect("keys");
+    keeper.send({ type: "submit", id: 1, pane_id: f.pane, text: "barrier", payload: "barrier", typed: true });
+    await hold.reached;
+    f.socket.send({ type: "submit", id: ++id, pane_id: f.pane, ...forged[0]!, typed: true });
+    f.socket.send({ type: "submit", id: ++id, pane_id: f.pane, text: "taken once", payload: "taken once", typed: true });
+    await f.socket.disconnect();
+    hold.release();
+    expect(await keeper.result(1)).toMatchObject({ ok: true });
+    const later = await f.another();
+    later.send({ type: "submit", id: 2, pane_id: f.pane, text: "after reconnect", payload: "after reconnect", typed: true });
+    expect(await later.result(2)).toMatchObject({ ok: true });
+    expected += "barrier\rtaken once\rafter reconnect\r"; await f.waitBytes(expected);
+    expect(f.bytes()).toBe(expected);
+    expect(f.bytes()).not.toContain(sentinel);
+  }, 60_000);
+
   for (const stop of [false, true]) it(`checks a new blocked state after the ${stop ? "composer's Stop" : "typed ESC"}'s settling gap, before pasting`, async () => {
     const f = await setup(stop ? "stop-gap-intent" : "stop-gap"); const message = await f.queue(1, "must not paste");
     f.socket.send(stop ? { type: "input", pane_id: f.pane, text: "\u001b", stop: true } : { type: "input", pane_id: f.pane, text: "\u001b" });
@@ -1217,7 +1314,7 @@ describe("a create request's first message", () => {
    * recorder then starts in the pane under the name of the agent that comes up.
    */
   const launched = async (label: string, comesUp: string) => {
-    const created = await herdrRpc<{ workspace: { workspace_id: string } }>("workspace.create", { label: `herdr-web-ui-test-pending-${label}`, cwd: root, focus: false });
+    const created = await herdrRpc<{ workspace: { workspace_id: string } }>("workspace.create", { label: `ovis-test-pending-${label}`, cwd: root, focus: false });
     const entry: (typeof active)[number] = { stop: () => {}, sockets: [], workspace: created.workspace.workspace_id }; active.push(entry);
     const server = createServer({ port: 0, stateDir: join(root, `state-${label}`) });
     entry.stop = server.stop;
@@ -1270,7 +1367,7 @@ describe("a create request's first message", () => {
   }, 30_000);
 
   it("queued while the shell was still in front, is bound to the agent the launch brought up: a same-kind replacement before its page attaches gets it held, never typed", async () => {
-    const created = await herdrRpc<{ workspace: { workspace_id: string } }>("workspace.create", { label: "herdr-web-ui-test-pending-first-launch-replaced", cwd: root, focus: false });
+    const created = await herdrRpc<{ workspace: { workspace_id: string } }>("workspace.create", { label: "ovis-test-pending-first-launch-replaced", cwd: root, focus: false });
     const entry: (typeof active)[number] = { stop: () => {}, sockets: [], workspace: created.workspace.workspace_id }; active.push(entry);
     const server = createServer({ port: 0, stateDir: join(root, "state-first-launch-replaced") });
     entry.stop = server.stop;
@@ -1312,7 +1409,7 @@ describe("a create request's first message", () => {
   }, 30_000);
 
   it("queued for a launched agent that came up and then quit before it went, is held for Send now or Discard, never left waiting and never typed", async () => {
-    const created = await herdrRpc<{ workspace: { workspace_id: string } }>("workspace.create", { label: "herdr-web-ui-test-pending-first-launch-quit", cwd: root, focus: false });
+    const created = await herdrRpc<{ workspace: { workspace_id: string } }>("workspace.create", { label: "ovis-test-pending-first-launch-quit", cwd: root, focus: false });
     const entry: (typeof active)[number] = { stop: () => {}, sockets: [], workspace: created.workspace.workspace_id }; active.push(entry);
     const server = createServer({ port: 0, stateDir: join(root, "state-first-launch-quit") });
     entry.stop = server.stop;
@@ -1363,7 +1460,7 @@ describe("a create request's first message", () => {
   }, 30_000);
 
   it("held from the start, still learns its launched agent: once that agent came up and quit, Send now answers pending_target_changed, not that it is not up yet", async () => {
-    const created = await herdrRpc<{ workspace: { workspace_id: string } }>("workspace.create", { label: "herdr-web-ui-test-pending-first-held-quit", cwd: root, focus: false });
+    const created = await herdrRpc<{ workspace: { workspace_id: string } }>("workspace.create", { label: "ovis-test-pending-first-held-quit", cwd: root, focus: false });
     const entry: (typeof active)[number] = { stop: () => {}, sockets: [], workspace: created.workspace.workspace_id }; active.push(entry);
     const server = createServer({ port: 0, stateDir: join(root, "state-first-held-quit") });
     entry.stop = server.stop;
@@ -1403,7 +1500,7 @@ describe("a create request's first message", () => {
   }, 30_000);
 
   it("held from the start, says pending_target_changed instead of the page being gone once its launched agent quit, and Send now answers the same", async () => {
-    const created = await herdrRpc<{ workspace: { workspace_id: string } }>("workspace.create", { label: "herdr-web-ui-test-pending-first-held-reason", cwd: root, focus: false });
+    const created = await herdrRpc<{ workspace: { workspace_id: string } }>("workspace.create", { label: "ovis-test-pending-first-held-reason", cwd: root, focus: false });
     const entry: (typeof active)[number] = { stop: () => {}, sockets: [], workspace: created.workspace.workspace_id }; active.push(entry);
     const server = createServer({ port: 0, stateDir: join(root, "state-first-held-reason") });
     entry.stop = server.stop;
@@ -1446,7 +1543,7 @@ describe("a create request's first message", () => {
   }, 30_000);
 
   it("bound to a launch that runs behind a wrapper in front of the pane, is typed once into that agent, not held", async () => {
-    const created = await herdrRpc<{ workspace: { workspace_id: string } }>("workspace.create", { label: "herdr-web-ui-test-pending-first-wrapped", cwd: root, focus: false });
+    const created = await herdrRpc<{ workspace: { workspace_id: string } }>("workspace.create", { label: "ovis-test-pending-first-wrapped", cwd: root, focus: false });
     const entry: (typeof active)[number] = { stop: () => {}, sockets: [], workspace: created.workspace.workspace_id }; active.push(entry);
     const server = createServer({ port: 0, stateDir: join(root, "state-first-wrapped") });
     entry.stop = server.stop;
@@ -1518,7 +1615,7 @@ describe("a create request's first message", () => {
   }, 30_000);
 
   it("queued for a launch that died before any event saw it, is held when an agent of the same kind the user starts comes up, never typed into it", async () => {
-    const created = await herdrRpc<{ workspace: { workspace_id: string } }>("workspace.create", { label: "herdr-web-ui-test-pending-first-launch-died", cwd: root, focus: false });
+    const created = await herdrRpc<{ workspace: { workspace_id: string } }>("workspace.create", { label: "ovis-test-pending-first-launch-died", cwd: root, focus: false });
     const entry: (typeof active)[number] = { stop: () => {}, sockets: [], workspace: created.workspace.workspace_id }; active.push(entry);
     const server = createServer({ port: 0, stateDir: join(root, "state-first-launch-died") });
     entry.stop = server.stop;

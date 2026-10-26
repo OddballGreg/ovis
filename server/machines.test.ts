@@ -51,21 +51,43 @@ async function within(event: Promise<void>, what = "the remote answer was not ca
 }
 
 describe("machine settings recovery", () => {
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)("logs the cause when settings are unreadable", () => {
+    // Given a settings file this user cannot read.
+    const dir = mkdtempSync(join(tmpdir(), "herdr-machine-settings-"));
+    const path = join(dir, "machine-settings.json");
+    writeFileSync(path, "{}", { mode: 0o000 });
+    const errors = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      // When the manager loads its settings.
+      const manager = new MachineManager(dir, {} as PushService, {} as CompletionTracker, async () => { throw new Error("local offline"); });
+      manager.stop();
+      // Then only the filesystem code accompanies the recovery diagnostic.
+      expect(errors.mock.calls).toEqual([[expect.any(String), "EACCES"]]);
+    } finally {
+      errors.mockRestore();
+      chmodSync(path, 0o600);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("logs damaged settings but stays quiet for valid or missing settings", () => {
     const dir = mkdtempSync(join(tmpdir(), "herdr-machine-settings-"));
     const originalError = console.error;
-    const errors: string[] = [];
-    console.error = (...args: unknown[]) => errors.push(args.join(" "));
+    const errors: unknown[][] = [];
+    console.error = (...args: unknown[]) => errors.push(args);
     const createManager = () => new MachineManager(dir, {} as PushService, {} as CompletionTracker, async () => { throw new Error("local offline"); });
     try {
       const valid = createManager();
       valid.stop();
       expect(errors).toEqual([]);
 
-      writeFileSync(join(dir, "machine-settings.json"), "{");
+      const secret = "GATE_SECRET_1731";
+      writeFileSync(join(dir, "machine-settings.json"), `{"token":${secret}}`);
       const damaged = createManager();
       damaged.stop();
-      expect(errors).toEqual([`Cannot read ${join(dir, "machine-settings.json")}; remote PC settings start empty`]);
+      expect(errors).toHaveLength(1);
+      expect(errors[0]?.[1]).toBe("not valid JSON");
+      expect(errors.flat().map(String).join(" ")).not.toContain(secret);
 
       errors.length = 0;
       writeFileSync(join(dir, "machine-settings.json"), JSON.stringify({ auto_update_bridges: true }));
@@ -322,7 +344,7 @@ describe("machine boundaries", () => {
     // the commands an agent offers in a folder before any pane runs it (the new workspace and tab dialogs)
     for (const path of ["agent/rename", "agent/commands"]) expect(MACHINE_PROXY_PATH.test(path)).toBe(true);
     for (const path of ["auth", "push", "updates/install", "machines/setup", "bridge", "../auth", "pane/../../auth", "pane/prompt/answer/extra", "pane/rewind", "tab/move/extra", "tab/close/extra"]) expect(MACHINE_PROXY_PATH.test(path)).toBe(false);
-    for (const path of ["session", "agents", "integrations", "pane/files", "pane/find", "pane/image", "pane/prompt/answer", "pane/input", "workspace/create", "tab/create", "tab/rename", "tab/close"]) expect(MACHINE_PROXY_PATH.test(path)).toBe(true);
+    for (const path of ["session", "agents", "integrations", "pane/files", "pane/find", "pane/image", "pane/prompt/answer", "pane/omo-tasks", "pane/background-agent", "pane/input", "workspace/create", "tab/create", "tab/rename", "tab/close"]) expect(MACHINE_PROXY_PATH.test(path)).toBe(true);
     for (const path of ["session", "agents", "integrations", "pane/files", "pane/find", "pane/image", "pane/prompt/answer", "pane/split", "pane/zoom", "pane/swap", "pane/resize", "pane/clear", "workspace/create", "tab/create", "tab/rename", "tab/close"]) expect(MACHINE_PROXY_PATH.test(path)).toBe(true);
   });
 });
@@ -676,8 +698,9 @@ describe("terminal attach capability", () => {
       return path;
     };
     try {
-      expect(isRealNode(stand("node", "echo"))).toBe(true);
-      expect(isRealNode(stand("bun-as-node", "echo 1.4.2"))).toBe(false);
+      expect(isRealNode(stand("node", "echo 22.23.2"))).toBe(true);
+      expect(isRealNode(stand("old-node", "echo 16.20.2"))).toBe(false);
+      expect(isRealNode(stand("bun-as-node", "echo bun"))).toBe(false);
       expect(isRealNode(stand("broken", "exit 1"))).toBe(false);
       expect(isRealNode(join(dir, "absent"))).toBe(false);
       // a node that never answers is given up on, not waited for

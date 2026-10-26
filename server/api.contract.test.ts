@@ -1,6 +1,7 @@
 import { describe, expect, it, beforeAll, afterAll, spyOn } from "bun:test";
 import { Database } from "bun:sqlite";
-import { appendFileSync, chmodSync, copyFileSync, mkdirSync, mkdtempSync, existsSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, closeSync, constants as fsConstants, copyFileSync, mkdirSync, mkdtempSync, existsSync, lstatSync, readFileSync, readdirSync, readlinkSync, realpathSync, openSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, watch, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { ConversationMonitor } from "./conversation-monitor.ts";
@@ -16,18 +17,24 @@ import { Telemetry } from "./telemetry.ts";
 import { NOTICE_VERSION, telemetryHarnesses, type TelemetryActive, type TelemetryEvent, type TelemetryStatus } from "../shared/telemetry.ts";
 import { DEFAULT_SETTINGS, telemetrySettingsSnapshot } from "../src/lib/settings.ts";
 import { HerdrSocket } from "../src/lib/ws.ts";
-import { HerdrError, herdrRpc, paneRead, ping, sessionSnapshot, tabCreate, workspaceCreate, workspaceClose } from "./herdr/client.ts";
+import { HerdrError, herdrRpc, paneRead, ping, sessionSnapshot, subscribeEvents, tabCreate, workspaceCreate, workspaceClose } from "./herdr/client.ts";
 import { startFakePushService, type FakePushService } from "./push.fake.ts";
 import { descriptorPath, type BridgeDescriptor } from "./bridge.ts";
 import { handleMachineRequest } from "./machine-api.ts";
 import type { MachineManager } from "./machines.ts";
 import { TailnetIdentitySource } from "./tailscale.ts";
 import { forgetTranscriptState } from "./conversation.ts";
-import type { RepoDiffFileList, RepoDiffFilePatch, SessionHistoryResponse } from "../shared/protocol.ts";
+import type { RepoDiffFileList, RepoDiffFilePatch, RepoDiffRefs, SessionHistoryResponse, SessionResumeResponse } from "../shared/protocol.ts";
+import { claudeProjectDir } from "./claude-store.ts";
+import { testShellEnv } from "../scripts/test-shell.ts";
 import { PendingInputError, PendingInputs } from "./pending-input.ts";
+import { loginPathProbe, ShellAgentLocator, type LoginPathProbe } from "./shell-agent.ts";
+import { DeviceStore } from "./devices.ts";
+import type { MachineEvent } from "../shared/machines.ts";
+import { MAX_MUTED_PANES, type SharedPreferences } from "../shared/preferences.ts";
 
 /**
- * Contract test for herdr-web-ui's HTTP + WS surface.
+ * Contract test for Ovis's HTTP + WS surface.
  * Runs against the REAL herdr server on the developer's machine: these are the
  * integration seams the browser UI depends on, so a mock here would prove nothing.
  * Tests never mutate a user's pane; mutation cases create labeled workspaces and close them in afterAll.
@@ -35,10 +42,13 @@ import { PendingInputError, PendingInputs } from "./pending-input.ts";
  * user's ~/.config/herdr-web-ui holds their real devices, which a test must never page.
  */
 let server: { port: number; stop: () => void };
-const stateDir = mkdtempSync(join(tmpdir(), "herdr-web-ui-contract-"));
+const stateDir = mkdtempSync(join(tmpdir(), "ovis-contract-"));
 
-beforeAll(() => {
-  server = createServer({ port: 0, stateDir, alertTiming: { short: 0, long: 0, longTurn: 0 }, pushLoopbackHttp: true });
+beforeAll(async () => {
+  const started = createServer({ port: 0, stateDir, alertTiming: { short: 0, long: 0, longTurn: 0 }, pushLoopbackHttp: true });
+  server = started;
+  // herdr's events are heard from here on: a workspace a test creates is pushed as session-changed
+  await started.statusReady;
 });
 
 afterAll(() => {
@@ -62,7 +72,7 @@ describe("removed Chat rewind API", () => {
 
 describe("Grok conversation API", () => {
   it.skipIf(process.platform !== "linux")("uses exact process/session evidence, validators and revision-bound output refs", async () => {
-    const root = mkdtempSync(join(tmpdir(), "herdr-web-ui-grok-contract-"));
+    const root = mkdtempSync(join(tmpdir(), "ovis-grok-contract-"));
     const id = "00000000-0000-4000-8000-000000000001";
     const directory = join(root, "sessions", "%2Ffictional", id);
     mkdirSync(directory, { recursive: true });
@@ -84,7 +94,7 @@ describe("Grok conversation API", () => {
     const executable = join(root, "grok");
     const nativeExecutable = join(root, "grok-1.0.52-linux-x86_64");
     copyFileSync("/bin/sleep", nativeExecutable); symlinkSync("grok-1.0.52-linux-x86_64", executable); chmodSync(executable, 0o755);
-    const created = await workspaceCreate({ cwd: root, label: "herdr-web-ui-test-grok-api" });
+    const created = await workspaceCreate({ cwd: root, label: "ovis-test-grok-api" });
     let app: ReturnType<typeof createServer> | undefined;
     try {
       const paneId = created.root_pane.pane_id;
@@ -148,7 +158,7 @@ describe("Grok conversation API", () => {
 
 describe("Agy conversation API", () => {
   it.skipIf(process.platform !== "linux")("binds the selected held lock, honors saved rewinds and recovers from an unwritten store", async () => {
-    const root = mkdtempSync(join(tmpdir(), "herdr-web-ui-agy-contract-"));
+    const root = mkdtempSync(join(tmpdir(), "ovis-agy-contract-"));
     const id = "00000000-0000-4000-8000-000000000031";
     const path = join(root, "brain", id, ".system_generated", "logs", "transcript_full.jsonl");
     mkdirSync(join(path, ".."), { recursive: true });
@@ -159,7 +169,7 @@ describe("Agy conversation API", () => {
     writeFileSync(join(root, "presence", "00000000-0000-4000-8000-000000000032.lock"), "");
     const executable = join(root, "agy");
     copyFileSync("/bin/sleep", executable); chmodSync(executable, 0o755);
-    const created = await workspaceCreate({ cwd: root, label: "herdr-web-ui-test-agy-api" });
+    const created = await workspaceCreate({ cwd: root, label: "ovis-test-agy-api" });
     let app: ReturnType<typeof createServer> | undefined, db: Database | undefined;
     let monitor: ConversationMonitor | undefined;
     try {
@@ -254,7 +264,7 @@ describe("GET /api/pane/plan", () => {
 
 describe("OpenCode model API", () => {
   it("lists nothing and switches nothing while the OpenCode HTTP source is off, in the shared error envelope", async () => {
-    // the contract server starts with no HERDR_WEB_OPENCODE_URL or HERDR_WEB_OPENCODE_SERVE: no list, and no key is sent
+    // the contract server starts with no OVIS_OPENCODE_URL or OVIS_OPENCODE_SERVE: no list, and no key is sent
     expect(await (await fetch(`${base()}/api/agent/models?agent=opencode`)).json()).toEqual({ available: false, providers: [], current: null });
     for (const [url, method, body, status, code] of [
       [`${base()}/api/pane/opencode-models`, "GET", undefined, 400, "missing_pane_id"],
@@ -274,8 +284,8 @@ describe("OpenCode model API", () => {
 
 describe("Devin conversation API", () => {
   it("keeps the terminal fallback rather than guessing a shell pane's session", async () => {
-    const state = mkdtempSync(join(tmpdir(), "herdr-web-ui-devin-contract-"));
-    const created = await workspaceCreate({ cwd: state, label: "herdr-web-ui-test-devin-identity" });
+    const state = mkdtempSync(join(tmpdir(), "ovis-devin-contract-"));
+    const created = await workspaceCreate({ cwd: state, label: "ovis-test-devin-identity" });
     const dbPath = join(state, "sessions.db");
     let bridge: ReturnType<typeof createServer> | undefined;
     try {
@@ -300,6 +310,113 @@ describe("Devin conversation API", () => {
       rmSync(state, { recursive: true, force: true });
     }
   });
+});
+
+describe("native tool call id and state on GET /api/pane/conversation", () => {
+  it.skipIf(process.platform !== "linux")("carries Claude's id and recorded outcome, Codex's id and pending only, and neither for another agent", async () => {
+    const root = mkdtempSync(join(tmpdir(), "herdr-web-ui-call-state-contract-"));
+    const cwd = realpathSync(root);
+    const originalHome = process.env["HOME"];
+    const claudeId = "6f1c2a9e-0b7d-4c3e-8a51-2d9f0e7b4c11";
+    const claudeFile = join(cwd, ".claude", "projects", claudeProjectDir(cwd), `${claudeId}.jsonl`);
+    const codexHome = join(cwd, "codex");
+    const codexFile = join(codexHome, "sessions", "2026", "10", "21", "rollout-2026-10-21T09-00-00-00000000-0000-4000-8000-000000000014.jsonl");
+    const ompFile = join(cwd, ".omp", "agent", "sessions", "-call-state", "2026-10-21T00-00-00-000Z_omp-call-state.jsonl");
+    for (const file of [claudeFile, codexFile, ompFile]) mkdirSync(join(file, ".."), { recursive: true });
+    const line = (record: unknown) => `${JSON.stringify(record)}\n`;
+    const todos = { todos: [{ content: "Read", status: "completed", activeForm: "Reading" }] };
+    const claudeUse = (id: string) => line({ type: "assistant", timestamp: "2026-10-21T09:00:01.000Z", message: { role: "assistant", stop_reason: "tool_use", content: [{ type: "tool_use", id, name: "TodoWrite", input: todos }] } });
+    const claudeResult = (id: string, content: string, isError?: boolean) => line({ type: "user", timestamp: "2026-10-21T09:00:02.000Z", message: { role: "user", content: [{ type: "tool_result", tool_use_id: id, content, ...(isError === undefined ? {} : { is_error: isError }) }] } });
+    writeFileSync(claudeFile, line({ type: "user", timestamp: "2026-10-21T09:00:00.000Z", message: { role: "user", content: "plan it" } }) + claudeUse("toolu_ok") + claudeUse("toolu_err") + claudeUse("toolu_wait"));
+    const codexCall = (id: string, kind: "function_call" | "custom_tool_call") => line({ type: "response_item", timestamp: "2026-10-21T09:00:01.000Z", payload: kind === "function_call"
+      ? { type: kind, call_id: id, name: "update_plan", arguments: JSON.stringify({ plan: [{ step: "Read", status: "completed" }] }) }
+      : { type: kind, call_id: id, name: "apply_patch", input: "*** Begin Patch\n*** End Patch" } });
+    const codexOutput = (id: string, kind: "function_call_output" | "custom_tool_call_output", output: string) => line({ type: "response_item", timestamp: "2026-10-21T09:00:02.000Z", payload: { type: kind, call_id: id, output } });
+    writeFileSync(codexFile, line({ type: "session_meta", payload: { id: "00000000-0000-4000-8000-000000000014", timestamp: "2026-10-21T09:00:00.000Z", cwd, source: "cli" } })
+      + line({ type: "event_msg", timestamp: "2026-10-21T09:00:00.000Z", payload: { type: "user_message", message: "plan it" } })
+      + codexCall("call_fn", "function_call") + codexCall("call_custom", "custom_tool_call") + codexCall("call_fail_text", "function_call"));
+    writeFileSync(ompFile, [
+      { type: "session", version: 3, id: "omp-call-state", cwd },
+      { type: "message", id: "u1", parentId: null, timestamp: "2026-10-21T09:00:00.000Z", message: { role: "user", content: [{ type: "text", text: "plan it" }] } },
+      { type: "message", id: "a1", parentId: "u1", timestamp: "2026-10-21T09:00:01.000Z", message: { role: "assistant", content: [{ type: "toolCall", id: "omp_call_1", name: "todo", arguments: { op: "init", list: [{ phase: "Plan", items: ["Read"] }] } }] } },
+      { type: "message", id: "r1", parentId: "a1", timestamp: "2026-10-21T09:00:02.000Z", message: { role: "toolResult", toolCallId: "omp_call_1", toolName: "todo", isError: false, content: [{ type: "text", text: "Overall: 0/1 done.\n  Plan:\n    - [ ] Read" }] } },
+    ].map(line).join(""));
+    const workspaces: string[] = [];
+    let app: ReturnType<typeof createServer> | undefined;
+    let seq = Date.now() * 1000;
+    const agentPane = async (agent: string, session: Record<string, string>): Promise<string> => {
+      const created = await workspaceCreate({ cwd, label: `herdr-web-ui-test-call-state-${agent}` });
+      workspaces.push(created.workspace.workspace_id);
+      const paneId = created.root_pane.pane_id;
+      await herdrRpc("pane.report_agent", { pane_id: paneId, source: "manual", agent, state: "idle" });
+      await herdrRpc("pane.report_agent_session", { pane_id: paneId, source: `herdr:${agent}`, agent, seq: ++seq, ...session });
+      return paneId;
+    };
+    try {
+      process.env["HOME"] = cwd;
+      forgetTranscriptState();
+      const claude = await agentPane("claude", { agent_session_id: claudeId });
+      // Codex is found by the rollout its process holds open: a native stand-in that only sleeps
+      const codexExe = join(cwd, "bin", "codex");
+      mkdirSync(join(cwd, "bin"));
+      copyFileSync("/bin/sleep", codexExe); chmodSync(codexExe, 0o755);
+      const codexCreated = await workspaceCreate({ cwd, label: "herdr-web-ui-test-call-state-codex" });
+      workspaces.push(codexCreated.workspace.workspace_id);
+      const codex = codexCreated.root_pane.pane_id;
+      await herdrRpc("pane.send_text", { pane_id: codex, text: `${codexExe} 600 3<${codexFile}\n` });
+      for (const deadline = Date.now() + 10_000;;) {
+        if ((await sessionSnapshot()).panes.find((pane) => pane.pane_id === codex)?.agent === "codex") break;
+        if (Date.now() > deadline) throw new Error("fixture Codex process did not start");
+        await Bun.sleep(50);
+      }
+      // omp's session report is taken for a pane herdr sees running omp: the same kind of stand-in
+      const ompExe = join(cwd, "bin", "omp");
+      copyFileSync("/bin/sleep", ompExe); chmodSync(ompExe, 0o755);
+      const ompCreated = await workspaceCreate({ cwd, label: "herdr-web-ui-test-call-state-omp" });
+      workspaces.push(ompCreated.workspace.workspace_id);
+      const omp = ompCreated.root_pane.pane_id;
+      // omp keeps its sessions under its own home, which the bridge reads from the process (#1898)
+      await herdrRpc("pane.send_text", { pane_id: omp, text: `HOME='${cwd}' exec '${ompExe}' 600\n` });
+      for (const deadline = Date.now() + 10_000;;) {
+        if ((await sessionSnapshot()).panes.find((pane) => pane.pane_id === omp)?.agent === "omp") break;
+        if (Date.now() > deadline) throw new Error("fixture omp process did not start");
+        await Bun.sleep(50);
+      }
+      await herdrRpc("pane.report_agent", { pane_id: omp, source: "herdr:omp", agent: "omp", state: "idle", seq: ++seq });
+      await herdrRpc("pane.report_agent_session", { pane_id: omp, source: "herdr:omp", agent: "omp", seq: ++seq, agent_session_path: ompFile, session_start_source: "startup" });
+      app = createServer({ port: 0, hostname: "127.0.0.1", token: "", stateDir: join(cwd, "state"), codexHome });
+      const tools = async (paneId: string, source: string) => {
+        const response = await fetch(`http://127.0.0.1:${app!.port}/api/pane/conversation?pane_id=${encodeURIComponent(paneId)}`);
+        expect(response.status).toBe(200);
+        const body = await response.json() as { source: string; turns: { parts: Record<string, unknown>[] }[] };
+        expect(body.source).toBe(source);
+        return body.turns.flatMap((turn) => turn.parts).filter((part) => part["kind"] === "tool");
+      };
+      const idState = (parts: Record<string, unknown>[]) => parts.map((part) => [part["call_id"], "state" in part ? part["state"] : "omitted"]);
+
+      // before any result: every native call is pending under its own id
+      expect(idState(await tools(claude, "claude-transcript"))).toEqual([["toolu_ok", "pending"], ["toolu_err", "pending"], ["toolu_wait", "pending"]]);
+      expect(idState(await tools(codex, "codex-transcript"))).toEqual([["call_fn", "pending"], ["call_custom", "pending"], ["call_fail_text", "pending"]]);
+
+      // results appended: Claude's flag decides (an empty result is ok); the next poll replaces the page
+      appendFileSync(claudeFile, claudeResult("toolu_ok", "") + claudeResult("toolu_err", "<tool_use_error>InputValidationError</tool_use_error>", true));
+      expect(idState(await tools(claude, "claude-transcript"))).toEqual([["toolu_ok", "ok"], ["toolu_err", "error"], ["toolu_wait", "pending"]]);
+      // Codex records no outcome: either output record ends pending, empty or failure-looking alike
+      appendFileSync(codexFile, codexOutput("call_fn", "function_call_output", "") + codexOutput("call_custom", "custom_tool_call_output", "applied")
+        + codexOutput("call_fail_text", "function_call_output", "Error: plan update failed\nProcess exited with code 1"));
+      expect(idState(await tools(codex, "codex-transcript"))).toEqual([["call_fn", "omitted"], ["call_custom", "omitted"], ["call_fail_text", "omitted"]]);
+
+      // another agent's parser fabricates neither, though its transcript has ids of its own
+      const ompTools = await tools(omp, "omp-transcript");
+      expect(ompTools).toHaveLength(1);
+      expect(["call_id" in ompTools[0]!, "state" in ompTools[0]!]).toEqual([false, false]);
+    } finally {
+      app?.stop();
+      for (const id of workspaces) await workspaceClose(id);
+      if (originalHome === undefined) delete process.env["HOME"]; else process.env["HOME"] = originalHome;
+      forgetTranscriptState(); rmSync(root, { recursive: true, force: true });
+    }
+  }, 20_000);
 });
 
 describe("usage API", () => {
@@ -367,7 +484,7 @@ describe("voice API", () => {
         return new Response(`data: ${JSON.stringify({ type: "transcript.text.done", text: "git status" })}\n\n`, { headers: { "content-type": "text/event-stream" } });
       },
     });
-    const voice = new VoiceService({ stateDir: voiceState, env: { HERDR_WEB_OPENAI_BASE_URL: `http://127.0.0.1:${provider.port}/v1` }, fetch });
+    const voice = new VoiceService({ stateDir: voiceState, env: { OVIS_OPENAI_BASE_URL: `http://127.0.0.1:${provider.port}/v1` }, fetch });
     const open = createServer({ port: 0, stateDir: voiceState, voice });
     const gated = createServer({ port: 0, stateDir: voiceState, voice, token: "test-voice-token" });
     const at = (path: string) => `http://localhost:${open.port}${path}`;
@@ -725,6 +842,27 @@ describe("phone access", () => {
   });
 });
 
+describe("herdr's selection preference", () => {
+  it("answers this PC's herdr copy_on_select, read again on each request, uncached and behind the token gate", async () => {
+    const state = mkdtempSync(join(tmpdir(), "ovis-herdr-ui-route-"));
+    const configPath = join(state, "config.toml");
+    writeFileSync(configPath, "[ui]\ncopy_on_select = false\n");
+    const gated = createServer({ port: 0, stateDir: state, token: "test-herdr-ui-token", herdrConfigPath: configPath });
+    try {
+      const url = `http://localhost:${gated.port}/api/herdr-ui`;
+      expect((await fetch(url)).status).toBe(401);
+      const headers = { authorization: "Bearer test-herdr-ui-token" };
+      const response = await fetch(url, { headers });
+      expect(response.status).toBe(200);
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      expect(await response.json()).toEqual({ copy_on_select: false });
+      writeFileSync(configPath, "[ui]\ncopy_on_select = true\n");
+      expect(await (await fetch(url, { headers })).json()).toEqual({ copy_on_select: true });
+      expect((await fetch(url, { method: "POST", headers: { ...headers, origin: `http://localhost:${gated.port}` } })).status).toBe(400);
+    } finally { gated.stop(); rmSync(state, { recursive: true, force: true }); }
+  });
+});
+
 describe("Portal API", () => {
   it("does not serve requests until startup cleanup completes", async () => {
     const state = mkdtempSync(join(tmpdir(), "herdr-portal-startup-gate-"));
@@ -873,7 +1011,7 @@ describe("tab rename and close", () => {
   });
 
   it("renames a tab, closes one beside another, and takes the workspace with its last tab", async () => {
-    const owned = await workspaceCreate({ cwd: tmpdir(), label: "herdr-web-ui-test-tab-rename-close" });
+    const owned = await workspaceCreate({ cwd: tmpdir(), label: "ovis-test-tab-rename-close" });
     const id = owned.workspace.workspace_id;
     let closed = false;
     try {
@@ -924,7 +1062,7 @@ describe("tab reorder", () => {
     expect(((await missing.json()) as ApiError).error.code).toBe("tab_not_found");
   });
   it("uses boundaries before removal, preserves focus and IDs, and rejects out-of-range moves", async () => {
-    const owned = await workspaceCreate({ cwd: tmpdir(), label: "herdr-web-ui-test-tab-reorder" });
+    const owned = await workspaceCreate({ cwd: tmpdir(), label: "ovis-test-tab-reorder" });
     const id = owned.workspace.workspace_id;
     try {
       const second = await tabCreate({ workspaceId: id, label: "build" });
@@ -962,7 +1100,7 @@ describe("agent rename", () => {
     (await herdrRpc<{ agents: Array<{ pane_id: string; name?: string | null }> }>("agent.list", {})).agents.find((agent) => agent.pane_id === paneId)?.name ?? null;
 
   it("sets, reads back and clears a pane's agent name, and passes herdr's refusals through", async () => {
-    const owned = await workspaceCreate({ cwd: tmpdir(), label: "herdr-web-ui-test-agent-rename" });
+    const owned = await workspaceCreate({ cwd: tmpdir(), label: "ovis-test-agent-rename" });
     const id = owned.workspace.workspace_id;
     const paneId = owned.root_pane.pane_id;
     try {
@@ -971,7 +1109,7 @@ describe("agent rename", () => {
       expect(shell.status).toBe(404);
       expect(((await shell.json()) as ApiError).error.code).toBe("agent_not_found");
 
-      await herdrRpc("pane.report_agent", { pane_id: paneId, source: "herdr-web-ui-test", agent: "claude", state: "idle" });
+      await herdrRpc("pane.report_agent", { pane_id: paneId, source: "ovis-test", agent: "claude", state: "idle" });
       const set = await post({ pane_id: paneId, name: "webui-rename-a" });
       expect(set.status).toBe(200);
       expect(await set.json()).toEqual({ ok: true });
@@ -990,7 +1128,7 @@ describe("agent rename", () => {
 
       // unique among the session's live agents
       const second = await tabCreate({ workspaceId: id });
-      await herdrRpc("pane.report_agent", { pane_id: second.root_pane.pane_id, source: "herdr-web-ui-test", agent: "codex", state: "working" });
+      await herdrRpc("pane.report_agent", { pane_id: second.root_pane.pane_id, source: "ovis-test", agent: "codex", state: "working" });
       const taken = await post({ pane_id: second.root_pane.pane_id, name: "webui-rename-a" });
       expect(taken.status).toBe(404);
       expect(((await taken.json()) as ApiError).error.code).toBe("agent_name_taken");
@@ -1007,9 +1145,9 @@ describe("agent rename", () => {
   });
 
   it("forwards a remote rename with the registered bridge token, not the browser's", async () => {
-    const owned = await workspaceCreate({ cwd: tmpdir(), label: "herdr-web-ui-test-agent-rename-bridge" });
+    const owned = await workspaceCreate({ cwd: tmpdir(), label: "ovis-test-agent-rename-bridge" });
     const paneId = owned.root_pane.pane_id;
-    const state = mkdtempSync(join(tmpdir(), "herdr-web-ui-agent-rename-bridge-"));
+    const state = mkdtempSync(join(tmpdir(), "ovis-agent-rename-bridge-"));
     // the other PC's bridge asks its browsers for a token of its own; the proxy holds only the bridge token it registered
     const bridge = createServer({ port: 0, hostname: "127.0.0.1", token: "test-browser-token", machines: false, registerBridge: true, stateDir: state, tailscaleOwner: null });
     const registered = JSON.parse(readFileSync(descriptorPath(), "utf8")) as BridgeDescriptor;
@@ -1017,7 +1155,7 @@ describe("agent rename", () => {
     const manager = { endpoint: (id: string) => id === "rename-remote" ? { url: endpoint, token: registered.token } : null, trackTerminal: () => () => {} } as unknown as MachineManager;
     try {
       expect(registered.token).not.toBe("test-browser-token");
-      await herdrRpc("pane.report_agent", { pane_id: paneId, source: "herdr-web-ui-test", agent: "claude", state: "idle" });
+      await herdrRpc("pane.report_agent", { pane_id: paneId, source: "ovis-test", agent: "claude", state: "idle" });
       // the browser token is deliberately absent: the proxy must authenticate with the bridge token
       expect((await fetch(`${endpoint}/api/agent/rename`, { method: "POST", body: "{}" })).status).toBe(401);
       const res = await handleMachineRequest(new Request("http://127.0.0.1/api/machines/rename-remote/agent/rename", {
@@ -1035,7 +1173,7 @@ describe("agent rename", () => {
   });
 
   it("answers the new-tab dialog's agent commands to another PC's registered bridge token", async () => {
-    const state = mkdtempSync(join(tmpdir(), "herdr-web-ui-agent-commands-bridge-"));
+    const state = mkdtempSync(join(tmpdir(), "ovis-agent-commands-bridge-"));
     const bridge = createServer({ port: 0, hostname: "127.0.0.1", token: "test-browser-token", machines: false, registerBridge: true, stateDir: state, tailscaleOwner: null });
     const registered = JSON.parse(readFileSync(descriptorPath(), "utf8")) as BridgeDescriptor;
     const endpoint = `http://127.0.0.1:${bridge.port}`;
@@ -1099,8 +1237,8 @@ describe("tab creation", () => {
   });
 
   it("creates a sibling tab with its own cwd and label without adding a workspace", async () => {
-    const owned = await workspaceCreate({ cwd: tmpdir(), label: "herdr-web-ui-test-tab" });
-    const cwd = mkdtempSync(join(tmpdir(), "herdr-web-ui-tab-cwd-"));
+    const owned = await workspaceCreate({ cwd: tmpdir(), label: "ovis-test-tab" });
+    const cwd = mkdtempSync(join(tmpdir(), "ovis-tab-cwd-"));
     try {
       const before = (await herdrRpc<{ snapshot: SessionSnapshot }>("session.snapshot", {})).snapshot;
       const res = await post({ workspace_id: owned.workspace.workspace_id, cwd, label: "second tab", agent: null });
@@ -1133,7 +1271,7 @@ describe("tab creation", () => {
   });
 
   it("supports the authenticated local-PC alias without allowing other tab routes", async () => {
-    const owned = await workspaceCreate({ cwd: tmpdir(), label: "herdr-web-ui-test-tab-local-alias" });
+    const owned = await workspaceCreate({ cwd: tmpdir(), label: "ovis-test-tab-local-alias" });
     try {
       const res = await fetch(`${base()}/api/machines/local/tab/create`, {
         method: "POST", headers: { "content-type": "application/json", "x-herdr-machine": "1" },
@@ -1148,8 +1286,8 @@ describe("tab creation", () => {
   });
 
   it("forwards remote tab creation using the registered bridge token", async () => {
-    const owned = await workspaceCreate({ cwd: tmpdir(), label: "herdr-web-ui-test-tab-bridge" });
-    const state = mkdtempSync(join(tmpdir(), "herdr-web-ui-tab-bridge-"));
+    const owned = await workspaceCreate({ cwd: tmpdir(), label: "ovis-test-tab-bridge" });
+    const state = mkdtempSync(join(tmpdir(), "ovis-tab-bridge-"));
     const bridge = createServer({ port: 0, hostname: "127.0.0.1", token: "test-browser-token", machines: false, registerBridge: true, stateDir: state, tailscaleOwner: null });
     const registered = JSON.parse(readFileSync(descriptorPath(), "utf8")) as BridgeDescriptor;
     const endpoint = `http://127.0.0.1:${bridge.port}`;
@@ -1186,7 +1324,7 @@ describe("tab creation", () => {
   it("shares unique agent names across concurrent tabs and preserves a tab when an explicit name collides", async () => {
     const first = await fetch(`${base()}/api/workspace/create`, {
       method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ cwd: tmpdir(), label: "herdr-web-ui-test-tab-agents", agent: { kind: "muse" } }),
+      body: JSON.stringify({ cwd: tmpdir(), label: "ovis-test-tab-agents", agent: { kind: "muse" } }),
     });
     const owned = await first.json() as WorkspaceCreated;
     const nameOf = async (paneId: string) => (await herdrRpc<{ agent: { name: string } }>("agent.get", { target: paneId })).agent.name;
@@ -1213,7 +1351,7 @@ describe("tab creation", () => {
   }, 20_000);
 
   it("refuses a first message without an agent, an empty, oversized or control-laden one, before anything is made", async () => {
-    const owned = await workspaceCreate({ cwd: tmpdir(), label: "herdr-web-ui-test-tab-first-message" });
+    const owned = await workspaceCreate({ cwd: tmpdir(), label: "ovis-test-tab-first-message" });
     try {
       const before = (await sessionSnapshot()).tabs.length;
       for (const [body, reason] of [
@@ -1234,7 +1372,7 @@ describe("tab creation", () => {
   });
 
   it("refuses launch arguments the dialog never sends, before anything is made: a tab or line break, a model of two words, an effort the agent does not name", async () => {
-    const owned = await workspaceCreate({ cwd: tmpdir(), label: "herdr-web-ui-test-tab-launch-args" });
+    const owned = await workspaceCreate({ cwd: tmpdir(), label: "ovis-test-tab-launch-args" });
     try {
       const before = (await sessionSnapshot()).tabs.length;
       for (const [agent, reason] of [
@@ -1255,8 +1393,8 @@ describe("tab creation", () => {
   });
 
   it("returns the created tab when a shell agent is unavailable, and queues no first message for an agent that did not start", async () => {
-    const owned = await workspaceCreate({ cwd: tmpdir(), label: "herdr-web-ui-test-tab-shell" });
-    const bin = mkdtempSync(join(tmpdir(), "herdr-web-ui-tab-empty-path-"));
+    const owned = await workspaceCreate({ cwd: tmpdir(), label: "ovis-test-tab-shell" });
+    const bin = mkdtempSync(join(tmpdir(), "ovis-tab-empty-path-"));
     const path = process.env["PATH"];
     try {
       process.env["PATH"] = bin;
@@ -1274,7 +1412,7 @@ describe("tab creation", () => {
   });
 
   it("says when the agent started but its first message could not be queued, apart from an agent that did not start", async () => {
-    const owned = await workspaceCreate({ cwd: tmpdir(), label: "herdr-web-ui-test-tab-first-not-queued" });
+    const owned = await workspaceCreate({ cwd: tmpdir(), label: "ovis-test-tab-first-not-queued" });
     const made: string[] = [];
     // the queue's own refusals, past the route's checks: its text rule, and a full list
     const text = spyOn(PendingInputs.prototype, "enqueue").mockImplementation(() => { throw new HerdrError("invalid_submit_text", "refused by the queue"); });
@@ -1287,7 +1425,7 @@ describe("tab creation", () => {
     } finally { text.mockRestore(); }
     const enqueue = spyOn(PendingInputs.prototype, "enqueue").mockImplementation(() => { throw new PendingInputError("pending_limit", "the list is full"); });
     try {
-      const res = await fetch(`${base()}/api/workspace/create`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd: tmpdir(), label: "herdr-web-ui-test-ws-first-not-queued", agent: { kind: "muse" }, first_message: "Plan the config file" }) });
+      const res = await fetch(`${base()}/api/workspace/create`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd: tmpdir(), label: "ovis-test-ws-first-not-queued", agent: { kind: "muse" }, first_message: "Plan the config file" }) });
       expect(res.status).toBe(200);
       const created = await res.json() as WorkspaceCreated;
       made.push(created.workspace_id);
@@ -1303,7 +1441,7 @@ describe("tab creation", () => {
 describe("workspace and discovery endpoints", () => {
   let workspaceId: string | null = null;
   let paneId: string | null = null;
-  const label = `herdr-web-ui-test-${Math.random().toString(36).slice(2)}`;
+  const label = `ovis-test-${Math.random().toString(36).slice(2)}`;
   const fileName = `${label}-mention.txt`;
   const filePath = join(tmpdir(), fileName);
 
@@ -1339,7 +1477,7 @@ describe("workspace and discovery endpoints", () => {
   });
 
   it("offers omo and gjc, which herdr cannot start, exactly when they are on PATH", async () => {
-    const bin = mkdtempSync(join(tmpdir(), "herdr-web-ui-shell-agents-"));
+    const bin = mkdtempSync(join(tmpdir(), "ovis-shell-agents-"));
     const path = process.env["PATH"];
     const kinds = async () => ((await (await fetch(`${base()}/api/agents`)).json()) as { agents: AgentKind[] }).agents;
     try {
@@ -1357,8 +1495,106 @@ describe("workspace and discovery endpoints", () => {
     }
   });
 
+  it.skipIf(process.platform === "win32")("offers a shell agent found only on its login shell's PATH, starts that same executable, and keeps hits and misses until the next run", async () => {
+    // a service PATH without gjc, and a test-owned login shell whose -l run puts it on PATH: no dotfile is read
+    const root = mkdtempSync(join(tmpdir(), "ovis-login-path-"));
+    const home = join(root, "home"), serviceBin = join(root, "service bin"), loginBin = join(root, "login bin");
+    for (const dir of [home, serviceBin, loginBin]) mkdirSync(dir);
+    const gjc = join(loginBin, "gjc");
+    const alive = join(root, "alive"), release = join(root, "release");
+    await Bun.$`mkfifo ${alive} ${release}`;
+    // the fixture agent says who it is on `alive`, then stays in front of the pane under its own path,
+    // reading `release` until the test closes it; it holds `alive` open, so that ends when it does
+    const writeGjc = () => writeFileSync(gjc, `#!/bin/bash\nexec 3>'${alive}'\necho "$$" >&3\nexec -a "$0" cat '${release}'\n`, { mode: 0o755 });
+    writeGjc();
+    const shell = join(root, "login-shell");
+    writeFileSync(shell, `#!/bin/sh\nif [ "$1" = "-l" ]; then PATH='${loginBin}:/usr/bin:/bin'; export PATH; shift; echo 'fixture motd'; fi\n[ "$1" = "-c" ] && exec /bin/sh -c "$2"\nexit 64\n`, { mode: 0o755 });
+    const real = loginPathProbe({ shell, env: { HOME: home, PATH: serviceBin } });
+    let runs = 0;
+    const probe: LoginPathProbe = (signal) => { runs += 1; return real(signal); };
+    // the answer's age is read from this clock: a minute passes only when the test says
+    let clock = 0;
+    const shellAgents = new ShellAgentLocator({ servicePath: () => serviceBin, probe, now: () => clock });
+    const state = mkdtempSync(join(tmpdir(), "ovis-login-path-state-"));
+    const app = createServer({ port: 0, hostname: "127.0.0.1", token: "", stateDir: state, shellAgents });
+    const url = `http://127.0.0.1:${app.port}`;
+    const kinds = async () => ((await (await fetch(`${url}/api/agents`)).json()) as { agents: AgentKind[] }).agents;
+    const owned = await workspaceCreate({ cwd: tmpdir(), label: "ovis-test-login-path" });
+    const within = <T,>(promise: Promise<T>, ms: number, what: string): Promise<T> => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      return Promise.race([promise, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(what)), ms); })]).finally(() => clearTimeout(timer));
+    };
+    // subscribed before the launch: the fixture's pid line says it is up, the end of the stream that it is gone
+    const watcher = Bun.spawn(["cat", alive], { stdout: "pipe" });
+    const fixtureExited = watcher.exited;
+    const firstLine = (async () => {
+      const reader = watcher.stdout.getReader(), decoder = new TextDecoder();
+      let text = "";
+      while (!text.includes("\n")) {
+        const { value, done } = await reader.read();
+        if (done) throw new Error("the fixture ended before it said it was up");
+        text += decoder.decode(value, { stream: true });
+      }
+      return text.split("\n")[0]!;
+    })();
+    // closing the only writer of `release` ends the fixture's read, and its exit ends `alive`
+    const releaseFixture = () => { try { closeSync(openSync(release, fsConstants.O_WRONLY | fsConstants.O_NONBLOCK)); } catch { /* no reader: it never started or is gone */ } };
+    let launchedPid: number | null = null;
+    try {
+      // no login shell runs until something asks
+      expect(runs).toBe(0);
+      // concurrent first reads share one run
+      const reads = await Promise.all(Array.from({ length: 6 }, kinds));
+      for (const agents of reads) {
+        expect(agents).toContainEqual({ kind: "gjc", label: "Gajae Code", installed: true });
+        expect(agents.map((agent) => agent.kind)).not.toContain("omo");
+        // the wire shape is unchanged: kind, label and installed, nothing of where it was found
+        for (const agent of agents) expect(Object.keys(agent).sort()).toEqual(["installed", "kind", "label"]);
+      }
+      expect(JSON.stringify(reads)).not.toContain(root);
+      expect(runs).toBe(1);
+
+      // the start types the absolute path the offer found, quoted: the fixture runs under it
+      const res = await fetch(`${url}/api/tab/create`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ workspace_id: owned.workspace.workspace_id, agent: { kind: "gjc" } }) });
+      expect(res.status).toBe(200);
+      const tab = await res.json() as WorkspaceCreated;
+      expect(tab).toMatchObject({ agent_started: true });
+      launchedPid = Number(await within(firstLine, 10_000, "the fixture never said it was up"));
+      const info = await herdrRpc<{ process_info: { foreground_processes: { pid: number; argv?: string[] }[] } }>("pane.process_info", { pane_id: tab.pane_id });
+      expect(info.process_info.foreground_processes).toContainEqual(expect.objectContaining({ pid: launchedPid, argv: [gjc, release] }));
+      // neither the reads nor the start ran a login shell of their own
+      expect(runs).toBe(1);
+
+      // a removed executable is offered no more, and nothing else takes its place before the next run
+      rmSync(gjc);
+      expect((await kinds()).map((agent) => agent.kind)).not.toContain("gjc");
+      clock += 60_000;
+      expect((await kinds()).map((agent) => agent.kind)).not.toContain("gjc");
+      // back again: the kept miss holds until a read after the answer is a minute old runs the next one
+      writeGjc();
+      expect((await kinds()).map((agent) => agent.kind)).not.toContain("gjc");
+      clock += 60_000;
+      expect(await kinds()).toContainEqual({ kind: "gjc", label: "Gajae Code", installed: true });
+      expect(runs).toBe(3);
+
+      // released, the fixture agent ends: nothing of it outlives the test
+      releaseFixture();
+      expect(await within(fixtureExited, 10_000, "the released fixture kept running")).toBe(0);
+    } finally {
+      releaseFixture();
+      const released = await within(fixtureExited, 5000, "fixture still running").then(() => true, () => false);
+      if (!released && launchedPid !== null) try { process.kill(launchedPid, "SIGKILL"); } catch { /* gone with its pane */ }
+      watcher.kill();
+      await fixtureExited;
+      app.stop();
+      await workspaceClose(owned.workspace.workspace_id);
+      rmSync(root, { recursive: true, force: true });
+      rmSync(state, { recursive: true, force: true });
+    }
+  }, 60_000);
+
   it("makes one folder for the folder browser, and refuses names, folders and origins it must not", async () => {
-    const root = mkdtempSync(join(tmpdir(), "herdr-web-ui-mkdir-"));
+    const root = mkdtempSync(join(tmpdir(), "ovis-mkdir-"));
     const make = (body: unknown, headers: Record<string, string> = {}) => fetch(`${base()}/api/workspace/directories`, {
       method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body),
     });
@@ -1393,7 +1629,7 @@ describe("workspace and discovery endpoints", () => {
     // GET /api/agent/commands?agent=&cwd=: paneCommands without a pane (the new workspace and tab
     // dialogs' skill list). A fixture folder with one Codex project skill; the folder is its own
     // repository boundary, so the scan climbs no further.
-    const root = mkdtempSync(join(tmpdir(), "herdr-web-ui-agent-commands-"));
+    const root = mkdtempSync(join(tmpdir(), "ovis-agent-commands-"));
     try {
       mkdirSync(join(root, ".git"));
       mkdirSync(join(root, ".codex", "skills", "contract-skill"), { recursive: true });
@@ -1488,9 +1724,12 @@ describe("workspace and discovery endpoints", () => {
   }, 20_000);
 
   it("pushes session-changed when POST /api/workspace/close answers, not after the collector's debounce", async () => {
-    const closing = await workspaceCreate({ cwd: tmpdir(), label: "herdr-web-ui-test-close-push" });
+    // connected before the creation: its frame comes from the collector, debounced, and on a busy PC
+    // it could go out before a socket connected afterwards subscribed, which then waited in vain
     const socket = await RecordingSocket.connect(`ws://localhost:${server.port}/ws`);
+    let closing: Awaited<ReturnType<typeof workspaceCreate>> | null = null;
     try {
+      closing = await workspaceCreate({ cwd: tmpdir(), label: "ovis-test-close-push" });
       // the creation's own frame, debounced, is not the close's
       await socket.waitFor((frame) => frame.type === "session-changed", "session-changed after create", 5_000);
       const before = new Set(socket.seen);
@@ -1505,19 +1744,19 @@ describe("workspace and discovery endpoints", () => {
       expect(await changed - answered).toBeLessThan(250);
     } finally {
       socket.close();
-      await herdrRpc("workspace.close", { workspace_id: closing.workspace.workspace_id }).catch(() => undefined);
+      if (closing) await herdrRpc("workspace.close", { workspace_id: closing.workspace.workspace_id }).catch(() => undefined);
     }
   }, 20_000);
 
   it("says a repository has no commits yet instead of passing git's refusal on", async () => {
-    const repo = mkdtempSync(join(tmpdir(), "herdr-web-ui-worktree-empty-"));
+    const repo = mkdtempSync(join(tmpdir(), "ovis-worktree-empty-"));
     expect(Bun.spawnSync(["git", "init", "-q", "-b", "main"], { cwd: repo, stdout: "pipe", stderr: "pipe" }).exitCode).toBe(0);
-    const parent = await workspaceCreate({ cwd: repo, label: "herdr-web-ui-test-worktree-empty" });
+    const parent = await workspaceCreate({ cwd: repo, label: "ovis-test-worktree-empty" });
     const checkout = join(`${repo}-checkouts`, "feature");
     try {
       const create = await fetch(`${base()}/api/worktree/create`, {
         method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ workspace_id: parent.workspace.workspace_id, branch: "herdr-web-ui-test-unborn", path: checkout }),
+        body: JSON.stringify({ workspace_id: parent.workspace.workspace_id, branch: "ovis-test-unborn", path: checkout }),
       });
       expect(create.status).toBe(409);
       expect(((await create.json()) as ApiError).error.code).toBe("repository_without_commits");
@@ -1531,13 +1770,13 @@ describe("workspace and discovery endpoints", () => {
 
   it("creates a worktree of an owned repository as a grouped workspace, lists it, and opens it again", async () => {
     // a repository with one commit: a worktree needs a branch to start from
-    const repo = mkdtempSync(join(tmpdir(), "herdr-web-ui-worktree-"));
-    const git = (...args: string[]) => Bun.spawnSync(["git", "-c", "user.name=herdr-web-ui test", "-c", "user.email=test@example.invalid", ...args], { cwd: repo, stdout: "pipe", stderr: "pipe" });
+    const repo = mkdtempSync(join(tmpdir(), "ovis-worktree-"));
+    const git = (...args: string[]) => Bun.spawnSync(["git", "-c", "user.name=ovis test", "-c", "user.email=test@example.invalid", ...args], { cwd: repo, stdout: "pipe", stderr: "pipe" });
     expect(git("init", "-q", "-b", "main").exitCode).toBe(0);
     writeFileSync(join(repo, "README.md"), "worktree fixture\n");
     expect(git("add", "README.md").exitCode).toBe(0);
     expect(git("commit", "-q", "-m", "fixture").exitCode).toBe(0);
-    const parent = await workspaceCreate({ cwd: repo, label: "herdr-web-ui-test-worktree-parent" });
+    const parent = await workspaceCreate({ cwd: repo, label: "ovis-test-worktree-parent" });
     const owned = [parent.workspace.workspace_id];
     // the checkout lives under the test's own folders, never under the user's worktree directory
     const checkouts = `${repo}-checkouts`;
@@ -1547,19 +1786,19 @@ describe("workspace and discovery endpoints", () => {
       const missing = await post("/api/worktree/create", { workspace_id: parent.workspace.workspace_id });
       expect(missing.status).toBe(400);
       expect(((await missing.json()) as ApiError).error.code).toBe("missing_branch");
-      const badAgent = await post("/api/worktree/create", { workspace_id: parent.workspace.workspace_id, branch: "herdr-web-ui-test-feature", path: checkout, agent: { kind: "muse", args: "--help" } });
+      const badAgent = await post("/api/worktree/create", { workspace_id: parent.workspace.workspace_id, branch: "ovis-test-feature", path: checkout, agent: { kind: "muse", args: "--help" } });
       expect(badAgent.status).toBe(400);
       expect(((await badAgent.json()) as ApiError).error.code).toBe("invalid_agent");
       expect(existsSync(checkout)).toBeFalse();
 
-      const create = await post("/api/worktree/create", { workspace_id: parent.workspace.workspace_id, branch: "herdr-web-ui-test-feature", base: null, label: null, path: checkout });
+      const create = await post("/api/worktree/create", { workspace_id: parent.workspace.workspace_id, branch: "ovis-test-feature", base: null, label: null, path: checkout });
       expect(create.status).toBe(200);
       const opened = (await create.json()) as WorktreeOpened;
       owned.push(opened.workspace_id);
       expect(opened.already_open).toBeFalse();
       // no agent was asked for: the answer says nothing about one
       expect(opened.agent_started).toBeUndefined();
-      expect(opened.branch).toBe("herdr-web-ui-test-feature");
+      expect(opened.branch).toBe("ovis-test-feature");
       expect(realpathSync(opened.path)).toBe(realpathSync(checkout));
       const child = (await sessionSnapshot()).workspaces.find((workspace) => workspace.workspace_id === opened.workspace_id);
       expect(child?.worktree?.is_linked_worktree).toBeTrue();
@@ -1567,7 +1806,7 @@ describe("workspace and discovery endpoints", () => {
       const list = await fetch(`${base()}/api/worktree/list?workspace_id=${encodeURIComponent(parent.workspace.workspace_id)}`);
       expect(list.status).toBe(200);
       const listing = (await list.json()) as WorktreeListing;
-      expect(listing.worktrees.some((entry) => entry.branch === "herdr-web-ui-test-feature" && entry.open_workspace_id === opened.workspace_id)).toBeTrue();
+      expect(listing.worktrees.some((entry) => entry.branch === "ovis-test-feature" && entry.open_workspace_id === opened.workspace_id)).toBeTrue();
 
       const again = await post("/api/worktree/open", { workspace_id: parent.workspace.workspace_id, path: checkout });
       expect(again.status).toBe(200);
@@ -1592,7 +1831,7 @@ describe("workspace and discovery endpoints", () => {
 
       // a clean worktree closes with its repository's workspace when the group is meant; its checkout stays.
       // An agent asked for with the checkout starts in its pane, as one asked for with a workspace does.
-      const second = (await (await post("/api/worktree/create", { workspace_id: parent.workspace.workspace_id, branch: "herdr-web-ui-test-second", path: join(checkouts, "second"), agent: { kind: "muse" } })).json()) as WorktreeOpened;
+      const second = (await (await post("/api/worktree/create", { workspace_id: parent.workspace.workspace_id, branch: "ovis-test-second", path: join(checkouts, "second"), agent: { kind: "muse" } })).json()) as WorktreeOpened;
       owned.push(second.workspace_id);
       expect(second.error).toBeUndefined();
       expect(second.agent_started).toBeTrue();
@@ -1619,33 +1858,33 @@ describe("workspace and discovery endpoints", () => {
   }, 30_000);
 
   it("starts a worktree asked from a workspace on a linked checkout at the repository's own workspace", async () => {
-    const repo = mkdtempSync(join(tmpdir(), "herdr-web-ui-worktree-linked-"));
-    const git = (...args: string[]) => Bun.spawnSync(["git", "-c", "user.name=herdr-web-ui test", "-c", "user.email=test@example.invalid", ...args], { cwd: repo, stdout: "pipe", stderr: "pipe" });
+    const repo = mkdtempSync(join(tmpdir(), "ovis-worktree-linked-"));
+    const git = (...args: string[]) => Bun.spawnSync(["git", "-c", "user.name=ovis test", "-c", "user.email=test@example.invalid", ...args], { cwd: repo, stdout: "pipe", stderr: "pipe" });
     expect(git("init", "-q", "-b", "main").exitCode).toBe(0);
     writeFileSync(join(repo, "README.md"), "worktree fixture\n");
     expect(git("add", "README.md").exitCode).toBe(0);
     expect(git("commit", "-q", "-m", "fixture").exitCode).toBe(0);
     const checkouts = `${repo}-checkouts`;
     // a checkout git made, opened as a plain workspace: herdr does not mark it as a worktree
-    expect(git("worktree", "add", "-q", "-b", "herdr-web-ui-test-linked", join(checkouts, "linked")).exitCode).toBe(0);
-    const linked = await workspaceCreate({ cwd: join(checkouts, "linked"), label: "herdr-web-ui-test-worktree-linked" });
+    expect(git("worktree", "add", "-q", "-b", "ovis-test-linked", join(checkouts, "linked")).exitCode).toBe(0);
+    const linked = await workspaceCreate({ cwd: join(checkouts, "linked"), label: "ovis-test-worktree-linked" });
     const owned = [linked.workspace.workspace_id];
     const post = (path: string, body: unknown) => fetch(`${base()}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
     try {
       expect((await sessionSnapshot()).workspaces.find((workspace) => workspace.workspace_id === linked.workspace.workspace_id)?.worktree?.is_linked_worktree).not.toBeTrue();
       // the repository's own workspace is not open: herdr's refusal is the answer
-      const alone = await post("/api/worktree/create", { workspace_id: linked.workspace.workspace_id, branch: "herdr-web-ui-test-alone", path: join(checkouts, "alone") });
+      const alone = await post("/api/worktree/create", { workspace_id: linked.workspace.workspace_id, branch: "ovis-test-alone", path: join(checkouts, "alone") });
       expect(alone.status).toBe(404);
       expect(((await alone.json()) as ApiError).error.code).toBe("linked_worktree_source");
       expect(existsSync(join(checkouts, "alone"))).toBeFalse();
 
-      const parent = await workspaceCreate({ cwd: repo, label: "herdr-web-ui-test-worktree-linked-parent" });
+      const parent = await workspaceCreate({ cwd: repo, label: "ovis-test-worktree-linked-parent" });
       owned.push(parent.workspace.workspace_id);
-      const create = await post("/api/worktree/create", { workspace_id: linked.workspace.workspace_id, branch: "herdr-web-ui-test-from-linked", path: join(checkouts, "from-linked") });
+      const create = await post("/api/worktree/create", { workspace_id: linked.workspace.workspace_id, branch: "ovis-test-from-linked", path: join(checkouts, "from-linked") });
       expect(create.status).toBe(200);
       const opened = (await create.json()) as WorktreeOpened;
       owned.push(opened.workspace_id);
-      expect(opened.branch).toBe("herdr-web-ui-test-from-linked");
+      expect(opened.branch).toBe("ovis-test-from-linked");
       expect(existsSync(join(checkouts, "from-linked"))).toBeTrue();
       expect((await sessionSnapshot()).workspaces.find((workspace) => workspace.workspace_id === opened.workspace_id)?.worktree?.is_linked_worktree).toBeTrue();
 
@@ -1765,7 +2004,7 @@ describe("POST /api/pane/find viewport results", () => {
   let workspaceId: string;
   let paneId: string;
   beforeAll(async () => {
-    const created = await workspaceCreate({ cwd: stateDir, label: "herdr-web-ui-test-find-response" });
+    const created = await workspaceCreate({ cwd: stateDir, label: "ovis-test-find-response" });
     workspaceId = created.workspace.workspace_id;
     paneId = created.root_pane.pane_id;
     const ready = herdrRpc("pane.wait_for_output", {
@@ -1921,7 +2160,7 @@ describe("POST /api/pane/close", () => {
   beforeAll(async () => {
     const created = await herdrRpc<{ workspace: { workspace_id: string }; root_pane: { pane_id: string } }>(
       "workspace.create",
-      { label: "herdr-web-ui-test-close", cwd: "/tmp", focus: false },
+      { label: "ovis-test-close", cwd: "/tmp", focus: false },
     );
     workspaceId = created.workspace.workspace_id;
     paneId = created.root_pane.pane_id;
@@ -1993,10 +2232,10 @@ describe("POST /api/pane/image", () => {
     });
 
   beforeAll(async () => {
-    qaCwd = mkdtempSync(join(tmpdir(), "herdr-web-ui-image-"));
+    qaCwd = mkdtempSync(join(tmpdir(), "ovis-image-"));
     const created = await herdrRpc<{ workspace: { workspace_id: string }; root_pane: { pane_id: string } }>(
       "workspace.create",
-      { label: "herdr-web-ui-test-image", cwd: qaCwd, focus: false },
+      { label: "ovis-test-image", cwd: qaCwd, focus: false },
     );
     qaWorkspaceId = created.workspace.workspace_id;
     qaPaneId = created.root_pane.pane_id;
@@ -2005,7 +2244,27 @@ describe("POST /api/pane/image", () => {
   afterAll(async () => {
     if (qaWorkspaceId) await herdrRpc("workspace.close", { workspace_id: qaWorkspaceId });
     if (qaCwd) rmSync(qaCwd, { recursive: true, force: true });
+    for (const project of gitProjects.splice(0)) {
+      await herdrRpc("workspace.close", { workspace_id: project.workspaceId });
+      rmSync(project.cwd, { recursive: true, force: true });
+    }
   });
+
+  /** A pane of its own whose cwd is a fresh Git project, so `git status` sees what an upload leaves. */
+  const gitProjects: { cwd: string; workspaceId: string }[] = [];
+  const gitProjectPane = async (label: string) => {
+    const cwd = mkdtempSync(join(tmpdir(), "ovis-image-git-"));
+    expect(Bun.spawnSync(["git", "init", "-q", cwd]).exitCode).toBe(0);
+    const created = await herdrRpc<{ workspace: { workspace_id: string }; root_pane: { pane_id: string } }>(
+      "workspace.create",
+      { label, cwd, focus: false },
+    );
+    gitProjects.push({ cwd, workspaceId: created.workspace.workspace_id });
+    return { cwd, paneId: created.root_pane.pane_id };
+  };
+  const git = (cwd: string, ...args: string[]) => Bun.spawnSync(["git", "-C", cwd, ...args], { stdout: "pipe", stderr: "pipe" });
+  const gitStatus = (cwd: string) => git(cwd, "status", "--porcelain", "--untracked-files=all").stdout.toString().split("\n").filter(Boolean);
+  const pathOf = async (res: Response) => ((await res.json()) as { path: string }).path;
 
   it("stores a pasted image under the pane cwd and returns its absolute path", async () => {
     const res = await post({ pane_id: qaPaneId, content_type: "image/png", data_base64: TINY_PNG_BASE64 });
@@ -2014,7 +2273,7 @@ describe("POST /api/pane/image", () => {
     expect(body.ok).toBe(true);
     // the prompt must reference a file the agent can read without leaving its project
     expect(body.path.startsWith(qaCwd!)).toBe(true);
-    expect(body.path.includes(".herdr-web-ui")).toBe(true);
+    expect(body.path.includes(".ovis")).toBe(true);
     expect(body.path.endsWith(".png")).toBe(true);
     const stored = statSync(body.path);
     expect(stored.size).toBeGreaterThan(0);
@@ -2030,7 +2289,7 @@ describe("POST /api/pane/image", () => {
 
   const bytes = (...parts: (string | number[])[]) => Buffer.concat(parts.map((part) => typeof part === "string" ? Buffer.from(part, "latin1") : Buffer.from(part)));
   const RASTER_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"];
-  const pasted = () => existsSync(join(qaCwd!, ".herdr-web-ui")) ? readdirSync(join(qaCwd!, ".herdr-web-ui")).sort() : [];
+  const pasted = () => existsSync(join(qaCwd!, ".ovis")) ? readdirSync(join(qaCwd!, ".ovis")).sort() : [];
 
   it("names each raster after its signature, whichever supported type it claims", async () => {
     for (const [extension, data] of [
@@ -2044,7 +2303,7 @@ describe("POST /api/pane/image", () => {
         const res = await post({ pane_id: qaPaneId, content_type, data_base64: data.toString("base64"), name: "shot.jpeg" });
         expect(res.status).toBe(200);
         const { path } = (await res.json()) as { path: string };
-        expect(dirname(path)).toBe(join(qaCwd!, ".herdr-web-ui"));
+        expect(dirname(path)).toBe(join(qaCwd!, ".ovis"));
         expect(basename(path)).toMatch(new RegExp(`^paste-\\d{8}-\\d{6}-[0-9a-f]{8}\\.${extension}$`));
         expect(readFileSync(path)).toEqual(data);
       }
@@ -2100,12 +2359,107 @@ describe("POST /api/pane/image", () => {
     const res = await post({ pane_id: qaPaneId, content_type: "image/svg+xml", data_base64: svg, name: "../omo icon.SVG" });
     expect(res.status).toBe(200);
     const { path } = (await res.json()) as { path: string };
-    expect(path.startsWith(join(qaCwd!, ".herdr-web-ui") + "/")).toBe(true);
+    expect(path.startsWith(join(qaCwd!, ".ovis") + "/")).toBe(true);
     expect(basename(path)).toMatch(/^omo_icon-\d{8}-\d{6}-[0-9a-f]{8}\.svg$/);
     expect(readFileSync(path, "utf8")).toBe('<svg xmlns="http://www.w3.org/2000/svg"/>');
     // no name, or one without a usable extension: still stored, as .bin
     const bare = (await (await post({ pane_id: qaPaneId, content_type: "", data_base64: svg })).json()) as { path: string };
     expect(basename(bare.path)).toMatch(/^file-.*\.bin$/);
+  });
+
+  it("keeps a pasted image and a named file out of Git status, each readable by its returned path", async () => {
+    const { cwd, paneId } = await gitProjectPane("ovis-test-image-git");
+    const png = Buffer.from(TINY_PNG_BASE64, "base64");
+    const json = Buffer.from('{"tool":"herdr","ok":true}\n');
+    // both at once: whichever creates the folder's ignore file first, the other finds it there
+    const answers = await Promise.all([
+      post({ pane_id: paneId, content_type: "image/png", data_base64: png.toString("base64") }),
+      post({ pane_id: paneId, content_type: "application/json", data_base64: json.toString("base64"), name: "report.json" }),
+    ]);
+    expect(answers.map((res) => res.status)).toEqual([200, 200]);
+    const paths = await Promise.all(answers.map(pathOf));
+    expect(readFileSync(join(cwd, ".ovis", ".gitignore"), "utf8")).toBe("*\n");
+    expect(gitStatus(cwd)).toEqual([]);
+    for (const [index, path] of paths.entries()) {
+      const ignored = git(cwd, "check-ignore", path);
+      expect(ignored.exitCode).toBe(0);
+      expect(ignored.stdout.toString().trim()).toBe(path);
+      // ignored is not unreachable: the explicit path still opens, on disk and through the viewer's route
+      const bytes = index === 0 ? png : json;
+      expect(readFileSync(path).equals(bytes)).toBe(true);
+      const opened = await fetch(`${base()}/api/fs/file?pane_id=${encodeURIComponent(paneId)}&path=${encodeURIComponent(path)}`);
+      expect(opened.status).toBe(200);
+      expect(Buffer.from(await opened.arrayBuffer()).equals(bytes)).toBe(true);
+    }
+  });
+
+  it("preserves an existing ignore file during concurrent uploads", async () => {
+    const upload = (paneId: string) => Promise.all(Array.from({ length: 6 }, (_, index) => post({
+      pane_id: paneId,
+      content_type: "application/json",
+      data_base64: Buffer.from(`{"n":${index}}`).toString("base64"),
+      name: `n${index}.json`,
+    })));
+    const own = await gitProjectPane("ovis-test-image-own-ignore");
+    mkdirSync(join(own.cwd, ".ovis"));
+    const rules = "# kept by hand\n*.png\n!keep.txt";
+    writeFileSync(join(own.cwd, ".ovis", ".gitignore"), rules);
+    expect((await upload(own.paneId)).map((res) => res.status)).toEqual(Array(6).fill(200));
+    expect(readFileSync(join(own.cwd, ".ovis", ".gitignore"), "utf8")).toBe(rules);
+    // the user's own rules still decide: they leave .json files, and the ignore file itself, visible
+    expect(gitStatus(own.cwd)).toHaveLength(7);
+    if (process.platform === "win32") return; // creating a symlink needs developer mode there
+    const outside = mkdtempSync(join(tmpdir(), "ovis-image-rules-"));
+    try {
+      writeFileSync(join(outside, "rules"), "shared\n");
+      for (const target of [join(outside, "rules"), join(outside, "missing")]) {
+        const linked = await gitProjectPane("ovis-test-image-linked-ignore");
+        mkdirSync(join(linked.cwd, ".ovis"));
+        symlinkSync(target, join(linked.cwd, ".ovis", ".gitignore"));
+        expect((await upload(linked.paneId)).map((res) => res.status)).toEqual(Array(6).fill(200));
+        expect(lstatSync(join(linked.cwd, ".ovis", ".gitignore")).isSymbolicLink()).toBe(true);
+        expect(readlinkSync(join(linked.cwd, ".ovis", ".gitignore"))).toBe(target);
+      }
+      // nothing was written through either link
+      expect(readFileSync(join(outside, "rules"), "utf8")).toBe("shared\n");
+      expect(existsSync(join(outside, "missing"))).toBe(false);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("writes no ignore file into a OVIS_PASTE_DIR override, even one naming the default folder", async () => {
+    const { cwd, paneId } = await gitProjectPane("ovis-test-image-override");
+    const previous = process.env["OVIS_PASTE_DIR"];
+    const elsewhere = mkdtempSync(join(tmpdir(), "ovis-image-override-"));
+    try {
+      for (const override of [`  ${elsewhere}  `, join(cwd, ".ovis")]) {
+        process.env["OVIS_PASTE_DIR"] = override;
+        const answers = await Promise.all([0, 1].map(() => post({ pane_id: paneId, content_type: "image/png", data_base64: TINY_PNG_BASE64 })));
+        expect(answers.map((res) => res.status)).toEqual([200, 200]);
+        for (const path of await Promise.all(answers.map(pathOf))) expect(path.startsWith(join(override.trim(), "paste-"))).toBe(true);
+        expect(existsSync(join(override.trim(), ".gitignore"))).toBe(false);
+      }
+      // a folder the user picked shows in Git status like any other
+      expect(gitStatus(cwd)).toHaveLength(2);
+    } finally {
+      if (previous === undefined) delete process.env["OVIS_PASTE_DIR"]; else process.env["OVIS_PASTE_DIR"] = previous;
+      rmSync(elsewhere, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)("answers an error, not a path, when the ignore file cannot be created", async () => {
+    const { cwd, paneId } = await gitProjectPane("ovis-test-image-unwritable");
+    mkdirSync(join(cwd, ".ovis"));
+    chmodSync(join(cwd, ".ovis"), 0o500);
+    try {
+      const res = await post({ pane_id: paneId, content_type: "image/png", data_base64: TINY_PNG_BASE64 });
+      expect(res.status).toBe(500);
+      expect(((await res.json()) as { path?: string }).path).toBeUndefined();
+      expect(existsSync(join(cwd, ".ovis", ".gitignore"))).toBe(false);
+    } finally {
+      chmodSync(join(cwd, ".ovis"), 0o700);
+    }
   });
 
   it("stores a 20 MiB file whole (regression: 413 while the ceiling was 8 MiB)", async () => {
@@ -2187,7 +2541,7 @@ describe("WebSocket /ws", () => {
   beforeAll(async () => {
     const created = await herdrRpc<{ workspace: { workspace_id: string }; root_pane: { pane_id: string } }>(
       "workspace.create",
-      { label: "herdr-web-ui-test", cwd: "/tmp", focus: false },
+      { label: "ovis-test", cwd: "/tmp", focus: false },
     );
     qaWorkspaceId = created.workspace.workspace_id;
     qaPaneId = created.root_pane.pane_id;
@@ -2314,7 +2668,7 @@ describe("WebSocket roles and status push", () => {
   beforeAll(async () => {
     const created = await herdrRpc<{ workspace: { workspace_id: string }; root_pane: { pane_id: string } }>(
       "workspace.create",
-      { label: "herdr-web-ui-test-roles", cwd: "/tmp", focus: false },
+      { label: "ovis-test-roles", cwd: "/tmp", focus: false },
     );
     qaWorkspaceId = created.workspace.workspace_id;
     qaPaneId = created.root_pane.pane_id;
@@ -2466,7 +2820,7 @@ describe("WebSocket roles and status push", () => {
   }, 60_000);
 
   it("leaves the shared pty's size alone for an attach whose grid the chat lens covers", async () => {
-    const created = await workspaceCreate({ cwd: tmpdir(), label: "herdr-web-ui-test-keep-size" });
+    const created = await workspaceCreate({ cwd: tmpdir(), label: "ovis-test-keep-size" });
     const paneId = created.root_pane.pane_id;
     const chat = await RecordingSocket.connect(`ws://localhost:${server.port}/ws`);
     const otherChat = await RecordingSocket.connect(`ws://localhost:${server.port}/ws`);
@@ -2506,7 +2860,7 @@ describe("WebSocket roles and status push", () => {
   }, 60_000);
 
   it("applies a resize that arrives while a covered attach is still creating the pty", async () => {
-    const created = await workspaceCreate({ cwd: tmpdir(), label: "herdr-web-ui-test-keep-size-switch" });
+    const created = await workspaceCreate({ cwd: tmpdir(), label: "ovis-test-keep-size-switch" });
     const paneId = created.root_pane.pane_id;
     const phone = await RecordingSocket.connect(`ws://localhost:${server.port}/ws`);
     try {
@@ -2551,7 +2905,7 @@ describe("WebSocket roles and status push", () => {
       const want = size.replace("x", " ");
       let last = "";
       for (const deadline = Date.now() + 15_000; Date.now() < deadline;) {
-        const file = join(tmpdir(), `herdr-web-ui-release-size-${process.pid}-${++asks}`);
+        const file = join(tmpdir(), `ovis-release-size-${process.pid}-${++asks}`);
         socket.send({ type: "input", pane_id: paneId, text: `stty size > ${file}.part && mv ${file}.part ${file}\r` });
         for (const answered = Date.now() + 1000; Date.now() < answered && !existsSync(file);) await Bun.sleep(25);
         if (!existsSync(file)) continue;
@@ -2567,7 +2921,7 @@ describe("WebSocket roles and status push", () => {
     };
 
     it("returns the pty to the desktop's grid when the phone leaves the terminal lens", async () => {
-      const created = await workspaceCreate({ cwd: tmpdir(), label: "herdr-web-ui-test-release-size" });
+      const created = await workspaceCreate({ cwd: tmpdir(), label: "ovis-test-release-size" });
       const paneId = created.root_pane.pane_id;
       const desktop = await ws();
       const phone = await ws();
@@ -2594,7 +2948,7 @@ describe("WebSocket roles and status push", () => {
     }, 60_000);
 
     it("skips a hidden client's grid when another client releases, leaving the size if nobody shows a terminal", async () => {
-      const created = await workspaceCreate({ cwd: tmpdir(), label: "herdr-web-ui-test-release-size-hidden" });
+      const created = await workspaceCreate({ cwd: tmpdir(), label: "ovis-test-release-size-hidden" });
       const paneId = created.root_pane.pane_id;
       const desktop = await ws();
       const phone = await ws();
@@ -2653,7 +3007,7 @@ describe("WebSocket roles and status push", () => {
     }, 60_000);
 
     it("keeps a grid released during attach creation out of the fallback candidates", async () => {
-      const created = await workspaceCreate({ cwd: tmpdir(), label: "herdr-web-ui-test-release-size-creating" });
+      const created = await workspaceCreate({ cwd: tmpdir(), label: "ovis-test-release-size-creating" });
       const paneId = created.root_pane.pane_id;
       const hidden = await ws();
       const phone = await ws();
@@ -2682,7 +3036,7 @@ describe("WebSocket roles and status push", () => {
     }, 60_000);
 
     it("never overwrites a resize another client sends after the release", async () => {
-      const created = await workspaceCreate({ cwd: tmpdir(), label: "herdr-web-ui-test-release-size-race" });
+      const created = await workspaceCreate({ cwd: tmpdir(), label: "ovis-test-release-size-race" });
       const paneId = created.root_pane.pane_id;
       const desktop = await ws();
       const phone = await ws();
@@ -2712,7 +3066,7 @@ describe("WebSocket roles and status push", () => {
     }, 60_000);
 
     it("ignores a release from a client that never drove the grid, as an older server ignores the frame", async () => {
-      const created = await workspaceCreate({ cwd: tmpdir(), label: "herdr-web-ui-test-release-size-noop" });
+      const created = await workspaceCreate({ cwd: tmpdir(), label: "ovis-test-release-size-noop" });
       const paneId = created.root_pane.pane_id;
       const desktop = await ws();
       const chat = await ws();
@@ -2782,7 +3136,7 @@ describe("WebSocket roles and status push", () => {
       // a pane ending while unattached pushes pane-exited
       const created = await herdrRpc<{ workspace: { workspace_id: string }; root_pane: { pane_id: string } }>(
         "workspace.create",
-        { label: "herdr-web-ui-test-exit", cwd: "/tmp", focus: false },
+        { label: "ovis-test-exit", cwd: "/tmp", focus: false },
       );
       exitWorkspaceId = created.workspace.workspace_id;
       const exitPaneId = created.root_pane.pane_id;
@@ -2824,7 +3178,7 @@ describe("WebSocket observer-first attach", () => {
   beforeAll(async () => {
     const created = await herdrRpc<{ workspace: { workspace_id: string }; root_pane: { pane_id: string } }>(
       "workspace.create",
-      { label: "herdr-web-ui-test-observe", cwd: "/tmp", focus: false },
+      { label: "ovis-test-observe", cwd: "/tmp", focus: false },
     );
     observeWorkspaceId = created.workspace.workspace_id;
     observePaneId = created.root_pane.pane_id;
@@ -2875,7 +3229,7 @@ describe("WebSocket concurrent attach", () => {
   beforeAll(async () => {
     const created = await herdrRpc<{ workspace: { workspace_id: string }; root_pane: { pane_id: string } }>(
       "workspace.create",
-      { label: "herdr-web-ui-test-race", cwd: "/tmp", focus: false },
+      { label: "ovis-test-race", cwd: "/tmp", focus: false },
     );
     raceWorkspaceId = created.workspace.workspace_id;
     racePaneId = created.root_pane.pane_id;
@@ -2946,7 +3300,7 @@ describe("WebSocket client leaving mid-attach", () => {
   });
 
   it("never pins the pty for a client that disconnects before its attach is ready", async () => {
-    const { paneId, terminalId } = await createLeavePane("herdr-web-ui-test-leave-close");
+    const { paneId, terminalId } = await createLeavePane("ovis-test-leave-close");
     expect(attachProcessCount(terminalId)).toBe(0);
     const leaver = await RecordingSocket.connect(`ws://localhost:${server.port}/ws`);
     const stayer = await RecordingSocket.connect(`ws://localhost:${server.port}/ws`);
@@ -2965,7 +3319,7 @@ describe("WebSocket client leaving mid-attach", () => {
   }, 40_000);
 
   it("never pins the pty for a client that detaches before its attach is ready", async () => {
-    const { paneId, terminalId } = await createLeavePane("herdr-web-ui-test-leave-detach");
+    const { paneId, terminalId } = await createLeavePane("ovis-test-leave-detach");
     expect(attachProcessCount(terminalId)).toBe(0);
     const switcher = await RecordingSocket.connect(`ws://localhost:${server.port}/ws`);
     const stayer = await RecordingSocket.connect(`ws://localhost:${server.port}/ws`);
@@ -3017,7 +3371,7 @@ describe("web push", () => {
     fake = await startFakePushService();
     const created = await herdrRpc<{ workspace: { workspace_id: string }; root_pane: { pane_id: string } }>(
       "workspace.create",
-      { label: "herdr-web-ui-test-push", cwd: "/tmp", focus: false },
+      { label: "ovis-test-push", cwd: "/tmp", focus: false },
     );
     pushWorkspaceId = created.workspace.workspace_id;
     pushPaneId = created.root_pane.pane_id;
@@ -3109,9 +3463,9 @@ describe("web push", () => {
     let bridge: ReturnType<typeof createServer> | undefined;
     let page: RecordingSocket | undefined;
     try {
-      created = await workspaceCreate({ cwd: tmpdir(), label: "herdr-web-ui-test-push-presence" });
+      created = await workspaceCreate({ cwd: tmpdir(), label: "ovis-test-push-presence" });
       const paneId = created.root_pane.pane_id;
-      dir = mkdtempSync(join(tmpdir(), "herdr-web-ui-push-presence-"));
+      dir = mkdtempSync(join(tmpdir(), "ovis-push-presence-"));
       device = await startFakePushService();
       bridge = createServer({ port: 0, hostname: "127.0.0.1", token: "", stateDir: dir, machines: false, pushLoopbackHttp: true,
         alertTiming: { short: 0, long: 0, longTurn: 0 } });
@@ -3188,11 +3542,11 @@ describe("web push", () => {
     let bridge: ReturnType<typeof createServer> | undefined;
     let watcher: RecordingSocket | undefined;
     try {
-      created = await workspaceCreate({ cwd: tmpdir(), label: "herdr-web-ui-test-codex-finish" });
-      probe = await workspaceCreate({ cwd: tmpdir(), label: "herdr-web-ui-test-codex-probe" });
+      created = await workspaceCreate({ cwd: tmpdir(), label: "ovis-test-codex-finish" });
+      probe = await workspaceCreate({ cwd: tmpdir(), label: "ovis-test-codex-probe" });
       const paneId = created.root_pane.pane_id;
       const probeId = probe.root_pane.pane_id;
-      dir = mkdtempSync(join(tmpdir(), "herdr-web-ui-codex-finish-"));
+      dir = mkdtempSync(join(tmpdir(), "ovis-codex-finish-"));
       const device = await startFakePushService();
       cleanupDevice = device;
       await herdrRpc("pane.report_agent", { pane_id: paneId, source: "manual", agent: "codex", state: "unknown" });
@@ -3286,11 +3640,11 @@ describe("web push", () => {
         cwd: "/tmp",
         focus: false,
       });
-    const watched = await createPane("herdr-web-ui-test-push-restart");
-    const probe = await createPane("herdr-web-ui-test-push-probe");
+    const watched = await createPane("ovis-test-push-restart");
+    const probe = await createPane("ovis-test-push-probe");
     const watchedId = watched.root_pane.pane_id;
     const probeId = probe.root_pane.pane_id;
-    const restartDir = mkdtempSync(join(tmpdir(), "herdr-web-ui-restart-"));
+    const restartDir = mkdtempSync(join(tmpdir(), "ovis-restart-"));
     const device = await startFakePushService();
     let restarted: { port: number; stop: () => void } | null = null;
     let watcher: RecordingSocket | null = null;
@@ -3393,16 +3747,16 @@ describe("pairing and identity", () => {
 
   it("lets the owner's own device in with no login header, where serve is the only ingress and one login owns the tailnet", async () => {
     const state = mkdtempSync(join(tmpdir(), "herdr-sole-user-"));
-    const savedOwner = process.env["HERDR_WEB_TAILSCALE_OWNER"];
-    const savedServeOnly = process.env["HERDR_WEB_TAILSCALE_SERVE_ONLY"];
-    delete process.env["HERDR_WEB_TAILSCALE_OWNER"];
+    const savedOwner = process.env["OVIS_TAILSCALE_OWNER"];
+    const savedServeOnly = process.env["OVIS_TAILSCALE_SERVE_ONLY"];
+    delete process.env["OVIS_TAILSCALE_OWNER"];
     // what `tailscale status --json` says for the reported tailnet: one login, every node untagged
     const NODE = "denisss-macbook-pro-m1.tail5cc90b.ts.net";
     const status = JSON.stringify({ BackendState: "Running", Self: { DNSName: `${NODE}.`, UserID: 7, TailscaleIPs: ["100.101.102.103"] }, Peer: { phone: { DNSName: "phone.tail5cc90b.ts.net.", UserID: 7 } }, User: { "7": { LoginName: OWNER } } });
     const tailnet = new TailnetIdentitySource(async () => status);
-    process.env["HERDR_WEB_TAILSCALE_SERVE_ONLY"] = "1";
+    process.env["OVIS_TAILSCALE_SERVE_ONLY"] = "1";
     const sole = createServer({ port: 0, stateDir: state, tailnet });
-    if (savedServeOnly === undefined) delete process.env["HERDR_WEB_TAILSCALE_SERVE_ONLY"]; else process.env["HERDR_WEB_TAILSCALE_SERVE_ONLY"] = savedServeOnly;
+    if (savedServeOnly === undefined) delete process.env["OVIS_TAILSCALE_SERVE_ONLY"]; else process.env["OVIS_TAILSCALE_SERVE_ONLY"] = savedServeOnly;
     const off = createServer({ port: 0, stateDir: state, tailscaleServeOnly: false, tailnet });
     const named = createServer({ port: 0, stateDir: state, tailscaleOwner: OWNER, tailscaleServeOnly: true, tailnet });
     const other = createServer({ port: 0, stateDir: state, tailscaleOwner: "named@example.com", tailscaleServeOnly: true, tailnet });
@@ -3436,15 +3790,15 @@ describe("pairing and identity", () => {
       off.stop();
       named.stop();
       other.stop();
-      if (savedOwner === undefined) delete process.env["HERDR_WEB_TAILSCALE_OWNER"]; else process.env["HERDR_WEB_TAILSCALE_OWNER"] = savedOwner;
+      if (savedOwner === undefined) delete process.env["OVIS_TAILSCALE_OWNER"]; else process.env["OVIS_TAILSCALE_OWNER"] = savedOwner;
       rmSync(state, { recursive: true, force: true });
     }
   });
 
   it("refuses a serve request inside the cache's TTL once a node is tagged since the cache was read", async () => {
     const state = mkdtempSync(join(tmpdir(), "herdr-stale-identity-"));
-    const savedOwner = process.env["HERDR_WEB_TAILSCALE_OWNER"];
-    delete process.env["HERDR_WEB_TAILSCALE_OWNER"];
+    const savedOwner = process.env["OVIS_TAILSCALE_OWNER"];
+    delete process.env["OVIS_TAILSCALE_OWNER"];
     const NODE = "stale-pc.example.ts.net";
     const self = { DNSName: `${NODE}.`, TailscaleIPs: ["100.101.102.103"], UserID: 7 };
     const sole = JSON.stringify({ BackendState: "Running", Self: self, User: { "7": { LoginName: OWNER } } });
@@ -3458,15 +3812,15 @@ describe("pairing and identity", () => {
       expect(auth).toMatchObject({ authenticated: false, reason: "pairing_required" });
     } finally {
       serveOnly.stop();
-      if (savedOwner === undefined) delete process.env["HERDR_WEB_TAILSCALE_OWNER"]; else process.env["HERDR_WEB_TAILSCALE_OWNER"] = savedOwner;
+      if (savedOwner === undefined) delete process.env["OVIS_TAILSCALE_OWNER"]; else process.env["OVIS_TAILSCALE_OWNER"] = savedOwner;
       rmSync(state, { recursive: true, force: true });
     }
   });
 
-  it("takes the login named in HERDR_WEB_TAILSCALE_OWNER for the PC's own, as a tagged node needs", async () => {
+  it("takes the login named in OVIS_TAILSCALE_OWNER for the PC's own, as a tagged node needs", async () => {
     const state = mkdtempSync(join(tmpdir(), "herdr-named-owner-"));
-    const before = process.env["HERDR_WEB_TAILSCALE_OWNER"];
-    process.env["HERDR_WEB_TAILSCALE_OWNER"] = " named@example.com ";
+    const before = process.env["OVIS_TAILSCALE_OWNER"];
+    process.env["OVIS_TAILSCALE_OWNER"] = " named@example.com ";
     const named = createServer({ port: 0, stateDir: state });
     try {
       const at = async (headers: Record<string, string>) => ((await (await fetch(`http://127.0.0.1:${named.port}/api/health?scope=bridge`, { headers })).json()) as { auth: HealthAuth }).auth;
@@ -3475,7 +3829,7 @@ describe("pairing and identity", () => {
       expect(await at(proxied())).toMatchObject({ authenticated: false, reason: "pairing_required" });
     } finally {
       named.stop();
-      if (before === undefined) delete process.env["HERDR_WEB_TAILSCALE_OWNER"]; else process.env["HERDR_WEB_TAILSCALE_OWNER"] = before;
+      if (before === undefined) delete process.env["OVIS_TAILSCALE_OWNER"]; else process.env["OVIS_TAILSCALE_OWNER"] = before;
       rmSync(state, { recursive: true, force: true });
     }
   });
@@ -3496,7 +3850,7 @@ describe("pairing and identity", () => {
     const paired = await fetch(`${base()}/api/devices/pair`, { method: "POST", headers: { ...guard, ...proxied() }, body: JSON.stringify({ code, label: "  Test  phone " }) });
     expect(paired.status).toBe(204);
     const setCookie = paired.headers.get("set-cookie") ?? "";
-    expect(setCookie).toMatch(/^herdr_web_device=[0-9a-f]{64}; Path=\/; HttpOnly; SameSite=Strict; Max-Age=/);
+    expect(setCookie).toMatch(/^ovis_device=[0-9a-f]{64}; Path=\/; HttpOnly; SameSite=Strict; Max-Age=/);
     cookie = setCookie.split(";")[0]!;
     // the device is in, from anywhere; a stranger no longer is; this PC still is
     expect(await auth({ ...proxied(), cookie })).toMatchObject({ authenticated: true, via: "device" });
@@ -3514,7 +3868,7 @@ describe("pairing and identity", () => {
     const renamed = await fetch(`${base()}/api/devices/${deviceId}`, { method: "PATCH", headers: guard, body: JSON.stringify({ label: "Kitchen iPad" }) });
     expect(((await renamed.json()) as { label: string }).label).toBe("Kitchen iPad");
     const out = await fetch(`${base()}/api/auth`, { method: "DELETE", headers: { cookie } });
-    expect(out.headers.get("set-cookie") ?? "").toContain("herdr_web_device=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0");
+    expect(out.headers.get("set-cookie") ?? "").toContain("ovis_device=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0");
     expect((await fetch(`${base()}/api/devices/${deviceId}`, { method: "DELETE", headers: guard })).status).toBe(204);
     expect((await fetch(`${base()}/api/devices/${deviceId}`, { method: "DELETE", headers: guard })).status).toBe(404);
     // the revoked device is out, and so are strangers: revoking the last device never reopens the gate
@@ -3528,7 +3882,7 @@ describe("pairing and identity", () => {
     try {
       // spawned asynchronously: a synchronous spawn would block the very server the script asks
       const pairCli = async (port: number) => {
-        const child = Bun.spawn(["bun", "scripts/plugin.ts", "pair"], { cwd: join(import.meta.dir, ".."), env: { ...process.env, PORT: String(port), HOST: "127.0.0.1", HERDR_PLUGIN_CONFIG_DIR: configDir, HERDR_WEB_TOKEN: "" }, stdout: "pipe", stderr: "pipe" });
+        const child = Bun.spawn(["bun", "scripts/plugin.ts", "pair"], { cwd: join(import.meta.dir, ".."), env: { ...process.env, PORT: String(port), HOST: "127.0.0.1", HERDR_PLUGIN_CONFIG_DIR: configDir, OVIS_TOKEN: "" }, stdout: "pipe", stderr: "pipe" });
         const [out, err, exitCode] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
         return { out, err, exitCode };
       };
@@ -3546,12 +3900,12 @@ describe("pairing and identity", () => {
       const tokenState = mkdtempSync(join(tmpdir(), "herdr-pair-cli-token-"));
       const secured = createServer({ port: 0, stateDir: tokenState, token: "cli-t0k3n", tailscaleOwner: null });
       try {
-        writeFileSync(join(configDir, ".env"), "HERDR_WEB_TOKEN=cli-t0k3n\n");
+        writeFileSync(join(configDir, ".env"), "OVIS_TOKEN=cli-t0k3n\n");
         const withToken = await pairCli(secured.port);
         expect(withToken.exitCode, withToken.err).toBe(0);
         expect(withToken.out).toMatch(/Pairing code: \d{3} \d{3}/);
         // `.env` wins over a stale token in the older `env` file
-        writeFileSync(join(configDir, "env"), "HERDR_WEB_TOKEN=stale\n");
+        writeFileSync(join(configDir, "env"), "OVIS_TOKEN=stale\n");
         const withLegacy = await pairCli(secured.port);
         expect(withLegacy.exitCode, withLegacy.err).toBe(0);
         expect(withLegacy.out).toMatch(/Pairing code: \d{3} \d{3}/);
@@ -3568,8 +3922,8 @@ describe("pairing and identity", () => {
       expect(await at({ authorization: "Bearer wrong" })).toEqual({ required: true, authenticated: false, reason: "token_required" });
       expect(await at({ authorization: "Bearer t0k3n" })).toMatchObject({ authenticated: true, via: "token", bearer: true });
       // a token held in the sign-in cookie is one signing out can clear
-      expect(await at({ cookie: "herdr_web_token=t0k3n" })).toEqual({ required: false, authenticated: true, via: "token", role: "drive" });
-      expect(await at({ cookie: "herdr_web_token=t0k3n", authorization: "Bearer wrong" })).toEqual({ required: false, authenticated: true, via: "token", role: "drive" });
+      expect(await at({ cookie: "ovis_token=t0k3n" })).toEqual({ required: false, authenticated: true, via: "token", role: "drive" });
+      expect(await at({ cookie: "ovis_token=t0k3n", authorization: "Bearer wrong" })).toEqual({ required: false, authenticated: true, via: "token", role: "drive" });
       // another proxy on this PC can pass a visitor's copy of the login header on: the token is asked for anyway
       expect(await at(proxied(OWNER))).toMatchObject({ authenticated: false, reason: "token_required" });
       expect(await at(proxied("someone@example.com"))).toMatchObject({ authenticated: false, reason: "token_required" });
@@ -3645,7 +3999,7 @@ describe("token auth", () => {
     type HealthBody = { auth: HealthAuth; lan_exposure?: LanExposure };
     const health = async (port: number, headers: Record<string, string> = {}): Promise<HealthBody> =>
       (await (await fetch(`http://127.0.0.1:${port}/api/health`, { headers })).json()) as HealthBody;
-    // no token and nothing paired, pinned so an inherited HERDR_WEB_TOKEN cannot gate the case
+    // no token and nothing paired, pinned so an inherited OVIS_TOKEN cannot gate the case
     const bound = (hostname: string) => {
       const stateDir = mkdtempSync(join(tmpdir(), "herdr-lan-"));
       const instance = createServer({ port: 0, hostname, token: "", stateDir });
@@ -3704,7 +4058,7 @@ describe("token auth", () => {
     });
     expect(res.status).toBe(204);
     const cookie = res.headers.get("set-cookie") ?? "";
-    expect(cookie).toContain(`herdr_web_token=${TOKEN}`);
+    expect(cookie).toContain(`ovis_token=${TOKEN}`);
     expect(cookie).toContain("HttpOnly");
     expect(cookie).toContain("SameSite=Strict");
     expect(cookie).toContain("Max-Age=31536000");
@@ -3712,7 +4066,7 @@ describe("token auth", () => {
 
   it("accepts the session cookie", async () => {
     const res = await fetch(`${securedBase()}/api/session`, {
-      headers: { cookie: `herdr_web_token=${TOKEN}` },
+      headers: { cookie: `ovis_token=${TOKEN}` },
     });
     expect(res.status).toBe(200);
   });
@@ -3750,7 +4104,7 @@ describe("token auth", () => {
   }, 10000);
 
   it("upgrades a websocket that carries the cookie", async () => {
-    const ws = connectWithCookie(wsUrl(), `herdr_web_token=${TOKEN}`);
+    const ws = connectWithCookie(wsUrl(), `ovis_token=${TOKEN}`);
     const first = await new Promise<{ type: string }>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error("no message within 5000ms")), 5000);
       ws.addEventListener("error", () => {
@@ -3884,7 +4238,7 @@ describe("terminal lens of a bridge without the PTY sidecar", () => {
   const TOKEN = "sidecar-test-secret";
   /** what /api/health and /api/bridge tell of herdr, from a bridge whose runtime has the sidecar or lacks it */
   const told = async (sidecar: boolean) => {
-    const dir = mkdtempSync(join(tmpdir(), "herdr-web-ui-sidecar-"));
+    const dir = mkdtempSync(join(tmpdir(), "ovis-sidecar-"));
     const bridge = createServer({ port: 0, stateDir: dir, token: TOKEN, machines: false, sidecar });
     try {
       const get = async (path: string) => {
@@ -3912,10 +4266,10 @@ describe("terminal lens of a bridge without the PTY sidecar", () => {
 });
 
 it("refuses cross-origin changes while allowing same-origin and CLI requests", async () => {
-  const root = mkdtempSync(join(tmpdir(), "herdr-web-ui-origin-"));
+  const root = mkdtempSync(join(tmpdir(), "ovis-origin-"));
   const instance = createServer({ port: 0, stateDir: root, token: "", tailscaleOwner: null, machines: false });
   const base = `http://127.0.0.1:${instance.port}`;
-  const created = await workspaceCreate({ cwd: root, label: "herdr-web-ui-test-origin" });
+  const created = await workspaceCreate({ cwd: root, label: "ovis-test-origin" });
   try {
     for (const path of ["pane/input", "pane/keys", "pane/close", "pane/focus", "layout/ratio", "workspace/create", "tab/create", "tab/rename", "tab/close", "tab/move", "push/subscribe"]) {
       const response = await fetch(`${base}/api/${path}`, { method: "POST", headers: { origin: "http://other.example", "content-type": "text/plain" }, body: JSON.stringify({ pane_id: created.root_pane.pane_id, text: "must not type", keys: ["Enter"] }) });
@@ -3930,7 +4284,7 @@ it("refuses cross-origin changes while allowing same-origin and CLI requests", a
 });
 
 describe("repository diff of a pane's folder", () => {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "herdr-web-ui-test-repo-diff-")));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "ovis-test-repo-diff-")));
   let workspaceId: string | null = null;
   afterAll(async () => {
     if (workspaceId) await workspaceClose(workspaceId).catch(() => undefined);
@@ -3949,7 +4303,7 @@ describe("repository diff of a pane's folder", () => {
     git("commit", "-q", "-m", "first");
     writeFileSync(join(root, "a.txt"), "two\n");
     // the pane sits below the repository's top, and in no repository of its own
-    const created = await workspaceCreate({ cwd: join(root, "sub"), label: "herdr-web-ui-test-repo-diff" });
+    const created = await workspaceCreate({ cwd: join(root, "sub"), label: "ovis-test-repo-diff" });
     workspaceId = created.workspace.workspace_id;
     const pane = `pane_id=${encodeURIComponent(created.root_pane.pane_id)}`;
     const expected: RepoDiffFileList["files"] = [{ path: "a.txt", old_path: null, status: "modified", additions: 1, deletions: 1, binary: false }];
@@ -3981,12 +4335,65 @@ describe("repository diff of a pane's folder", () => {
     const posted = await fetch(`${base()}/api/workspace/diff/files?${pane}`, { method: "POST", headers: { "x-herdr-machine": "1" } });
     expect(posted.status).toBe(400);
     expect(((await posted.json()) as ApiError).error.code).toBe("method_not_allowed");
+
+    // the branch against a base: the refs for the picker, the list from the merge base, each patch from the list's identity
+    git("add", ".");
+    git("commit", "-q", "-m", "on main");
+    git("checkout", "-q", "-b", "feature");
+    writeFileSync(join(root, "b.txt"), "branch\n");
+    git("add", ".");
+    git("commit", "-q", "-m", "branch work");
+    git("update-ref", "refs/remotes/origin/main", "main");
+    git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main");
+    writeFileSync(join(root, "untracked.txt"), "new\n");
+    const mainOid = Bun.spawnSync(["git", "-C", root, "rev-parse", "main"], { stdout: "pipe" }).stdout.toString().trim();
+    const headOid = Bun.spawnSync(["git", "-C", root, "rev-parse", "HEAD"], { stdout: "pipe" }).stdout.toString().trim();
+    for (const prefix of ["", "machines/local/"]) {
+      const refs = await fetch(`${base()}/api/${prefix}workspace/diff/refs?${pane}`);
+      expect([prefix, refs.status]).toEqual([prefix, 200]);
+      const listed = (await refs.json()) as RepoDiffRefs;
+      expect(listed.refs).toEqual([{ name: "refs/heads/feature", oid: headOid }, { name: "refs/heads/main", oid: mainOid }, { name: "refs/remotes/origin/main", oid: mainOid }]);
+      expect(listed).toMatchObject({ truncated: false, limits: { max_refs: 200 } });
+      const branch = await fetch(`${base()}/api/${prefix}workspace/diff/files?${pane}&scope=branch&base=refs%2Fremotes%2Forigin%2Fmain`);
+      expect([prefix, branch.status]).toEqual([prefix, 200]);
+      const compared = (await branch.json()) as RepoDiffFileList;
+      expect(compared).toMatchObject({ scope: "branch", base: mainOid, head: headOid, comparison: { repository_root: root, head_oid: headOid, base_oid: mainOid, merge_base_oid: mainOid } });
+      expect(compared.files.map((file) => [file.path, file.status])).toEqual([["b.txt", "added"], ["untracked.txt", "untracked"]]);
+      const comparison = encodeURIComponent(JSON.stringify(compared.comparison));
+      const patch = await fetch(`${base()}/api/${prefix}workspace/diff/file?${pane}&scope=branch&path=untracked.txt&comparison=${comparison}`);
+      expect([prefix, patch.status]).toEqual([prefix, 200]);
+      const read = (await patch.json()) as RepoDiffFilePatch;
+      expect(read).toMatchObject({ scope: "branch", comparison: compared.comparison, file: { path: "untracked.txt", status: "untracked", binary: false }, unavailable: null });
+      expect(read.patch).toStartWith("diff --git a/untracked.txt b/untracked.txt\n");
+      // a malformed identity, one of another HEAD, and a patch asked by the base's name instead of the identity
+      for (const [search, status, code] of [
+        [`scope=branch&path=b.txt&comparison=${encodeURIComponent("{\"head_oid\":1}")}`, 400, "invalid_comparison"],
+        // a full git id is 40 or 64 hex digits: 41 is a malformed shape, not a moved HEAD or a missing commit
+        ...(["head_oid", "base_oid", "merge_base_oid"] as const).map((key) => [`scope=branch&path=b.txt&comparison=${encodeURIComponent(JSON.stringify({ ...compared.comparison, [key]: "a".repeat(41) }))}`, 400, "invalid_comparison"] as const),
+        [`scope=branch&path=b.txt&comparison=${encodeURIComponent(JSON.stringify({ ...compared.comparison, head_oid: "0".repeat(40) }))}`, 409, "comparison_changed"],
+        ["scope=branch&path=b.txt&base=main", 400, "invalid_comparison"],
+      ] as const) {
+        const refused = await fetch(`${base()}/api/${prefix}workspace/diff/file?${pane}&${search}`);
+        expect([prefix, search, refused.status]).toEqual([prefix, search, status]);
+        expect(((await refused.json()) as ApiError).error.code).toBe(code);
+      }
+      // a base that names no commit, and one that shares no history
+      const unknown = await fetch(`${base()}/api/${prefix}workspace/diff/files?${pane}&scope=branch&base=no-such-branch`);
+      expect(unknown.status).toBe(404);
+      expect(((await unknown.json()) as ApiError).error.code).toBe("revision_not_found");
+    }
+    // another site's page reads none of it
+    for (const route of ["refs", "files?scope=branch&base=main"]) {
+      const crossSite = await fetch(`${base()}/api/workspace/diff/${route.includes("?") ? route.replace("?", `?${pane}&`) : `${route}?${pane}`}`, { headers: { "sec-fetch-site": "cross-site" } });
+      expect([route, crossSite.status]).toEqual([route, 403]);
+      expect(((await crossSite.json()) as ApiError).error.code).toBe("cross_site");
+    }
   });
 });
 
 describe("GET /api/sessions/history", () => {
   it("lists a workspace folder's Codex sessions from the server's store, newest first, and none a link puts outside it", async () => {
-    const root = mkdtempSync(join(tmpdir(), "herdr-web-ui-session-history-contract-"));
+    const root = mkdtempSync(join(tmpdir(), "ovis-session-history-contract-"));
     const project = join(root, "project");
     mkdirSync(project);
     const cwd = realpathSync(project);
@@ -4006,8 +4413,8 @@ describe("GET /api/sessions/history", () => {
     const outside = join(root, `rollout-2026-10-03T09-00-00-${escaped}.jsonl`);
     writeFileSync(outside, `${JSON.stringify({ type: "session_meta", payload: { id: escaped, cwd, source: "cli" } })}\n`);
     if (process.platform !== "win32") symlinkSync(outside, join(codexHome, "sessions", "2026", "10", "02", basename(outside)));
-    const created = await workspaceCreate({ cwd, label: "herdr-web-ui-test-session-history" });
-    const appState = mkdtempSync(join(tmpdir(), "herdr-web-ui-session-history-state-"));
+    const created = await workspaceCreate({ cwd, label: "ovis-test-session-history" });
+    const appState = mkdtempSync(join(tmpdir(), "ovis-session-history-state-"));
     const app = createServer({ port: 0, stateDir: appState, codexHome });
     try {
       const res = await fetch(`http://localhost:${app.port}/api/sessions/history?workspace_id=${encodeURIComponent(created.workspace.workspace_id)}&agent=codex`);
@@ -4021,7 +4428,7 @@ describe("GET /api/sessions/history", () => {
       const unknown = await fetch(`http://localhost:${app.port}/api/sessions/history?workspace_id=${encodeURIComponent(created.workspace.workspace_id)}&agent=bash`);
       expect(unknown.status).toBe(400);
       // another PC asks with the bridge token this server registered, not a browser's: the proxy's way in
-      const bridgeState = mkdtempSync(join(tmpdir(), "herdr-web-ui-session-history-bridge-"));
+      const bridgeState = mkdtempSync(join(tmpdir(), "ovis-session-history-bridge-"));
       const bridge = createServer({ port: 0, hostname: "127.0.0.1", token: "test-browser-token", machines: false, registerBridge: true, stateDir: bridgeState, codexHome, tailscaleOwner: null });
       try {
         const registered = JSON.parse(readFileSync(descriptorPath(), "utf8")) as BridgeDescriptor;
@@ -4069,12 +4476,12 @@ describe("workspace order evidence", () => {
   }
 
   it("health, session, websocket and move answers share one order per server lifetime", async () => {
-    const root = mkdtempSync(join(tmpdir(), "herdr-web-ui-order-"));
+    const root = mkdtempSync(join(tmpdir(), "ovis-order-"));
     const state = join(root, "state");
-    const first = await workspaceCreate({ cwd: root, label: "herdr-web-ui-test-order-first" });
-    const second = await workspaceCreate({ cwd: root, label: "herdr-web-ui-test-order-second" });
-    const managedBoot = process.env["HERDR_WEB_BOOT_ID"];
-    delete process.env["HERDR_WEB_BOOT_ID"];
+    const first = await workspaceCreate({ cwd: root, label: "ovis-test-order-first" });
+    const second = await workspaceCreate({ cwd: root, label: "ovis-test-order-second" });
+    const managedBoot = process.env["OVIS_BOOT_ID"];
+    delete process.env["OVIS_BOOT_ID"];
     let app = createServer({ port: 0, hostname: "127.0.0.1", token: "", stateDir: state });
     try {
       let origin = `http://127.0.0.1:${app.port}`;
@@ -4124,10 +4531,507 @@ describe("workspace order evidence", () => {
       expect(await move(second.workspace.workspace_id)).toEqual({ ok: true, order_epoch: restarted, moved_seq: 1 });
     } finally {
       app.stop();
-      if (managedBoot === undefined) delete process.env["HERDR_WEB_BOOT_ID"]; else process.env["HERDR_WEB_BOOT_ID"] = managedBoot;
+      if (managedBoot === undefined) delete process.env["OVIS_BOOT_ID"]; else process.env["OVIS_BOOT_ID"] = managedBoot;
       await workspaceClose(first.workspace.workspace_id).catch(() => {});
       await workspaceClose(second.workspace.workspace_id).catch(() => {});
       rmSync(root, { recursive: true, force: true });
     }
   }, 60_000);
+});
+
+
+/**
+ * POST /api/sessions/resume end to end: herdr's real tab.create and agent.start, which types
+ * `claude --resume <id>` into the new tab's shell. The `claude` that shell finds is a native stand-in
+ * (a copy of Node renamed `claude`) that reports, over a loopback socket, whether CLAUDE_CONFIG_DIR
+ * reached it and with what value, and appends to the transcript of the session in the store it
+ * inherited; no real Claude runs. The stand-in has to come first on the PATH of herdr's own shells,
+ * so this runs on a herdr session of its own, as reattach.contract.test.ts does, under a HOME of
+ * its own: the default store (~/.claude) is the test's, never the user's.
+ */
+describe("POST /api/sessions/resume", () => {
+  const NATIVE = process.platform === "linux" && Bun.which("node") !== null && process.env["HERDR_TEST_MODE"] !== "unit";
+  const SESSION = "resume";
+  // made in beforeAll, so a run whose filter leaves these tests out leaves no directory behind
+  let config = "";
+  let root = "";
+  let home = "";
+  let alternate = "";
+  let project = "";
+  let socket = "";
+  const herdr = process.env["OVIS_HERDR_BIN"] || Bun.which("herdr") || "herdr";
+  const ID = "00000000-0000-4000-8000-0000000000c1";
+  const OTHER = "00000000-0000-4000-8000-0000000000c2";
+  const WATCH_TOKEN = "f".repeat(64);
+  type Report = { pid: number; resumed: string | null; has: boolean; value: string | null };
+  const queued: Report[] = [];
+  const waiting: ((report: Report) => void)[] = [];
+  let listener: { port: number; stop: (closeActive?: boolean) => void } | undefined;
+  let daemon: ReturnType<typeof Bun.spawn> | undefined;
+  let app: ReturnType<typeof createServer> | undefined;
+  let cwd = "";
+  let workspaceId = "";
+  let foreignWorkspace = "";
+  const saved = { HERDR_SOCKET: process.env["HERDR_SOCKET"], HOME: process.env["HOME"], CLAUDE_CONFIG_DIR: process.env["CLAUDE_CONFIG_DIR"], PATH: process.env["PATH"] };
+  const restore = (name: keyof typeof saved) => { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; };
+  const rpc = <T,>(method: string, params: Record<string, unknown>) => herdrRpc<T>(method, params, socket);
+  const snapshotNow = async () => (await rpc<{ snapshot: SessionSnapshot }>("session.snapshot", {})).snapshot;
+  const tabsOf = async (workspace: string) => (await snapshotNow()).tabs.filter((tab) => tab.workspace_id === workspace).length;
+  /** the next stand-in's report, in the order they started; bounded */
+  const nextReport = (): Promise<Report> => {
+    const ready = queued.shift();
+    if (ready) return Promise.resolve(ready);
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("no Claude stand-in reported within 20 s")), 20_000);
+      waiting.push((report) => { clearTimeout(timer); resolve(report); });
+    });
+  };
+  const transcript = (store: string, id: string) => join(store, "projects", claudeProjectDir(cwd), `${id}.jsonl`);
+  const writeSession = (store: string, id: string, prompt: string) => {
+    mkdirSync(join(transcript(store, id), ".."), { recursive: true });
+    writeFileSync(transcript(store, id), `${JSON.stringify({ type: "user", cwd, sessionId: id, timestamp: "2026-10-01T09:00:00.000Z", message: { role: "user", content: prompt } })}\n`);
+  };
+  /** A tab of the workspace running a stand-in Claude with `store` exported (null: none exported); the tab's own env, if given, is its shell's. */
+  const sourcePane = async (store: string | null, tabEnv?: Record<string, string>, command = "claude") => {
+    const tab = await rpc<{ root_pane: { pane_id: string } }>("tab.create", { workspace_id: workspaceId, cwd, focus: false, ...(tabEnv ? { env: tabEnv } : {}) });
+    const pane = tab.root_pane.pane_id;
+    await rpc("pane.send_text", { pane_id: pane, text: `${store === null ? "env -u CLAUDE_CONFIG_DIR" : `env CLAUDE_CONFIG_DIR='${store}'`} ${command}\n` });
+    return { pane, report: await nextReport() };
+  };
+  const list = async (pane: string) => {
+    const response = await fetch(`http://127.0.0.1:${app!.port}/api/sessions/history?workspace_id=${encodeURIComponent(workspaceId)}&agent=claude&pane_id=${encodeURIComponent(pane)}`);
+    return [response.status, await response.json()] as [number, SessionHistoryResponse & { error?: { code: string } }];
+  };
+  const guard = { "content-type": "application/json", "x-herdr-machine": "1" };
+  const resume = async (body: Record<string, unknown>, headers: Record<string, string> = {}) => {
+    const response = await fetch(`http://127.0.0.1:${app!.port}/api/sessions/resume`, { method: "POST", headers: { ...guard, ...headers }, body: JSON.stringify(body) });
+    return [response.status, await response.json()] as [number, SessionResumeResponse & { error?: { code: string; message: string } }];
+  };
+  /** herdr up on `path`: tried when its folder changes, and at once again while it refuses (between bind and listen); bounded */
+  const herdrUp = (path: string) => new Promise<void>((resolve, reject) => {
+    let over = false;
+    let trying = false;
+    const finish = (error?: Error) => { if (over) return; over = true; clearTimeout(timer); watcher.close(); if (error) reject(error); else resolve(); };
+    const attempt = async (): Promise<void> => {
+      if (over || trying || !existsSync(path)) return;
+      trying = true;
+      try { await herdrRpc("ping", {}, path, 2_000); finish(); } catch { setImmediate(() => void attempt()); } finally { trying = false; }
+    };
+    const watcher = watch(dirname(path), () => void attempt());
+    const timer = setTimeout(() => finish(new Error("the resume test's herdr did not start")), 15_000);
+    void attempt();
+  });
+  /** A herdr session of its own on `path`, its shells handed `env` over the stand-in PATH and this HOME. */
+  const startHerdr = async (session: string, configDir: string, path: string, env: Record<string, string>) => {
+    mkdirSync(dirname(path), { recursive: true });
+    const started = Bun.spawn([herdr, "--session", session, "server"], { stdin: "ignore", stdout: "ignore", stderr: "ignore", env: {
+      ...Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("HERDR_") && name !== "CLAUDE_CONFIG_DIR")),
+      ...testShellEnv(configDir), XDG_CONFIG_HOME: configDir, HOME: home, PATH: `${join(root, "bin")}:${saved.PATH ?? ""}`, ...env,
+    } });
+    await herdrUp(path);
+    return started;
+  };
+  const stopHerdr = async (session: string, configDir: string, started: ReturnType<typeof Bun.spawn>) => {
+    await Bun.spawn([herdr, "--session", session, "server", "stop"], { stdin: "ignore", stdout: "ignore", stderr: "ignore", env: { ...process.env, XDG_CONFIG_HOME: configDir } }).exited;
+    started.kill();
+    await started.exited;
+  };
+  /** Reads `check` until it holds: once herdr's subscription starts, and again on each event of the pane; bounded */
+  const untilPane = (pane: string, check: () => Promise<boolean>, what: string, start: () => Promise<unknown>) => new Promise<void>((resolve, reject) => {
+    let over = false;
+    let reading = false;
+    let again = false;
+    const finish = (error?: Error) => { if (over) return; over = true; clearTimeout(timer); subscription.close(); if (error) reject(error); else resolve(); };
+    const read = async (): Promise<void> => {
+      if (over) return;
+      if (reading) { again = true; return; }
+      reading = true;
+      try { if (await check()) finish(); } catch (error) { finish(error as Error); } finally {
+        reading = false;
+        if (again && !over) { again = false; void read(); }
+      }
+    };
+    const subscription = subscribeEvents([{ type: "pane.updated", pane_id: pane }, { type: "pane.agent_status_changed", pane_id: pane }], {
+      onStarted: () => { start().then(() => read(), (error: Error) => finish(error)); },
+      onEvent: () => void read(),
+      onError: (error) => finish(error),
+    }, socket);
+    const timer = setTimeout(() => finish(new Error(`herdr never ${what}`)), 10_000);
+  });
+
+  beforeAll(async () => {
+    if (!NATIVE) return;
+    config = mkdtempSync("/tmp/hwr-");
+    root = mkdtempSync(join(tmpdir(), "ovis-claude-resume-"));
+    home = join(root, "home");
+    alternate = join(root, "alternate-store");
+    project = join(root, "project");
+    socket = join(config, "herdr", "sessions", SESSION, "herdr.sock");
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    mkdirSync(alternate, { recursive: true });
+    mkdirSync(project, { recursive: true });
+    cwd = realpathSync(project);
+    const reports = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data(peer, data) {
+      const report = JSON.parse(data.toString()) as Report;
+      peer.end();
+      const waiter = waiting.shift();
+      if (waiter) waiter(report); else queued.push(report);
+    } } });
+    listener = reports;
+    const bin = join(root, "bin");
+    mkdirSync(join(root, "native"), { recursive: true });
+    mkdirSync(bin);
+    copyFileSync(Bun.which("node")!, join(root, "native", "claude"));
+    writeFileSync(join(root, "claude.cjs"), `
+process.title = "claude";
+const fs = require("node:fs");
+const path = require("node:path");
+const args = process.argv.slice(2);
+const at = args.indexOf("--resume");
+const has = Object.prototype.hasOwnProperty.call(process.env, "CLAUDE_CONFIG_DIR");
+const store = process.env.CLAUDE_CONFIG_DIR || path.join(process.env.HOME, ".claude");
+const resumed = at >= 0 ? args[at + 1] : null;
+if (resumed) fs.appendFileSync(path.join(store, "projects", ${JSON.stringify(claudeProjectDir(cwd))}, resumed + ".jsonl"), JSON.stringify({ type: "user", sessionId: resumed, message: { role: "user", content: "written by the resumed stand-in" } }) + "\\n");
+require("node:net").connect(${reports.port}, "127.0.0.1", function () { this.end(JSON.stringify({ pid: process.pid, resumed, has, value: has ? process.env.CLAUDE_CONFIG_DIR : null })); });
+// alive until its pane or herdr ends it, with or without a terminal on stdin (a background job has none)
+setInterval(() => {}, 1 << 30);
+`);
+    writeFileSync(join(bin, "claude"), `#!/bin/sh\nexec ${JSON.stringify(join(root, "native", "claude"))} ${JSON.stringify(join(root, "claude.cjs"))} "$@"\n`);
+    chmodSync(join(bin, "claude"), 0o755);
+    writeSession(join(home, ".claude"), ID, "default store prompt");
+    writeSession(alternate, ID, "alternate store prompt");
+    // herdr's shells: the stand-in first on PATH, this HOME, and no CLAUDE_CONFIG_DIR of their own
+    daemon = await startHerdr(SESSION, config, socket, {});
+    // the server under test reads herdr, the default store and the variable from its own environment
+    process.env["HERDR_SOCKET"] = socket;
+    process.env["HOME"] = home;
+    delete process.env["CLAUDE_CONFIG_DIR"];
+    const appState = join(root, "app-state");
+    mkdirSync(appState);
+    writeFileSync(join(appState, "devices.json"), JSON.stringify({ gate_closed_at: new Date().toISOString(), devices: [{ id: "0123456789abcdef", label: "Watch fixture", role: "watch", token_hash: createHash("sha256").update(WATCH_TOKEN).digest("hex"), created_at: new Date().toISOString(), last_seen_at: null }] }), { mode: 0o600 });
+    app = createServer({ port: 0, hostname: "127.0.0.1", stateDir: appState });
+    workspaceId = (await rpc<Awaited<ReturnType<typeof workspaceCreate>>>("workspace.create", { cwd, label: "ovis-test-claude-resume", focus: false })).workspace.workspace_id;
+    foreignWorkspace = (await rpc<Awaited<ReturnType<typeof workspaceCreate>>>("workspace.create", { cwd, label: "ovis-test-claude-resume-other", focus: false })).workspace.workspace_id;
+  }, 30_000);
+
+  afterAll(async () => {
+    app?.stop();
+    restore("HERDR_SOCKET");
+    restore("HOME");
+    restore("CLAUDE_CONFIG_DIR");
+    if (daemon) await stopHerdr(SESSION, config, daemon);
+    listener?.stop(true);
+    if (config !== "") rmSync(config, { recursive: true, force: true });
+    if (root !== "") rmSync(root, { recursive: true, force: true });
+  });
+
+  it.skipIf(!NATIVE)("real tab.create plus agent.start preserve Claude override presence and store", async () => {
+    const before = readFileSync(transcript(join(home, ".claude"), ID), "utf8");
+    // a pane whose processes herdr reports, none of them Claude: the server's default store, bound to it
+    const shellOnly = (await rpc<{ root_pane: { pane_id: string } }>("tab.create", { workspace_id: workspaceId, cwd, focus: false })).root_pane.pane_id;
+    const [shellStatus, shellList] = await list(shellOnly);
+    expect([shellStatus, shellList.sessions.map((row) => [row.firstMessage, row.resume?.source?.pane_id])]).toEqual([200, [["default store prompt", shellOnly]]]);
+    // an exported alternate store: listed from it, resumed in it, the variable still exported
+    const exported = await sourcePane(alternate);
+    const [status, listed] = await list(exported.pane);
+    expect(status).toBe(200);
+    expect(listed.sessions.map((row) => [row.id, row.firstMessage, row.resume?.source?.pane_id])).toEqual([[ID, "alternate store prompt", exported.pane]]);
+    expect(JSON.stringify(listed)).not.toContain(alternate);
+    const alternateKey = listed.sessions[0]!.resume!.source!.store_key;
+    const tabs = await tabsOf(workspaceId);
+    const [made, created] = await resume({ workspace_id: workspaceId, pane_id: exported.pane, agent: "claude", session_id: ID, store_key: alternateKey });
+    expect([made, created.action, created.action === "created" && created.agent_started]).toEqual([200, "created", true]);
+    expect(await nextReport()).toMatchObject({ resumed: ID, has: true, value: alternate });
+    expect(readFileSync(transcript(alternate, ID), "utf8")).toContain("written by the resumed stand-in");
+    expect(readFileSync(transcript(join(home, ".claude"), ID), "utf8")).toBe(before);
+    expect(await tabsOf(workspaceId)).toBe(tabs + 1);
+
+    // none exported, by herdr's shells either: the variable stays absent, not set to ~/.claude
+    const implicit = await sourcePane(null);
+    const [, implicitList] = await list(implicit.pane);
+    expect(implicitList.sessions.map((row) => row.firstMessage)).toEqual(["default store prompt"]);
+    const implicitKey = implicitList.sessions[0]!.resume!.source!.store_key;
+    const [, second] = await resume({ workspace_id: workspaceId, pane_id: implicit.pane, agent: "claude", session_id: ID, store_key: implicitKey });
+    expect(second.action).toBe("created");
+    expect(await nextReport()).toMatchObject({ resumed: ID, has: false, value: null });
+    expect(readFileSync(transcript(join(home, ".claude"), ID), "utf8")).toContain("written by the resumed stand-in");
+
+    // ~/.claude exported by name: the same directory, another key, and the variable stays exported
+    const named = await sourcePane(join(home, ".claude"));
+    const [, namedList] = await list(named.pane);
+    const namedKey = namedList.sessions[0]!.resume!.source!.store_key;
+    expect(namedKey).not.toBe(implicitKey);
+    const [, third] = await resume({ workspace_id: workspaceId, pane_id: named.pane, agent: "claude", session_id: ID, store_key: namedKey });
+    expect(third.action).toBe("created");
+    expect(await nextReport()).toMatchObject({ resumed: ID, has: true, value: join(home, ".claude") });
+
+    // a pane herdr reports on the session, on the same store: Open, nothing made, herdr's focus unmoved
+    await rpc("pane.report_agent_session", { pane_id: exported.pane, agent: "claude", source: "herdr:claude", seq: 1, agent_session_id: ID, session_start_source: "resume" });
+    const focused = (await snapshotNow()).panes.find((pane) => pane.focused)?.pane_id;
+    const counted = await tabsOf(workspaceId);
+    const [, opened] = await resume({ workspace_id: workspaceId, pane_id: exported.pane, agent: "claude", session_id: ID, store_key: alternateKey });
+    expect(opened).toEqual({ action: "opened", workspace_id: workspaceId, pane_id: exported.pane });
+    expect(await tabsOf(workspaceId)).toBe(counted);
+    expect((await snapshotNow()).panes.find((pane) => pane.focused)?.pane_id).toBe(focused);
+    // the same id reported by that pane is not Open for a list read from another store: a new tab in that one
+    const [, elsewhere] = await resume({ workspace_id: workspaceId, pane_id: implicit.pane, agent: "claude", session_id: ID, store_key: implicitKey });
+    expect(elsewhere.action).toBe("created");
+    expect(await nextReport()).toMatchObject({ resumed: ID, has: false });
+  }, 90_000);
+
+  it.skipIf(!NATIVE)("refuses a changed, foreign, forged, watch-only, unreadable or ambiguous source before any tab is made", async () => {
+    const source = await sourcePane(alternate);
+    const [, listed] = await list(source.pane);
+    const key = listed.sessions[0]!.resume!.source!.store_key;
+    const valid = { workspace_id: workspaceId, pane_id: source.pane, agent: "claude", session_id: ID, store_key: key };
+    const foreignPane = (await snapshotNow()).panes.find((pane) => pane.workspace_id === foreignWorkspace)!.pane_id;
+    const defaultBefore = readFileSync(transcript(join(home, ".claude"), ID), "utf8");
+    const refusals: [number, unknown][] = [];
+    // each refusal is answered before any tab is made
+    const refused = async (body: Record<string, unknown>, expected: [number, string], headers: Record<string, string> = {}) => {
+      const tabs = await tabsOf(workspaceId);
+      const [status, answer] = await resume(body, headers);
+      refusals.push([status, answer]);
+      expect([status, answer.error?.code]).toEqual(expected);
+      expect(await tabsOf(workspaceId)).toBe(tabs);
+    };
+    await refused(valid, [403, "read_only"], { "x-forwarded-for": "100.64.0.9", cookie: `ovis_device=${WATCH_TOKEN}` });
+    await refused({ ...valid, pane_id: foreignPane }, [400, "pane_not_in_workspace"]);
+    await refused({ ...valid, session_id: "../../outside" }, [400, "invalid_session_id"]);
+    await refused({ ...valid, store_key: alternate }, [400, "invalid_store_key"]);
+    await refused({ ...valid, store_key: "0".repeat(24) }, [409, "stale_source"]);
+    await refused({ ...valid, session_id: OTHER }, [404, "session_not_found"]);
+    await refused({ ...valid, agent: "codex" }, [400, "invalid_agent"]);
+    // the listing pane's Claude restarted on the default store: the key no longer matches
+    process.kill(source.report.pid);
+    await rpc("pane.send_text", { pane_id: source.pane, text: "env -u CLAUDE_CONFIG_DIR claude\n" });
+    await nextReport();
+    await refused(valid, [409, "stale_source"]);
+    // the listing pane gone
+    const gone = await sourcePane(alternate);
+    const [, goneList] = await list(gone.pane);
+    await rpc("pane.close", { pane_id: gone.pane });
+    await refused({ ...valid, pane_id: gone.pane, store_key: goneList.sessions[0]!.resume!.source!.store_key }, [409, "stale_source"]);
+    // a named store that is not there: unreadable, never the default store in its place
+    const unreadable = await sourcePane(join(root, "missing-store"));
+    expect((await list(unreadable.pane))[0]).toBe(409);
+    await refused({ ...valid, pane_id: unreadable.pane }, [409, "claude_store_unknown"]);
+    // two Claudes in front of one pane: which one a session belongs to cannot be told
+    const tab = await rpc<{ root_pane: { pane_id: string } }>("tab.create", { workspace_id: workspaceId, cwd, focus: false });
+    // herdr's own process list catches up with the two a moment after they start: read it again on each of the pane's events until it does
+    const claudes = async () => ((await rpc<{ process_info: { foreground_processes?: { name?: string }[] } }>("pane.process_info", { pane_id: tab.root_pane.pane_id })).process_info.foreground_processes ?? []).filter((entry) => entry.name === "claude").length;
+    await untilPane(tab.root_pane.pane_id, async () => await claudes() >= 2, "listed both Claude processes", async () => {
+      await rpc("pane.send_text", { pane_id: tab.root_pane.pane_id, text: `sh -c 'claude & CLAUDE_CONFIG_DIR=${alternate} claude; wait'\n` });
+      await nextReport(); await nextReport();
+    });
+    expect((await list(tab.root_pane.pane_id))[0]).toBe(409);
+    await refused({ ...valid, pane_id: tab.root_pane.pane_id }, [409, "claude_store_unknown"]);
+    // nothing was started in the default store, and no refusal names a store or a prompt
+    expect(readFileSync(transcript(join(home, ".claude"), ID), "utf8")).toBe(defaultBefore);
+    expect(JSON.stringify(refusals)).not.toMatch(/alternate|prompt|missing-store/);
+  }, 90_000);
+
+  it.skipIf(!NATIVE)("a source shell without the override is no proof: herdr exporting one withholds Resume before any tab", async () => {
+    // the implicit store's key, as a list from a pane with none exported gives it
+    const implicitKey = (await list((await sourcePane(null)).pane))[1].sessions[0]!.resume!.source!.store_key;
+    const exportedSession = "resume-exported";
+    const exportedConfig = mkdtempSync("/tmp/hwr-");
+    const exportedSocket = join(exportedConfig, "herdr", "sessions", exportedSession, "herdr.sock");
+    const exportedRpc = <T,>(method: string, params: Record<string, unknown>) => herdrRpc<T>(method, params, exportedSocket);
+    const defaultBefore = readFileSync(transcript(join(home, ".claude"), ID), "utf8");
+    const alternateBefore = readFileSync(transcript(alternate, ID), "utf8");
+    let exported: ReturnType<typeof Bun.spawn> | undefined;
+    try {
+      // a herdr whose own environment exports the alternate store: every new tab of it inherits that
+      exported = await startHerdr(exportedSession, exportedConfig, exportedSocket, { CLAUDE_CONFIG_DIR: alternate });
+      process.env["HERDR_SOCKET"] = exportedSocket;
+      const workspace = (await exportedRpc<Awaited<ReturnType<typeof workspaceCreate>>>("workspace.create", { cwd, label: "ovis-test-claude-resume-exported", focus: false })).workspace.workspace_id;
+      const pane = (await exportedRpc<{ root_pane: { pane_id: string } }>("tab.create", { workspace_id: workspace, cwd, focus: false })).root_pane.pane_id;
+      // the pane's shell drops it before Claude starts: the pane alone says none exported
+      await exportedRpc("pane.send_text", { pane_id: pane, text: "exec env -u CLAUDE_CONFIG_DIR /bin/sh -c 'claude; exec /bin/sh'\n" });
+      expect(await nextReport()).toMatchObject({ has: false });
+      const listed = await fetch(`http://127.0.0.1:${app!.port}/api/sessions/history?workspace_id=${encodeURIComponent(workspace)}&agent=claude&pane_id=${encodeURIComponent(pane)}`);
+      const rows = ((await listed.json()) as SessionHistoryResponse).sessions;
+      // the pane's own store is listed, but a new tab would start in herdr's: no Resume for it
+      expect([listed.status, rows.map((row) => [row.firstMessage, row.resume?.source])]).toEqual([200, [["default store prompt", undefined]]]);
+      const tabs = (await exportedRpc<{ snapshot: SessionSnapshot }>("session.snapshot", {})).snapshot.tabs.filter((tab) => tab.workspace_id === workspace).length;
+      const [status, refused] = await resume({ workspace_id: workspace, pane_id: pane, agent: "claude", session_id: ID, store_key: implicitKey });
+      expect([status, refused.error?.code]).toEqual([409, "launch_unsupported"]);
+      expect((await exportedRpc<{ snapshot: SessionSnapshot }>("session.snapshot", {})).snapshot.tabs.filter((tab) => tab.workspace_id === workspace).length).toBe(tabs);
+      expect(readFileSync(transcript(join(home, ".claude"), ID), "utf8")).toBe(defaultBefore);
+      expect(readFileSync(transcript(alternate, ID), "utf8")).toBe(alternateBefore);
+    } finally {
+      process.env["HERDR_SOCKET"] = socket;
+      if (exported) await stopHerdr(exportedSession, exportedConfig, exported);
+      rmSync(exportedConfig, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it.skipIf(!NATIVE)("answers another PC's Resume through the PC proxy, refusing a stale key there too", async () => {
+    // a session no pane shows yet (the first test left one showing ID): Resume makes a tab for it
+    const REMOTE = "00000000-0000-4000-8000-0000000000c3";
+    writeSession(alternate, REMOTE, "remote store prompt");
+    const source = await sourcePane(alternate);
+    const bridgeState = mkdtempSync(join(tmpdir(), "ovis-claude-resume-bridge-"));
+    const bridge = createServer({ port: 0, hostname: "127.0.0.1", token: "test-browser-token", machines: false, registerBridge: true, stateDir: bridgeState, tailscaleOwner: null });
+    try {
+      const registered = JSON.parse(readFileSync(descriptorPath(), "utf8")) as BridgeDescriptor;
+      const manager = { endpoint: (id: string) => id === "resume-remote" ? { url: `http://127.0.0.1:${bridge.port}`, token: registered.token } : null, trackTerminal: () => () => {} } as unknown as MachineManager;
+      const listing = await handleMachineRequest(new Request(`http://127.0.0.1/api/machines/resume-remote/sessions/history?workspace_id=${encodeURIComponent(workspaceId)}&agent=claude&pane_id=${encodeURIComponent(source.pane)}`), manager);
+      expect(listing.status).toBe(200);
+      const key = ((await listing.json()) as SessionHistoryResponse).sessions.find((row) => row.id === REMOTE)!.resume!.source!.store_key;
+      const tabs = await tabsOf(workspaceId);
+      const post = (body: Record<string, unknown>) => handleMachineRequest(new Request("http://127.0.0.1/api/machines/resume-remote/sessions/resume", { method: "POST", headers: guard, body: JSON.stringify(body) }), manager);
+      const stale = await post({ workspace_id: workspaceId, pane_id: source.pane, agent: "claude", session_id: REMOTE, store_key: "0".repeat(24) });
+      expect([stale.status, ((await stale.json()) as ApiError).error.code]).toEqual([409, "stale_source"]);
+      expect(await tabsOf(workspaceId)).toBe(tabs);
+      const made = await post({ workspace_id: workspaceId, pane_id: source.pane, agent: "claude", session_id: REMOTE, store_key: key });
+      expect(((await made.json()) as SessionResumeResponse).action).toBe("created");
+      expect(await nextReport()).toMatchObject({ resumed: REMOTE, has: true, value: alternate });
+      expect(await tabsOf(workspaceId)).toBe(tabs + 1);
+    } finally {
+      bridge.stop();
+      rmSync(bridgeState, { recursive: true, force: true });
+    }
+  }, 60_000);
+});
+
+// The shared preferences (shared/preferences.ts) over HTTP and the event stream: the muted panes
+// are always in the document, the first mute is a change of the empty list, a watching device
+// reads and cannot write, and two tabs' changes land as two revisions with both kept.
+describe("shared preferences API", () => {
+  const guard = { "x-herdr-machine": "1", "content-type": "application/json" };
+  /** the event stream as a page reads it: each `preferences` document, and a bounded wait for the next one that matches */
+  async function openEvents(base: string, headers: Record<string, string>, abort: AbortController) {
+    const response = await fetch(`${base}/api/machines/events`, { headers, signal: abort.signal });
+    expect(response.status).toBe(200);
+    const documents: SharedPreferences[] = [];
+    const listeners = new Set<() => void>();
+    void (async () => {
+      const reader = response.body!.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) return;
+        buffer += decoder.decode(value, { stream: true });
+        for (let end = buffer.indexOf("\n\n"); end >= 0; end = buffer.indexOf("\n\n")) {
+          const frame = buffer.slice(0, end);
+          buffer = buffer.slice(end + 2);
+          if (!frame.startsWith("data: ")) continue;
+          const event = JSON.parse(frame.slice(6)) as MachineEvent;
+          if (event.type === "preferences") { documents.push(event.preferences); for (const listener of [...listeners]) listener(); }
+        }
+      }
+    })().catch(() => undefined);
+    const next = (what: string, found: (document: SharedPreferences) => boolean): Promise<SharedPreferences> => new Promise((resolve, reject) => {
+      const check = () => { const hit = documents.find(found); if (hit) { listeners.delete(check); clearTimeout(timer); resolve(hit); } };
+      const timer = setTimeout(() => { listeners.delete(check); reject(new Error(`timed out waiting for ${what}`)); }, 10_000);
+      listeners.add(check);
+      check();
+    });
+    return { documents, next };
+  }
+
+  it("advertises the mute list from the first document on, saves the first mute, and refuses what is not a list", async () => {
+    const root = mkdtempSync(join(tmpdir(), "herdr-web-ui-test-preferences-"));
+    const server = createServer({ port: 0, stateDir: root, token: "test-preferences", tailscaleOwner: null });
+    const base = `http://127.0.0.1:${server.port}`;
+    const headers = { ...guard, authorization: "Bearer test-preferences" };
+    const put = (body: unknown, extra: Record<string, string> = {}) => fetch(`${base}/api/preferences`, { method: "PUT", headers: { ...headers, ...extra }, body: typeof body === "string" ? body : JSON.stringify(body) });
+    const abort = new AbortController();
+    try {
+      // a fresh store: the empty list is in the GET and in the stream's opening document
+      expect(await (await fetch(`${base}/api/preferences`, { headers })).json()).toEqual({ revision: 0, settings: {}, muted_panes: [] });
+      const events = await openEvents(base, headers, abort);
+      expect(await events.next("the opening document", (document) => document.revision === 0)).toEqual({ revision: 0, settings: {}, muted_panes: [] });
+      // the first mute: saved, answered whole, and told to every stream
+      const first = await put({ settings: {}, muted_panes: ["w1:p1"] });
+      expect(first.status).toBe(200);
+      expect(await first.json()).toEqual({ revision: 1, settings: {}, muted_panes: ["w1:p1"] });
+      expect(await events.next("the first mute", (document) => document.revision === 1)).toEqual({ revision: 1, settings: {}, muted_panes: ["w1:p1"] });
+      // malformed and oversized lists: refused unread into the document, which keeps its revision
+      for (const muted of ["w1:p1", [1], [""], [null], ["x".repeat(301)], Array.from({ length: MAX_MUTED_PANES + 1 }, (_, i) => `w1:p${i}`)]) {
+        const refused = await put({ settings: {}, muted_panes: muted });
+        expect([JSON.stringify(muted).slice(0, 24), refused.status, ((await refused.json()) as ApiError).error.code]).toEqual([JSON.stringify(muted).slice(0, 24), 400, "invalid_body"]);
+      }
+      const huge = await put({ settings: {}, muted_panes: Array.from({ length: 300 }, (_, i) => `${"k".repeat(290)}${i}`) });
+      expect([huge.status, ((await huge.json()) as ApiError).error.code]).toEqual([413, "too_large"]);
+      expect(await (await fetch(`${base}/api/preferences`, { headers })).json()).toEqual({ revision: 1, settings: {}, muted_panes: ["w1:p1"] });
+      // a change that names no list leaves it; an empty list clears it
+      expect(await (await put({ settings: { theme: "light" } })).json()).toEqual({ revision: 2, settings: { theme: "light" }, muted_panes: ["w1:p1"] });
+      expect(await (await put({ settings: {}, muted_panes: [] })).json()).toEqual({ revision: 3, settings: { theme: "light" }, muted_panes: [] });
+      await events.next("the cleared list", (document) => document.revision === 3);
+      expect(events.documents.map((document) => document.revision)).toEqual([0, 1, 2, 3]);
+    } finally {
+      abort.abort();
+      server.stop();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reads a document from before the list as none muted, without a write, and takes the first mute of it", async () => {
+    const root = mkdtempSync(join(tmpdir(), "herdr-web-ui-test-preferences-"));
+    const stored = { revision: 4, settings: { theme: "dark" }, pins: ["local:w1:p1"] };
+    writeFileSync(join(root, "preferences.json"), JSON.stringify(stored));
+    const server = createServer({ port: 0, stateDir: root, token: "test-preferences", tailscaleOwner: null });
+    const base = `http://127.0.0.1:${server.port}`;
+    const headers = { ...guard, authorization: "Bearer test-preferences" };
+    const abort = new AbortController();
+    try {
+      expect(await (await fetch(`${base}/api/preferences`, { headers })).json()).toEqual({ ...stored, muted_panes: [] });
+      expect(JSON.parse(readFileSync(join(root, "preferences.json"), "utf8"))).toEqual(stored);
+      const events = await openEvents(base, headers, abort);
+      expect(await events.next("the opening document", (document) => document.revision === 4)).toEqual({ ...stored, muted_panes: [] });
+      const first = await fetch(`${base}/api/preferences`, { method: "PUT", headers, body: JSON.stringify({ settings: {}, muted_panes: ["w1:p1"] }) });
+      expect(await first.json()).toEqual({ revision: 5, settings: { theme: "dark" }, pins: ["local:w1:p1"], muted_panes: ["w1:p1"] });
+      // the list has a document of its own, which an older release's whole rewrite of preferences.json cannot erase
+      expect(JSON.parse(readFileSync(join(root, "preferences.json"), "utf8"))).toEqual({ revision: 5, settings: { theme: "dark" }, pins: ["local:w1:p1"] });
+      expect(JSON.parse(readFileSync(join(root, "muted-panes.json"), "utf8"))).toEqual({ muted_panes: ["w1:p1"] });
+    } finally {
+      abort.abort();
+      server.stop();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps both of two tabs' changes as two revisions, and lets a watching device read but not write", async () => {
+    const root = mkdtempSync(join(tmpdir(), "herdr-web-ui-test-preferences-"));
+    const devices = new DeviceStore(root);
+    const watch = devices.pair(devices.startPairing().code, "Watch", "watch")!;
+    devices.match(watch.token);
+    const server = createServer({ port: 0, stateDir: root, token: "test-preferences", tailscaleOwner: null });
+    const base = `http://127.0.0.1:${server.port}`;
+    const driving = { ...guard, authorization: "Bearer test-preferences" };
+    const watching = { ...guard, cookie: `ovis_device=${watch.token}` };
+    const abort = new AbortController();
+    try {
+      const events = await openEvents(base, watching, abort);
+      await events.next("the opening document", (document) => document.revision === 0);
+      // tab A mutes while tab B picks a theme: each change lands on the document as it is then, and neither is lost
+      const [a, b] = await Promise.all([
+        fetch(`${base}/api/preferences`, { method: "PUT", headers: driving, body: JSON.stringify({ settings: {}, muted_panes: ["w1:p1"] }) }),
+        fetch(`${base}/api/preferences`, { method: "PUT", headers: driving, body: JSON.stringify({ settings: { theme: "light" } }) }),
+      ]);
+      expect([a.status, b.status]).toEqual([200, 200]);
+      const revisions = [((await a.json()) as SharedPreferences).revision, ((await b.json()) as SharedPreferences).revision].sort();
+      expect(revisions).toEqual([1, 2]);
+      const merged = await events.next("both changes", (document) => document.revision === 2);
+      expect(merged).toEqual({ revision: 2, settings: { theme: "light" }, muted_panes: ["w1:p1"] });
+      // tab B then clears the list tab A set: the last write wins, as for every field
+      const cleared = await fetch(`${base}/api/preferences`, { method: "PUT", headers: driving, body: JSON.stringify({ settings: {}, muted_panes: [] }) });
+      expect(await cleared.json()).toEqual({ revision: 3, settings: { theme: "light" }, muted_panes: [] });
+      // the watching device heard every document, and cannot write one: the revision stays
+      await events.next("the cleared list", (document) => document.revision === 3);
+      expect(events.documents.map((document) => document.revision)).toEqual([0, 1, 2, 3]);
+      expect(await (await fetch(`${base}/api/preferences`, { headers: watching })).json()).toEqual({ revision: 3, settings: { theme: "light" }, muted_panes: [] });
+      const refused = await fetch(`${base}/api/preferences`, { method: "PUT", headers: watching, body: JSON.stringify({ settings: {}, muted_panes: ["w1:p1"] }) });
+      expect([refused.status, ((await refused.json()) as ApiError).error.code]).toEqual([403, "read_only"]);
+      expect(await (await fetch(`${base}/api/preferences`, { headers: driving })).json()).toMatchObject({ revision: 3, muted_panes: [] });
+    } finally {
+      abort.abort();
+      server.stop();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

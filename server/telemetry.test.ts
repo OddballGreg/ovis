@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SUPPORTED_AGENT_KINDS } from "../shared/supported-agents.ts";
-import { ACTIVE_LATE_DAYS, NOTICE_VERSION, TELEMETRY_HARNESSES, type TelemetryActive, type TelemetryChange, type TelemetryEvent, type TelemetrySettings } from "../shared/telemetry.ts";
+import { ACTIVE_LATE_DAYS, harnessOf, NOTICE_VERSION, TELEMETRY_HARNESSES, type TelemetryActive, type TelemetryChange, type TelemetryEvent, type TelemetrySettings } from "../shared/telemetry.ts";
 import { DEFAULT_SETTINGS, telemetrySettingsSnapshot, type Settings } from "../src/lib/settings.ts";
 import { handleTelemetryRequest, installMethod, Telemetry, telemetryBlocked } from "./telemetry.ts";
 
@@ -122,7 +122,7 @@ describe("telemetry events", () => {
   });
 
   test("the environment can forbid sending whatever the switch says", async () => {
-    const environments: Record<string, string>[] = [{ HERDR_WEB_TELEMETRY: "0" }, { DO_NOT_TRACK: "1" }, { CI: "true" }, { HERDR_TEST_MODE: "unit" }];
+    const environments: Record<string, string>[] = [{ OVIS_TELEMETRY: "0" }, { DO_NOT_TRACK: "1" }, { CI: "true" }, { HERDR_TEST_MODE: "unit" }];
     for (const env of environments) {
       const { telemetry, sent } = setup({ env });
       telemetry.change({ notice_seen: true, notice_version: NOTICE_VERSION });
@@ -299,8 +299,8 @@ describe("telemetry events", () => {
   });
 
   test("the install method follows how the app was started", () => {
-    expect(installMethod({ HERDR_PLUGIN_ROOT: "/x", HERDR_WEB_MANAGED: "1" })).toBe("plugin");
-    expect(installMethod({ HERDR_WEB_MANAGED: "1" })).toBe("managed");
+    expect(installMethod({ HERDR_PLUGIN_ROOT: "/x", OVIS_MANAGED: "1" })).toBe("plugin");
+    expect(installMethod({ OVIS_MANAGED: "1" })).toBe("managed");
     expect(installMethod({})).toBe("source");
   });
 });
@@ -339,7 +339,7 @@ describe("daily active message", () => {
     await off.telemetry.active(["claude"]);
     expect(off.actives).toEqual([]);
 
-    const blocked = setup({ env: { HERDR_WEB_TELEMETRY: "0" } });
+    const blocked = setup({ env: { OVIS_TELEMETRY: "0" } });
     seen(blocked.telemetry);
     await blocked.telemetry.active(["claude"]);
     expect(blocked.actives).toEqual([]);
@@ -407,8 +407,11 @@ describe("daily active message", () => {
     expect(telemetry.status().active).toEqual({ ...before, harnesses: ["claude", "codex"] });
   });
 
-  test("(h) every supported agent kind is a telemetry harness", () => {
-    const missing = [...SUPPORTED_AGENT_KINDS].filter((kind) => !(TELEMETRY_HARNESSES as readonly string[]).includes(kind));
+  test("(h) every supported agent kind is a telemetry harness, or other until the Worker lists it", () => {
+    // the deployed Worker refuses a harness it does not list, so these count as other until a deploy adds them
+    const undeployed = new Set(["letta"]);
+    for (const kind of undeployed) expect(harnessOf(kind)).toBe("other");
+    const missing = [...SUPPORTED_AGENT_KINDS].filter((kind) => !undeployed.has(kind) && !(TELEMETRY_HARNESSES as readonly string[]).includes(kind));
     if (missing.length > 0) throw new Error(`${missing.join(", ")}: add it to TELEMETRY_HARNESSES and deploy the Worker`);
     expect(missing).toEqual([]);
   });

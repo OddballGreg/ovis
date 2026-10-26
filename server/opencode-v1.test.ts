@@ -8,6 +8,7 @@ import type { ConversationPart, HerdrPane, SessionSnapshot } from "../shared/pro
 import { ConversationMonitor } from "./conversation-monitor.ts";
 import { ConversationUnavailable, forgetTranscriptState, HistoryChanged, paneConversation, toolOutput } from "./conversation.ts";
 import * as herdr from "./herdr/client.ts";
+import { adoptLegacyEnv } from "./legacy-env.ts";
 import { forgetOpencodeState, opencodeConversation, type OpencodeAnswer } from "./opencode.ts";
 import {
   forgetOpencodeV1State,
@@ -195,7 +196,7 @@ beforeEach(async () => {
   await resetOpencodeV1();
   server = new FakeServer();
   stateDir = mkdtempSync(join(root, "state-"));
-  opencodeV1Options.env = { HERDR_WEB_OPENCODE_URL: server.url };
+  opencodeV1Options.env = { OVIS_OPENCODE_URL: server.url };
   opencodeV1Options.stateDir = stateDir;
   forgetOpencodeState();
 });
@@ -208,34 +209,40 @@ afterEach(async () => {
 describe("where the HTTP source is", () => {
   it("is off unless asked for, and asks nothing to find that out", () => {
     expect(opencodeV1Mode({})).toBeNull();
-    expect(opencodeV1Mode({ HERDR_WEB_OPENCODE_SERVE: "0", HERDR_WEB_OPENCODE_BIN: "/opt/opencode" })).toBeNull();
+    expect(opencodeV1Mode({ OVIS_OPENCODE_SERVE: "0", OVIS_OPENCODE_BIN: "/opt/opencode" })).toBeNull();
     opencodeV1Options.env = {};
     expect(opencodeV1Configured()).toBe(false);
   });
 
   it("takes a plain http(s) URL, with OpenCode's own server password, and refuses anything else", () => {
-    expect(opencodeV1Mode({ HERDR_WEB_OPENCODE_URL: "http://127.0.0.1:4100/" })).toEqual({ kind: "url", endpoint: { baseUrl: "http://127.0.0.1:4100", authorization: null } });
-    expect(opencodeV1Mode({ HERDR_WEB_OPENCODE_URL: "https://example.test/oc/", OPENCODE_SERVER_USERNAME: "someone", OPENCODE_SERVER_PASSWORD: "fixture" }))
+    expect(opencodeV1Mode({ OVIS_OPENCODE_URL: "http://127.0.0.1:4100/" })).toEqual({ kind: "url", endpoint: { baseUrl: "http://127.0.0.1:4100", authorization: null } });
+    expect(opencodeV1Mode({ OVIS_OPENCODE_URL: "https://example.test/oc/", OPENCODE_SERVER_USERNAME: "someone", OPENCODE_SERVER_PASSWORD: "fixture" }))
       .toEqual({ kind: "url", endpoint: { baseUrl: "https://example.test/oc", authorization: `Basic ${btoa("someone:fixture")}` } });
-    expect(opencodeV1Mode({ HERDR_WEB_OPENCODE_URL: "http://127.0.0.1:4100", OPENCODE_SERVER_PASSWORD: "fixture" })?.kind === "url").toBe(true);
+    expect(opencodeV1Mode({ OVIS_OPENCODE_URL: "http://127.0.0.1:4100", OPENCODE_SERVER_PASSWORD: "fixture" })?.kind === "url").toBe(true);
     for (const url of ["ftp://127.0.0.1/", "not a url", "http://user:secret@127.0.0.1/", "http://127.0.0.1/?a=1"]) {
-      expect(opencodeV1Mode({ HERDR_WEB_OPENCODE_URL: url })).toBeNull();
+      expect(opencodeV1Mode({ OVIS_OPENCODE_URL: url })).toBeNull();
     }
     // a named server wins over starting one
-    expect(opencodeV1Mode({ HERDR_WEB_OPENCODE_URL: "http://127.0.0.1:4100", HERDR_WEB_OPENCODE_SERVE: "1" })?.kind).toBe("url");
-    expect(opencodeV1Mode({ HERDR_WEB_OPENCODE_SERVE: "1" })).toEqual({ kind: "serve", bin: "opencode" });
-    expect(opencodeV1Mode({ HERDR_WEB_OPENCODE_SERVE: "1", HERDR_WEB_OPENCODE_BIN: "/opt/opencode" })).toEqual({ kind: "serve", bin: "/opt/opencode" });
+    expect(opencodeV1Mode({ OVIS_OPENCODE_URL: "http://127.0.0.1:4100", OVIS_OPENCODE_SERVE: "1" })?.kind).toBe("url");
+    expect(opencodeV1Mode({ OVIS_OPENCODE_SERVE: "1" })).toEqual({ kind: "serve", bin: "opencode" });
+    expect(opencodeV1Mode({ OVIS_OPENCODE_SERVE: "1", OVIS_OPENCODE_BIN: "/opt/opencode" })).toEqual({ kind: "serve", bin: "/opt/opencode" });
+  });
+
+  it("takes the HERDR_WEB_OPENCODE_* names an install from before the rename to OVIS_* still sets", () => {
+    const env: Record<string, string | undefined> = { HERDR_WEB_OPENCODE_SERVE: "1", HERDR_WEB_OPENCODE_BIN: "/opt/opencode" };
+    adoptLegacyEnv(env);
+    expect(opencodeV1Mode(env)).toEqual({ kind: "serve", bin: "/opt/opencode" });
   });
 
   it("never sends a password over plain http to another host", () => {
-    const withPassword = (url: string) => opencodeV1Mode({ HERDR_WEB_OPENCODE_URL: url, OPENCODE_SERVER_PASSWORD: "fixture" });
+    const withPassword = (url: string) => opencodeV1Mode({ OVIS_OPENCODE_URL: url, OPENCODE_SERVER_PASSWORD: "fixture" });
     expect(withPassword("http://192.0.2.10:4096")).toBeNull();
     expect(withPassword("http://example.test/oc")).toBeNull();
     for (const url of ["http://127.0.0.1:4096", "http://127.1.2.3:4096", "http://localhost:4096", "http://[::1]:4096", "https://example.test/oc"]) {
       expect(withPassword(url)?.kind).toBe("url");
     }
     // without one, any host is a server the user named
-    expect(opencodeV1Mode({ HERDR_WEB_OPENCODE_URL: "http://192.0.2.10:4096" })?.kind).toBe("url");
+    expect(opencodeV1Mode({ OVIS_OPENCODE_URL: "http://192.0.2.10:4096" })?.kind).toBe("url");
   });
 
   it("knows OpenCode 1.x by its health check's version", () => {
@@ -248,7 +255,7 @@ describe("where the HTTP source is", () => {
     const s = server.session();
     s.user("hello");
     expect(await opencodeV1Conversation(s.id)).toBeNull();
-    opencodeV1Options.env = { HERDR_WEB_OPENCODE_URL: server.url, OPENCODE_SERVER_PASSWORD: "fixture-pass" };
+    opencodeV1Options.env = { OVIS_OPENCODE_URL: server.url, OPENCODE_SERVER_PASSWORD: "fixture-pass" };
     expect(prompts(page(await opencodeV1Conversation(s.id)))).toEqual(["hello"]);
   });
 });
@@ -537,7 +544,7 @@ describe("a pane's chat with the HTTP source", () => {
     expect(off.source).toBe("opencode-transcript");
     expect(prompts(off)).toEqual(["from the store"]);
     expect(server.requests).toEqual([]);
-    opencodeV1Options.env = { HERDR_WEB_OPENCODE_URL: server.url };
+    opencodeV1Options.env = { OVIS_OPENCODE_URL: server.url };
 
     // failing before it ever answered for the session: the store answers, as it always did
     server.failing = true;
@@ -622,7 +629,7 @@ describe("a pane's chat with the HTTP source", () => {
     panes = [paneOf(s.id)];
     const fake = fakeDeps();
     const answered = Promise.withResolvers<"ready">();
-    opencodeV1Options.env = { HERDR_WEB_OPENCODE_SERVE: "1" };
+    opencodeV1Options.env = { OVIS_OPENCODE_SERVE: "1" };
     opencodeV1Options.deps = { ...fake.deps, freePort: async () => Number(new URL(server.url).port), ready: () => answered.promise };
     opencodeV1Options.serve = { ...fast, waitMs: 5 };
     const first = await paneConversation("pane-oc", undefined, {}, undefined, db);
@@ -671,7 +678,7 @@ describe("a server the user names", () => {
     }
     expect(server.requests).toEqual(["/global/health"]);
     expect(opencodeV1State()).toBe("unavailable");
-    expect(lines).toEqual(["The OpenCode server HERDR_WEB_OPENCODE_URL names is not OpenCode 1.x; chats are read from opencode.db until it changes or the app restarts."]);
+    expect(lines).toEqual(["The OpenCode server OVIS_OPENCODE_URL names is not OpenCode 1.x; chats are read from opencode.db until it changes or the app restarts."]);
   });
 });
 
@@ -715,7 +722,7 @@ describe("a session read from the server, when the server stops answering for it
     const s = server.session();
     s.user("hello");
     const fake = fakeDeps();
-    opencodeV1Options.env = { HERDR_WEB_OPENCODE_SERVE: "1" };
+    opencodeV1Options.env = { OVIS_OPENCODE_SERVE: "1" };
     opencodeV1Options.deps = { ...fake.deps, freePort: async () => Number(new URL(server.url).port) };
     opencodeV1Options.serve = fast;
     page(await opencodeV1Conversation(s.id));
@@ -899,7 +906,7 @@ describe("the server this one starts", () => {
       await tick();
     }
     expect(fake.spawned.length).toBe(2 + OPENCODE_V1_INCOMPATIBLE_STARTS);
-    expect(fake.logs.at(-1)).toBe("OpenCode server is not OpenCode 1.x; it is not started again until HERDR_WEB_OPENCODE_BIN changes or the app restarts.");
+    expect(fake.logs.at(-1)).toBe("OpenCode server is not OpenCode 1.x; it is not started again until OVIS_OPENCODE_BIN changes or the app restarts.");
     const logged = fake.logs.length;
     fake.advance(24 * 3_600_000);
     expect(await serve.endpoint()).toBeNull();
@@ -922,19 +929,19 @@ describe("the server this one starts", () => {
     await serve.stop();
   });
 
-  it("keeps herdr's pane identity and the user's server password out of the environment", () => {
-    const env = serveEnvironment({ HOME: "/home/fixture", HERDR_SOCKET_PATH: "/x", HERDR_WEB_OPENCODE_SERVE: "1", OPENCODE_SERVER_USERNAME: "other" }, "fresh");
+  it("keeps herdr's pane identity, this app's settings and the user's server password out of the environment", () => {
+    const env = serveEnvironment({ HOME: "/home/fixture", HERDR_SOCKET_PATH: "/x", HERDR_WEB_OPENCODE_SERVE: "1", OVIS_OPENCODE_SERVE: "1", OVIS_STATE_DIR: "/state", OPENCODE_SERVER_USERNAME: "other" }, "fresh");
     expect(env["HOME"]).toBe("/home/fixture");
-    expect(Object.keys(env).filter((key) => key.startsWith("HERDR_"))).toEqual([]);
+    expect(Object.keys(env).filter((key) => key.startsWith("HERDR_") || key.startsWith("OVIS_"))).toEqual([]);
     expect([env["OPENCODE_SERVER_USERNAME"], env["OPENCODE_SERVER_PASSWORD"]]).toEqual(["opencode", "fresh"]);
   });
 
-  it("is started through the environment's HERDR_WEB_OPENCODE_SERVE=1 and read from like a named one", async () => {
+  it("is started through the environment's OVIS_OPENCODE_SERVE=1 and read from like a named one", async () => {
     const s = server.session();
     s.user("hello");
     const fake = fakeDeps();
     const port = Number(new URL(server.url).port);
-    opencodeV1Options.env = { HERDR_WEB_OPENCODE_SERVE: "1", HERDR_WEB_OPENCODE_BIN: "/opt/opencode" };
+    opencodeV1Options.env = { OVIS_OPENCODE_SERVE: "1", OVIS_OPENCODE_BIN: "/opt/opencode" };
     opencodeV1Options.deps = { ...fake.deps, freePort: async () => port };
     opencodeV1Options.serve = fast;
     const answer = await opencodeV1Conversation(s.id);
@@ -949,7 +956,7 @@ describe("the server this one starts", () => {
     const s = server.session();
     s.user("hello");
     const fake = fakeDeps({ stubborn: true });
-    opencodeV1Options.env = { HERDR_WEB_OPENCODE_SERVE: "1" };
+    opencodeV1Options.env = { OVIS_OPENCODE_SERVE: "1" };
     opencodeV1Options.deps = { ...fake.deps, freePort: async () => Number(new URL(server.url).port) };
     opencodeV1Options.serve = { ...fast, stopWaitMs: 300 };
     expect(page(await opencodeV1Conversation(s.id)).turns.length).toBe(1);
@@ -1021,7 +1028,7 @@ describe("a server a hard kill left behind", () => {
     `);
     writeFileSync(bin, `#!/bin/sh\nexec "${process.execPath}" "${script}" "$@"\n`);
     chmodSync(bin, 0o755);
-    opencodeV1Options.env = { ...process.env, HERDR_WEB_OPENCODE_SERVE: "1", HERDR_WEB_OPENCODE_BIN: bin, HERDR_FIXTURE: "1" };
+    opencodeV1Options.env = { ...process.env, OVIS_OPENCODE_SERVE: "1", OVIS_OPENCODE_BIN: bin, HERDR_FIXTURE: "1" };
     opencodeV1Options.serve = { readyPollMs: 20, settleMs: 20 };
     const endpoint = await opencodeV1Endpoint();
     expect(endpoint).not.toBeNull();

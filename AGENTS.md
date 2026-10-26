@@ -1,4 +1,4 @@
-# herdr-web-ui
+# Ovis
 
 Browser UI for the herdr terminal multiplexer: a React 19 + xterm.js client (`src/`), a Bun
 backend (`server/`) that bridges herdr's unix-socket API, and the wire contract both import
@@ -11,7 +11,8 @@ sleeps, wording, icons) are enforced by the `conventions.test.ts` files, whose f
 to change. Also read [server/AGENTS.md](server/AGENTS.md) and [src/AGENTS.md](src/AGENTS.md).
 
 ## Bridge traps
-- Never load node-pty inside Bun: it panics the runtime. PTY work goes through the Node sidecar.
+- Never load node-pty inside Bun: it panics the runtime. PTY work goes through the Rust PTY host
+  (`crates/pty-sidecar`), or the Node sidecar as its fallback, never in-process.
 - Never pass `--takeover` to `herdr terminal attach` on the server's own initiative; it cuts off
   whoever holds the pane. Only a user's explicit take-over request may.
 - One herdr RPC connection per call: herdr closes the socket after each answer. Only
@@ -20,7 +21,7 @@ to change. Also read [server/AGENTS.md](server/AGENTS.md) and [src/AGENTS.md](sr
 - `pane.process_info` takes `pane_id`, not `target` (with `target` herdr answers for the focused
   pane).
 - Keep xterm `scrollback: 0` and never rebuild an attached terminal from `pane.read`: the attach
-  stream is the truth. Only a mirrored pane (Windows, or no Node for the sidecar) is drawn from
+  stream is the truth. Only a mirrored pane (Windows, or no PTY host: neither the Rust host nor Node) is drawn from
   `pane.read`, so never assume a pty exists.
 - Nothing the user typed is sent automatically after a disconnect: it waits in a draft until the
   user sends or discards it.
@@ -37,7 +38,7 @@ to change. Also read [server/AGENTS.md](server/AGENTS.md) and [src/AGENTS.md](sr
   a `mkdtempSync` `stateDir` and `port: 0` for every `createServer`. Never run the real
   `herdr update` in a test.
 - Screenshots and recordings come from the demo or a test session, never the user's live one.
-- A web UI server an agent starts for someone to open (manual QA, a preview) binds to this PC's
+- An Ovis server an agent starts for someone to open (manual QA, a preview) binds to this PC's
   Tailscale address, not loopback: `HOST=$(tailscale ip -4) PORT=<free port> bun run server`,
   then hand over `http://<that address>:<port>`. A Tailscale-only bind stays inside the tailnet
   (`lanExposed` in `server/access.ts`); never bind `0.0.0.0` for it. Tests keep `port: 0` on
@@ -84,6 +85,8 @@ to change. Also read [server/AGENTS.md](server/AGENTS.md) and [src/AGENTS.md](sr
   the Release run is done.
 - Required checks: Fast checks, Integration and browser, Native Windows install. Resolve review
   threads before merging (branch protection does not enforce it).
+- Run `bun run check fast` before every push, and push a PR's commits together: each push to a
+  PR cancels its CI run in progress and starts every job again.
 - CodeRabbit's reviews are rationed per PR author, and agents open their PRs as one account:
   opening a PR, a push and each `@coderabbitai review` spend one, and past about 80 in a week
   one comes back per hour. Open verified work ready for review, not as a draft: the merge pass
@@ -92,9 +95,15 @@ to change. Also read [server/AGENTS.md](server/AGENTS.md) and [src/AGENTS.md](sr
   only after a commit that changes behaviour in `server/`, `src/` or `shared/`, an HTTP/WS
   contract or a workflow. A rebase, changelog fragment, docs, comment or test-only commit gets
   none.
-- A rate-limited review still shows a passing CodeRabbit check; its "Review limit reached"
-  comment means no review ran. A PR touching `--takeover`, observe permissions, queued input,
-  authentication, an HTTP/WS contract or a workflow waits for a real review. Any other PR says
-  in a comment that CodeRabbit did not review it, and merges on its checks and the maintainer.
+- A rate-limited or skipped review still shows a passing CodeRabbit check; its "Review limit
+  reached" or "Review skipped" comment means no review ran. CodeRabbit skips a PR of more than
+  150 files, so a PR that needs a review stays under that.
+- A PR touching `--takeover`, observe permissions, queued input, authentication, an HTTP/WS
+  contract or a workflow waits for a real review. When CodeRabbit skips it, a code-review agent's
+  review stands in: its findings and how each was resolved go in a PR comment before the merge.
+- A move-only PR (files moved or split, imports updated, no behaviour change) does not wait for
+  CodeRabbit: it merges on its checks once its diff shows only moved code and import paths
+  (`git diff --color-moved origin/main...HEAD`). Every PR merged without a CodeRabbit review
+  says so in a comment, and any other PR merges on its checks and the maintainer.
 - Changelog entries go in `changelog.d/` fragments ([format](changelog.d/README.md)), not
   CHANGELOG.md; only a release folds them in.

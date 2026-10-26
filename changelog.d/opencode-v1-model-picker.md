@@ -4,5 +4,5 @@
   through its own model dialog, then checks the prompt shows it, leaving a draft typed into the
   prompt as it is. What it could not do there it says, with the terminal one tap away. The new
   workspace and tab dialogs take a model for OpenCode (`--model provider/model`), suggested from
-  the same list. Both need OpenCode's 1.x HTTP source (`HERDR_WEB_OPENCODE_URL` or
-  `HERDR_WEB_OPENCODE_SERVE=1`).
+  the same list. Both need OpenCode's 1.x HTTP source (`OVIS_OPENCODE_URL` or
+  `OVIS_OPENCODE_SERVE=1`).

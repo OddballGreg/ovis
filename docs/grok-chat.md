@@ -33,9 +33,26 @@ file. Chat follows the session Herdr reported only when that process holds its
 written more recently than every other held session's `events.jsonl`. Older open session
 files do not hide it. Duplicate held IDs remain ambiguous even when only one directory has
 `updates.jsonl`; tied write times also use the terminal view.
-The held session events files must be fully resolved. A session events file under the
-sessions tree that is deleted, renamed (such as `events.jsonl.old`) or
-cannot be statted as a real file, makes the binding ambiguous and uses the terminal.
+A held file in the store that may be a session's events file under another name uses the
+terminal, since that session could be the newest one written:
+
+- a held file whose name starts with `events.jsonl` anywhere in the store other than a
+  resolved real `<group>/<session>/events.jsonl` with an accepted session ID: deleted, renamed
+  with a suffix such as `events.jsonl.old`, in a session directory renamed to a name the ID
+  filter skips (`.archived-resumed`), or deeper in the store;
+- any other file held in a directory of a cwd group (a session's, or one renamed past the ID
+  filter) that has no `events.jsonl` on disk, as when the held events file was renamed to
+  `old-events.jsonl`, or renamed along with its directory.
+
+A held `events.jsonl` must also match its path's device and inode; a replacement file at the
+same path uses the terminal. Write times come from the held descriptors, not path
+replacements. Other held files are ignored, so a held events file moved to a place that still
+has an `events.jsonl`, or to no session directory at all, is not detected and can leave the
+previous conversation visible: renamed with a new `events.jsonl` created beside it, moved into
+another session's directory, moved up to its cwd group, or moved out of `sessions/`. Treating
+every unexpected held file as ambiguous would catch these, but which files real Grok builds
+keep open in the store needs native descriptor captures first; without them, that rule could
+send ordinary sessions to the terminal.
 
 The newest file only confirms Herdr's ID; it never chooses another session. A missing held
 file or a newer write to another held session uses the terminal view. An in-TUI `/resume`
