@@ -344,8 +344,8 @@ export async function listen(bridge, socketPath, { log = () => {} } = {}) {
     }
     process.off("exit", close);
   };
-  // a fallback for a plain Node or Bun process only: inside OpenCode 1.19's TUI worker this event
-  // does not fire, and the plugin's dispose hook closes the socket only on a reload
+  // a fallback for a plain Node or Bun process only: in tests with OpenCode 1.19's TUI worker this
+  // event did not fire, and only a reload's dispose closed the socket
   process.on("exit", close);
   log("listening", {});
   return { close, server };
@@ -428,9 +428,10 @@ export const OvisQuestionsPlugin = async (input) => {
   void hub.add(bridge, socketPath, log);
   return {
     event: async ({ event }) => bridge.handleEvent(event),
-    // OpenCode disposes an instance on a reload, and the last one out removes the socket. A normal
-    // exit of OpenCode 1.19's TUI ends the process without a dispose, so its socket file stays
-    // until the next start on this pane finds it refusing connections and replaces it.
+    // OpenCode disposes an instance on a reload, and the last one out removes the socket. In tests
+    // with OpenCode 1.19, a normal exit of the TUI ended the process without a dispose, so the
+    // socket file stays until the next start on this pane finds it refusing connections and
+    // replaces it.
     dispose: async () => { log("dispose", {}); await hub.remove(bridge, socketPath, log); },
   };
 };
