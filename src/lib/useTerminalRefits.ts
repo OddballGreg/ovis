@@ -1,6 +1,6 @@
 import { useEffect, useRef, type RefObject } from "react";
 import { terminalTheme, type Palette, type ResolvedTheme } from "./settings.ts";
-import { loadFontStack, TERMINAL_FONT_STACK, terminalFontStack } from "./fontFamily.ts";
+import { loadFontStack, measurableFontStack, TERMINAL_FONT_STACK, terminalFontStack } from "./fontFamily.ts";
 import { modalOpen } from "./focus.ts";
 import { inUse } from "./paneTerminalShared.ts";
 import type { TerminalPeek } from "./terminalPeek.ts";
@@ -60,9 +60,10 @@ export function useTerminalRefits(deps: TerminalRefitsDeps): void {
       // a newer font, or an unmounted terminal, took over while the faces loaded
       if (superseded || termRef.current !== term) return;
       baseFontRef.current = terminalFontSize;
-      if (term.options.fontSize === terminalFontSize && term.options.fontFamily === fontFamily) return;
+      const family = measurableFontStack(fontFamily);
+      if (term.options.fontSize === terminalFontSize && term.options.fontFamily === family) return;
       term.options.fontSize = terminalFontSize;
-      term.options.fontFamily = fontFamily;
+      term.options.fontFamily = family;
       if (observeRef.current || fixedGridRef.current || chatViewRef.current || keyboardHoldsRef.current(true)) return;
       try {
         fitRef.current?.fit();
@@ -155,7 +156,11 @@ export function useTerminalRefits(deps: TerminalRefitsDeps): void {
     wasFollowing.current = follow;
     const pane = paneRef.current;
     const term = termRef.current;
-    if (!pane || !term || observeRef.current || fixedGridRef.current) return;
+    if (!pane || !term || observeRef.current || fixedGridRef.current) {
+      // a mirror's grid stays herdr's, a watched one the pty's: the half made active, or following, only folds it again or not
+      if (fixedGridRef.current || observeRef.current) followCursorRef.current();
+      return;
+    }
     if (follow) {
       socketRef.current?.keepSize(pane);
       const shared = sharedGridRef.current;

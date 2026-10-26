@@ -16,7 +16,7 @@ import type { CompletionTracker } from "./completion.ts";
 import { HerdrProfileState, herdrMachineId } from "./herdr-profile-state.ts";
 import { sameSshSession, type HerdrMachineProfile } from "./herdr-profiles.ts";
 import { validateTarget } from "./machine-security.ts";
-import { detectHost, HERDR_INSTALL_CMD } from "./remote-host.ts";
+import { detectHost, HERDR_INSTALL_CMD, installLockOwner } from "./remote-host.ts";
 import { discard, readCappedJson, REMOTE_LIMITS } from "./remote-json.ts";
 import { SshConnection } from "./ssh.ts";
 
@@ -26,7 +26,10 @@ interface Runtime {
   ssh?: SshConnection;
   endpoint?: { url: string; token: string };
   observer?: WebSocket;
+  /** set only while the PC waits out its delay before the next try (retryLater) */
   retry?: ReturnType<typeof setTimeout>;
+  /** when the last try to connect started, on the manager's monotonic clock */
+  triedAt?: number;
   poll?: ReturnType<typeof setInterval>;
   abort?: AbortController;
   attempts: number;
@@ -62,6 +65,8 @@ interface JobState {
 const DEFAULT_SETTINGS: MachineSettings = { auto_update_bridges: true };
 /** the shortest time between the starts of two health calls that prove one PC's server (sourceCheck) */
 export const SOURCE_CHECK_INTERVAL_MS = 1000;
+/** the shortest time between the starts of two tries to connect that a request cuts short (retryNow) */
+export const DEMANDED_RETRY_INTERVAL_MS = 5000;
 interface SourceCheck { token: number; promise: Promise<string | null>; abort: AbortController }
 /** a verify_source_boot answer: the proved boot id, or why there is none */
 export type SourceProof = { boot_id: string } | { refused: "unknown" | "interval" | "unverified" };
@@ -111,7 +116,14 @@ function newerBundle(version: unknown): boolean {
  */
 const SSH_REFUSED = /Permission denied \(|Host key verification failed|IDENTIFICATION HAS CHANGED|Too many authentication failures/i;
 const newerBridge = (version: string): string => `This PC uses a newer bridge (v${version}); this app requires v${REMOTE_BUNDLE_VERSION}. Update this app, then reconnect. The remote bridge was left running.`;
-const INDEPENDENT_BRIDGE = "This socket uses an independently managed web server. Update it through its own Settings, then reconnect; it was left running.";
+/**
+ * An independently managed web server (Ovis run on that PC, not a bridge this app started) is never
+ * this app's to update. Whichever side is behind is the one to update: that server through its own
+ * Settings, or this app when that server is the newer one.
+ */
+const independentBridge = (version: string): string => newerBundle(version)
+  ? `This socket uses an independently managed web server of a newer version (v${version}); this app requires v${REMOTE_BUNDLE_VERSION}. Update this app in Settings → Updates, then reconnect; that server was left running.`
+  : "This socket uses an independently managed web server. Update it through its own Settings, then reconnect; it was left running.";
 
 /** A connection that retrying cannot fix: the PC waits for the user instead of reconnecting. */
 export class MachineActionRequired extends Error {
@@ -467,6 +479,8 @@ export class MachineManager {
     if (this.jobs.size > 40) for (const [key, j] of this.jobs) if (["connected", "failed", "cancelled"].includes(j.public.phase) && key !== id) { this.jobs.delete(key); break; }
     const runtime = existing ?? this.runtime({ id: machineId, name: name?.trim() || target.destination, kind: "ssh", enabled: true, state: "connecting", target, snapshot: null, error: null });
     this.disconnect(runtime);
+    // a setup or bridge update is a try to connect too: a failed one waits its interval (retryNow)
+    runtime.triedAt = this.now();
     runtime.machine.target = target;
     const ssh = new SshConnection(target, this.sshDir, join(this.sshDir, machineId));
     job.ssh = ssh;
@@ -630,10 +644,10 @@ export class MachineManager {
       update = false;
     }
     // an independently managed web server is not this app's to update or to wait for: it keeps
-    // its own message below, whatever its version
+    // its own message below, which names the side that is behind
     if (descriptor && descriptor.managed_remote && newerBundle(descriptor.bundle_version)) throw new MachineActionRequired(newerBridge(descriptor.bundle_version), "bridge_conflict");
     if (descriptor && (update || descriptor.bridge_protocol !== BRIDGE_PROTOCOL || descriptor.bundle_version !== REMOTE_BUNDLE_VERSION)) {
-      if (!descriptor.managed_remote) throw new MachineActionRequired(INDEPENDENT_BRIDGE, "setup");
+      if (!descriptor.managed_remote) throw new MachineActionRequired(independentBridge(descriptor.bundle_version), "setup");
       if (!update) throw new MachineActionRequired("This PC runs a bridge from a different version. Update the bridge to reconnect; herdr sessions keep running.", "update_bridge");
     }
     const hasBundle = inspection.bundleReady;
@@ -654,7 +668,7 @@ export class MachineManager {
         await this.wait(job);
       }
       job.installationApproved = update || !descriptor;
-      if (update || !descriptor && !hasBundle) { this.stage(job, "installing", `Installing verified ${platform} bundle…`); await host.installBundle(ssh, platform, job.abort.signal, { cacheDir: join(this.stateDir, "bundles"), onProgress: (stage, done, total) => this.progress(job, stage, done, total) }); }
+      if (update || !descriptor && !hasBundle) { this.stage(job, "installing", `Installing verified ${platform} bundle…`); await host.installBundle(ssh, platform, job.abort.signal, { cacheDir: join(this.stateDir, "bundles"), owner: installLockOwner(this.stateDir, runtime.machine.target!), onProgress: (stage, done, total) => this.progress(job, stage, done, total) }); }
       if (!descriptor && !herdrPath && host.installHerdr) { this.stage(job, "installing", "Installing herdr with its own installer…"); herdrPath = await host.installHerdr(ssh); }
       if (ssh.usedSecret) {
         this.stage(job, "installing", "Registering the app SSH key…");
@@ -731,7 +745,7 @@ export class MachineManager {
     if (!forReplacement && (identity.bridge_protocol !== BRIDGE_PROTOCOL || identity.bundle_version !== REMOTE_BUNDLE_VERSION)) {
       // what runs decides, not its descriptor: a server this app does not manage, or a newer
       // bridge, is not something an update from here can fix
-      if (identity.managed_remote === false) throw new MachineActionRequired(INDEPENDENT_BRIDGE, "setup");
+      if (identity.managed_remote === false) throw new MachineActionRequired(independentBridge(identity.bundle_version), "setup");
       if (newerBundle(identity.bundle_version)) throw new MachineActionRequired(newerBridge(identity.bundle_version), "bridge_conflict");
       throw new MachineActionRequired("This PC runs a bridge from a different version. Update the bridge to reconnect; herdr sessions keep running.", "update_bridge");
     }
@@ -840,13 +854,29 @@ export class MachineManager {
   private retryLater(runtime: Runtime): void {
     runtime.machine.state = "reconnecting";
     const delay = Math.min(60_000, 1000 * 2 ** Math.min(runtime.attempts++, 6));
-    runtime.retry = setTimeout(() => void this.reconnect(runtime), delay); runtime.retry.unref();
+    runtime.retry = setTimeout(() => { runtime.retry = undefined; void this.reconnect(runtime); }, delay); runtime.retry.unref();
     this.emit();
+  }
+  /**
+   * Someone asked this PC for something while it waits out its delay before the next try: try now.
+   * The delay doubles with each failed try, up to a minute, so a laptop that slept through a few
+   * (its network still coming back) would otherwise keep its chat waiting that long after it wakes.
+   * Only a waiting PC tries, never one with a try under way, and at most once per
+   * DEMANDED_RETRY_INTERVAL_MS since the last try started, so a chat polling an unreachable PC
+   * does not start an SSH connection on every read.
+   */
+  retryNow(id: string): void {
+    const runtime = this.machines.get(id);
+    if (!runtime || runtime.retry === undefined || this.stopped || !runtime.machine.enabled) return;
+    if (runtime.triedAt !== undefined && this.now() - runtime.triedAt < DEMANDED_RETRY_INTERVAL_MS) return;
+    clearTimeout(runtime.retry); runtime.retry = undefined;
+    void this.reconnect(runtime);
   }
   private async reconnect(runtime: Runtime): Promise<void> {
     if (!this.mayConnect(runtime)) return;
     if (this.stopped || !runtime.machine.enabled) return;
     this.disconnect(runtime);
+    runtime.triedAt = this.now();
     runtime.machine.state = "reconnecting"; runtime.machine.action_required = null; this.emit();
     const generation = runtime.generation;
     runtime.ssh = new SshConnection(runtime.machine.target!, this.sshDir, join(this.sshDir, runtime.machine.id));
@@ -873,7 +903,7 @@ export class MachineManager {
   private disconnect(runtime: Runtime): void {
     runtime.generation++;
     runtime.refreshQueued = false;
-    clearTimeout(runtime.retry); clearInterval(runtime.poll);
+    clearTimeout(runtime.retry); runtime.retry = undefined; clearInterval(runtime.poll);
     runtime.abort?.abort(); runtime.abort = undefined;
     runtime.observer?.close(); runtime.observer = undefined;
     for (const close of runtime.terminals) close(); runtime.terminals.clear();

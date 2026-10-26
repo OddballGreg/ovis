@@ -16,8 +16,8 @@ function lastLine<T>(lines: T[], matches: (line: T) => boolean): number {
   for (let index = lines.length - 1; index >= 0; index--) if (matches(lines[index]!)) return index;
   return -1;
 }
-/** The rows under the composer: the model and folder, context left, warnings, and (0.162) the shortcuts hint. */
-const FOOTER = /^(?:\S+\s+(?:default|minimal|none|low|medium|high|xhigh|max|ultra)\s*·|\d+% context left\b|⚠\s*\d+\s*warnings?\b|(?:←[^·]*·\s*)?\?\s*for shortcuts\b|[/\\]|[A-Za-z]:\\)/;
+/** The rows under the composer: the model and folder (with `fast` after the effort in Fast mode), context left, warnings, and (0.162) the shortcuts hint. */
+const FOOTER = /^(?:\S+\s+(?:default|minimal|none|low|medium|high|xhigh|max|ultra)(?:\s+fast)?\s*·|\d+% context left\b|⚠\s*\d+\s*warnings?\b|(?:←[^·]*·\s*)?\?\s*for shortcuts\b|[/\\]|[A-Za-z]:\\)/;
 
 /**
  * A native steering panel in the live composer, never a hint quoted in scrollback, whose last
@@ -32,7 +32,7 @@ export function codexSteeringPending(screen: string, text: string): boolean {
     return { indent: line.length - line.trimStart().length, text: line.trim() };
   }).filter((row) => row.text);
   const lines = rows.map((row) => row.text);
-  const composer = lastLine(lines, (line) => /^›(?:\s+Ask Codex to do anything)?$/.test(line));
+  const composer = lastLine(lines, (line) => /^[›»](?:\s+Ask Codex to do anything)?$/.test(line));
   if (composer < 0) return false;
   const footer = lines.slice(composer + 1);
   if (footer.length > 4 || footer.some((line) => !FOOTER.test(line))) return false;

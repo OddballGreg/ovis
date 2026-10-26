@@ -2,7 +2,7 @@
  * Japanese for the keys only the chat files use:
  * components/ChatView.tsx, components/Markdown.tsx, components/MermaidLightbox.tsx,
  * components/ChatMinimap.tsx, components/ImageLightbox.tsx, components/BackgroundTasks.tsx,
- * components/BackgroundAgentDetail.tsx,
+ * components/BackgroundAgentDetail.tsx, components/MarkdownLinkMenu.tsx,
  * lib/workBlocks.ts (with CATEGORY_LABEL), lib/toolVerbs.ts (with VERB_LABEL), lib/outcomeChip.ts,
  * lib/chatTimestamp.ts, lib/chatReadDeadline.ts.
  * Register and fixed terms follow ../i18n.ja.ts; a key another feature also uses goes there.
@@ -87,6 +87,8 @@ export const CHAT_JA: Record<string, string> = {
   "Couldn't load the terminal output": "ターミナル出力を読み込めませんでした",
   "Jump to latest": "最新に移動",
   "Open image": "画像を開く",
+  "Pictures from this work": "この作業で得た画像",
+  "All {count} pictures": "{count} 枚の画像をすべて表示",
   "Attached image": "添付画像",
   "Conversation compacted": "会話を圧縮しました",
   "{n} earlier turn on a branch you navigated away from": "移動で離れたブランチの以前の話 {n}件",
@@ -200,4 +202,6 @@ export const CHAT_JA: Record<string, string> = {
   "Conversation turns": "会話のターン",
   "Go to turn {n}": "ターン {n} へ移動",
   "Show full message": "メッセージ全体を表示",
+  "Open link": "リンクを開く",
+  "Share link": "リンクを共有",
 };

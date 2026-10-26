@@ -502,8 +502,9 @@ describe("a first connect that finds a bridge of another version", () => {
     } finally { manager.stop(); rmSync(dir, { recursive: true, force: true }); }
   });
 
-  it("sends a newer bridge of an independently managed web server to that server's own Settings", async () => {
-    const independent = { ...descriptor, bridge_protocol: BRIDGE_PROTOCOL, bundle_version: String(Number(REMOTE_BUNDLE_VERSION) + 1), managed_remote: false };
+  it("tells this app to update itself when an independently managed web server is newer", async () => {
+    const newer = String(Number(REMOTE_BUNDLE_VERSION) + 1);
+    const independent = { ...descriptor, bridge_protocol: BRIDGE_PROTOCOL, bundle_version: newer, managed_remote: false };
     SshConnection.prototype.start = async () => {};
     SshConnection.prototype.run = (async (script: string) => {
       if (script.includes("uname")) return `Linux\nx86_64\n/home/u\n/home/u/.config\n\n${JSON.stringify(independent)}\n`;
@@ -518,9 +519,13 @@ describe("a first connect that finds a bridge of another version", () => {
       const started = manager.setup({ destination: "independent-pc" });
       for (let i = 0; i < 100 && !["failed", "connected"].includes(manager.job(started.id)?.phase ?? ""); i += 1) await Bun.sleep(25);
       const job = manager.job(started.id)!;
-      // this app cannot update that server, so "update this app" is not the way out here
+      // this app cannot update that server, and that server is already the newer one: this app is
+      // the side that is behind (a Mac on 0.4.13 met a PC already on 0.4.16 and was sent to the PC)
       expect(job).toMatchObject({ phase: "failed", action_required: "setup" });
       expect(job.error).toContain("independently managed");
+      expect(job.error).toContain(`(v${newer})`);
+      expect(job.error).toContain("Update this app");
+      expect(job.error).not.toContain("its own Settings");
     } finally { manager.stop(); rmSync(dir, { recursive: true, force: true }); }
   });
 });
@@ -662,6 +667,51 @@ describe("a bridge update on a PC that cannot be reached", () => {
       expect(view()).toMatchObject({ state: "error", action_required: "update_bridge", updating: null });
       await Bun.sleep(50);
       expect(internals.jobs.size).toBe(1);
+    } finally { manager.stop(); rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  // A MacBook that slept through a few tries wakes to a delay of up to a minute: the chat the
+  // user opens then asks for the PC, and that ask is what starts the next try.
+  it("tries a waiting PC again when a chat asks for it, at most once per interval", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "herdr-retry-now-"));
+    writeFileSync(join(dir, "machines.json"), JSON.stringify([{ id, name: "macbook", enabled: false, target: { destination: "macbook" }, snapshot: null }]));
+    let starts = 0;
+    SshConnection.prototype.start = async () => { starts += 1; throw new Error("ssh: connect to host macbook port 22: Network is unreachable"); };
+    SshConnection.prototype.close = () => {};
+    let clock = 0;
+    const manager = new MachineManager(dir, {} as PushService, new CompletionTracker(null), async () => { throw new Error("local offline"); }, { now: () => clock });
+    type Waiting = { machine: { enabled: boolean; state: string }; attempts: number; retry?: unknown };
+    const internals = manager as unknown as { machines: Map<string, Waiting>; retryLater(runtime: Waiting): void; jobs: Map<string, { finished: Promise<void> }> };
+    const runtime = internals.machines.get(id)!;
+    runtime.machine.enabled = true;
+    // six failed tries already: the next waits a minute
+    runtime.attempts = 6;
+    internals.retryLater(runtime);
+    const conversation = () => handleMachineRequest(new Request(`http://127.0.0.1/api/machines/${id}/pane/conversation?pane_id=w1%3Ap1`), manager);
+    const waitingAgain = async () => { for (let i = 0; i < 100 && runtime.retry === undefined; i += 1) await Promise.resolve(); expect(runtime.retry).toBeDefined(); };
+    try {
+      expect((await conversation()).status).toBe(503);
+      expect(starts).toBe(1);
+      await waitingAgain();
+      // the try failed and the PC waits again; another read within the interval starts none
+      expect((await conversation()).status).toBe(503);
+      expect(starts).toBe(1);
+      clock += 5000;
+      expect((await conversation()).status).toBe(503);
+      expect(starts).toBe(2);
+      await waitingAgain();
+      // a bridge update that could not reach the PC was a try as well: the next read waits the interval
+      clock += 5000;
+      await internals.jobs.get(manager.updateBridge(id).id)!.finished;
+      expect(starts).toBe(3);
+      expect(runtime.retry).toBeDefined();
+      expect((await conversation()).status).toBe(503);
+      expect(starts).toBe(3);
+      // a PC that is switched off is never tried
+      runtime.machine.enabled = false;
+      clock += 5000;
+      await conversation();
+      expect(starts).toBe(3);
     } finally { manager.stop(); rmSync(dir, { recursive: true, force: true }); }
   });
 });
