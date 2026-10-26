@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -34,18 +34,19 @@ afterEach(() => {
  * A pane whose OpenCode 1.x TUI runs the real ovis-questions plugin: herdr is a fixture socket,
  * OpenCode's question routes a fake SDK client, and the plugin's socket is real. No v2 service.
  */
-async function pane({ plugin = true, screen = "" } = {}) {
+async function pane({ plugin = true, screen = "", v2Forms = null as unknown[] | null } = {}) {
   const paneId = `w9:p${++serial}`;
   const posted: { url: string; body?: unknown }[] = [];
   /** how OpenCode answers a reply: 200 by default, any other status, or never */
   const replying = { status: 200 as number | "never" };
   /** OpenCode's own pending list: unread (the plugin keeps its events) until `live` is set */
-  const upstream = { live: null as unknown[] | null, settleAfter: Infinity };
+  const upstream = { live: null as unknown[] | null, settleAfter: Infinity, changeAfter: Infinity, changed: null as unknown[] | null };
   const client: BridgeClient = {
     _client: {
       get: async () => {
         if (upstream.live === null) return { error: "not used", response: { status: 500 } };
         if (--upstream.settleAfter < 0) upstream.live = [];
+        if (--upstream.changeAfter < 0 && upstream.changed) { upstream.live = upstream.changed; upstream.changed = null; }
         return { data: upstream.live, response: { status: 200 } };
       },
       post: async ({ url, body }) => {
@@ -89,10 +90,27 @@ async function pane({ plugin = true, screen = "" } = {}) {
     rpc.close();
   });
   const options = { openCodeStateDir: join(root, "no-v2-service") };
+  const v2Replies: unknown[] = [];
+  if (v2Forms) {
+    // OpenCode 2's own service, as opencode-answer.test.ts fakes it
+    const service = Bun.serve({
+      hostname: "127.0.0.1", port: 0,
+      async fetch(request) {
+        if (request.method === "GET" && new URL(request.url).pathname === "/api/info") return Response.json({ version: "2.0.32", pid: process.pid, urls: [], paths: { tmp: root } });
+        if (request.method === "GET") return Response.json(v2Forms);
+        v2Replies.push(await request.json());
+        return new Response(null, { status: 204 });
+      },
+    });
+    cleanup.push(() => service.stop(true));
+    options.openCodeStateDir = join(root, `v2-${serial}`);
+    mkdirSync(options.openCodeStateDir);
+    writeFileSync(join(options.openCodeStateDir, "service.json"), JSON.stringify({ url: service.url.origin, password: ["fixture", "only"].join("-"), pid: process.pid }));
+  }
   const url = new URL(`http://localhost/api/pane/prompt?pane_id=${encodeURIComponent(paneId)}`);
   const answerUrl = new URL("http://localhost/api/pane/prompt/answer");
   return {
-    bridge, posted, upstream, replying,
+    bridge, posted, upstream, replying, v2Replies,
     stopPlugin() { handle?.close(); },
     ask(questions: unknown[], sessionID = SESSION, id = `que_fix${serial}`) {
       bridge.handleEvent({ type: "question.asked", properties: { id, sessionID, questions } });
@@ -180,6 +198,28 @@ describe("OpenCode 1.x questions through the ovis-questions plugin", () => {
     // answered in the terminal before the card's answer arrives
     p.bridge.handleEvent({ type: "question.replied", properties: { sessionID: SESSION, requestID: id, answers: [["Small"]] } });
     expect((await p.answer(prompt, { option_index: 1 })).status).toBe(409);
+    expect(p.posted).toEqual([]);
+  });
+
+  it("sends nothing when the question's fields changed under the same id just before the reply", async () => {
+    const p = await pane();
+    p.upstream.live = [];
+    const id = p.ask([size]);
+    const prompt = (await p.read())!;
+    // the card's own re-read sees the old fields, the check just before the reply sees new ones
+    p.upstream.changed = [{ id, sessionID: SESSION, questions: [{ ...size, options: [{ label: "Large", description: "" }, { label: "Small", description: "" }] }] }];
+    p.upstream.changeAfter = 1;
+    const response = await p.answer(prompt, { option_index: 0 });
+    expect(response.status).toBe(409);
+    expect(p.posted).toEqual([]);
+  });
+
+  it("shows OpenCode 2's form when the plugin has no question for the session", async () => {
+    const p = await pane({ v2Forms: [{ id: "form_v2", sessionID: SESSION, title: "From v2", metadata: { kind: "question" }, fields: [{ key: "q0", type: "string", custom: true }] }] });
+    const prompt = (await p.read())!;
+    expect(prompt.title).toBe("From v2");
+    expect((await p.answer(prompt, { custom_text: "native" })).status).toBe(200);
+    expect(p.v2Replies).toEqual([{ answer: { q0: "native" } }]);
     expect(p.posted).toEqual([]);
   });
 

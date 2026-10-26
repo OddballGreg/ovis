@@ -153,7 +153,7 @@ export function createBridge({ client, log = () => {} }) {
       const live = new Map();
       for (const item of result.data) {
         const request = normalizeRequest(item);
-        if (request) live.set(request.id, pending.get(request.id) ?? request);
+        if (request) live.set(request.id, request);
       }
       pending.clear();
       for (const [id, request] of live) pending.set(id, request);
@@ -258,6 +258,8 @@ function clearStale(socketPath) {
     probe.once("connect", () => { clearTimeout(timer); probe.destroy(); resolve(false); });
     probe.once("error", (error) => {
       clearTimeout(timer);
+      // gone between the check and the probe: free
+      if (error?.code === "ENOENT") { resolve(true); return; }
       if (error?.code !== "ECONNREFUSED") { resolve(false); return; }
       try { fs.unlinkSync(socketPath); } catch { /* gone already */ }
       resolve(true);
@@ -333,14 +335,16 @@ export async function listen(bridge, socketPath, { log = () => {} } = {}) {
     for (const socket of sockets) socket.destroy();
     let ours = false;
     try { ours = stamp(fs.lstatSync(socketPath)) === mine; } catch { /* gone already */ }
-    // Bun's close unlinks the path whoever made it: when a later process holds the path now, this
-    // listener is left open, unreferenced, to end with the process, rather than delete its socket
+    // Bun's close unlinks the path even when another process made the file there. When the path
+    // holds a later process's socket now, this listener stays open, unreferenced and refusing
+    // every connection, until this process ends, so that the later socket stays.
     if (ours) {
       server.close();
       try { fs.unlinkSync(socketPath); } catch { /* Bun removed it */ }
     }
     process.off("exit", close);
   };
+  // a fallback only: inside the TUI worker this event does not fire, and dispose() closes instead
   process.on("exit", close);
   log("listening", {});
   return { close, server };

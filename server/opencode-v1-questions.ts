@@ -15,7 +15,11 @@ import { OPENCODE_HTTP_TIMEOUT_MS, type OpenCodeFormInfo } from "./opencode-serv
 export const openCodeQuestionSocketOptions: { runtimeDir?: string } = {};
 
 const MAX_REPLY_BYTES = 1024 * 1024;
-/** a reply makes two calls inside OpenCode (its pending list, then the reply), a second each at most */
+/**
+ * A reply makes two calls inside OpenCode (its pending list, then the reply), a second each at
+ * most. With more than one OpenCode instance in the TUI each is asked in turn, so a slow one can
+ * make the reply read as unconfirmed.
+ */
 const REPLY_TIMEOUT_MS = 3_000;
 
 /** The pane's socket by the plugin's own rule, under this server's XDG_RUNTIME_DIR (tests point it elsewhere). */

@@ -557,21 +557,21 @@ An OpenCode 1.x TUI keeps its questions in its own process and opens no port. To
 - **Subagents.** A question that a subagent asks shows on the pane of its root session.
 - **Without the plugin.** When the socket is missing or does not answer, Ovis reads OpenCode 1.x's own prompt off the screen, as before. That way works only for a single question that is not multiple choice.
 - **Who else can use the socket.** The plugin does not answer permission prompts. Any process that runs as your user can open the socket, so a process that an agent starts can answer that agent's questions. That includes the question that ends plan mode, which switches OpenCode to its build agent. Any process in a herdr pane can already type into the pane through herdr's own socket, so the plugin gives such a process nothing that it did not have.
-- **Where it works.** The plugin needs `XDG_RUNTIME_DIR`, which a Linux login session sets. The Ovis server must see the same `XDG_RUNTIME_DIR` as the panes. macOS usually has no `XDG_RUNTIME_DIR`, and Windows is not supported.
+- **Where it works.** The plugin needs `XDG_RUNTIME_DIR`, which a Linux login session sets, and the Ovis server must see the same `XDG_RUNTIME_DIR` as the panes. macOS usually has no `XDG_RUNTIME_DIR`, so there Ovis reads the questions off the screen. Windows is not supported.
 
 To turn it on:
 
-1. Link the plugin into OpenCode's global plugin folder, beside herdr's `herdr-agent-state.js`. Link only the `.js` file. OpenCode loads every `.ts` file in that folder too, and the `.d.ts` file beside the plugin is not a plugin. Link it from a checkout that stays where it is, not from a remote PC's versioned bundle, which moves on each update.
+1. Link the plugin into OpenCode's global plugin folder, beside herdr's `herdr-agent-state.js`. Link only the `.js` file. OpenCode loads every `.ts` file in that folder too, and the `.d.ts` file beside the plugin is not a plugin. Link it from a checkout that stays where it is, not from a remote PC's runtime bundle, which moves on each update.
 
    ```sh
    mkdir -p ~/.config/opencode/plugins
    ln -s /path/to/ovis/integrations/opencode/ovis-questions.js ~/.config/opencode/plugins/ovis-questions.js
    ```
 
-2. Set `OVIS_OPENCODE_QUESTIONS=1` in the environment of the shells that herdr starts, for example in `~/.zshrc`. Without it the plugin does nothing. It also does nothing outside a herdr pane (no `HERDR_PANE_ID`) or without `XDG_RUNTIME_DIR`.
-3. Start OpenCode again in each pane. An OpenCode that started before these steps keeps reading its questions off the screen until you start it again.
+2. Set `OVIS_OPENCODE_QUESTIONS=1` in the environment of the shells that herdr starts, for example in `~/.zshrc`. Without it the plugin does nothing. It also does nothing outside a herdr pane (no `HERDR_PANE_ID`).
+3. Start OpenCode again in each pane. For an OpenCode that started before these steps, Ovis reads its questions off the screen until you start it again.
 
-To find a problem, set `OVIS_OPENCODE_QUESTIONS_LOG` to an absolute file path. The plugin then writes to that file when it starts to listen, when a question comes or goes, and when it sends a reply or a reject. Each line names the question's id, never the answers. To turn the plugin off, remove the link or unset `OVIS_OPENCODE_QUESTIONS`, then start OpenCode again.
+To find a problem, set `OVIS_OPENCODE_QUESTIONS_LOG` to an absolute file path. The plugin then writes a line to that file when it starts to listen or cannot, when a question is asked, answered or dismissed, and when it sends a reply or a reject. Each line names the question's id, never the answers. To turn the plugin off, remove the link or unset `OVIS_OPENCODE_QUESTIONS`, then start OpenCode again.
 
 ## Updates
 
