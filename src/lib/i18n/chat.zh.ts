@@ -95,7 +95,6 @@ export const CHAT_ZH: Record<string, string> = {
   "{n} earlier turns on {b} branches you navigated away from": "你离开的 {b} 条分支上有 {n} 条更早的对话",
   "pi kept them in the session file but answers from the branch you chose. Use /tree in the terminal to go back.": "pi 会将其保留在会话文件中，但会基于你选择的分支作答。可在终端中使用 /tree 返回。",
   "Ran in terminal": "已在终端运行",
-  "Open Terminal": "打开终端",
   "Background result delivered": "后台结果已送达",
   "Background task ended": "后台任务已结束",
   "{n} background tasks ended": "{n} 个后台任务已结束",

@@ -25,9 +25,9 @@ const savedLanguages = Object.getOwnPropertyDescriptor(navigator, "languages");
 /** The sidebar as a first render draws it, on a phone's drawer or a desktop, with these settings stored. */
 function render(stored: object, drawer: boolean): string {
   const records: Record<string, string> = {
-    "herdr-web-ui:settings": JSON.stringify(stored),
+    "ovis:settings": JSON.stringify(stored),
     // the PC's workspaces are folded, so the render needs no workspace tree
-    "herdr-web-ui:pc-collapsed:local": "1",
+    "ovis:pc-collapsed:local": "1",
   };
   Object.defineProperty(globalThis, "window", { configurable: true, value: {
     matchMedia: (query: string) => ({ matches: drawer && query === "(max-width: 768px)", addEventListener() {}, removeEventListener() {} }),

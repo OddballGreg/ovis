@@ -131,8 +131,8 @@ try {
         locale: "en-US",
       });
       await context.addInitScript((settings) => {
-        localStorage.removeItem("herdr-web-ui:pc-collapsed:local");
-        localStorage.setItem("herdr-web-ui:settings", JSON.stringify(settings));
+        localStorage.removeItem("ovis:pc-collapsed:local");
+        localStorage.setItem("ovis:settings", JSON.stringify(settings));
       }, below ? { agentsPlacement: "below", agentsDrawerFold: "open" } : { agentsDrawerFold: "open" });
       const page = await context.newPage();
       await page.goto(`http://127.0.0.1:${server.port}/app/`);

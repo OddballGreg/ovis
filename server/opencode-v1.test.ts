@@ -8,7 +8,6 @@ import type { ConversationPart, HerdrPane, SessionSnapshot } from "../shared/pro
 import { ConversationMonitor } from "./conversation-monitor.ts";
 import { ConversationUnavailable, forgetTranscriptState, HistoryChanged, paneConversation, toolOutput } from "./conversation.ts";
 import * as herdr from "./herdr/client.ts";
-import { adoptLegacyEnv } from "./legacy-env.ts";
 import { forgetOpencodeState, opencodeConversation, type OpencodeAnswer } from "./opencode.ts";
 import {
   forgetOpencodeV1State,
@@ -226,12 +225,6 @@ describe("where the HTTP source is", () => {
     expect(opencodeV1Mode({ OVIS_OPENCODE_URL: "http://127.0.0.1:4100", OVIS_OPENCODE_SERVE: "1" })?.kind).toBe("url");
     expect(opencodeV1Mode({ OVIS_OPENCODE_SERVE: "1" })).toEqual({ kind: "serve", bin: "opencode" });
     expect(opencodeV1Mode({ OVIS_OPENCODE_SERVE: "1", OVIS_OPENCODE_BIN: "/opt/opencode" })).toEqual({ kind: "serve", bin: "/opt/opencode" });
-  });
-
-  it("takes the HERDR_WEB_OPENCODE_* names an install from before the rename to OVIS_* still sets", () => {
-    const env: Record<string, string | undefined> = { HERDR_WEB_OPENCODE_SERVE: "1", HERDR_WEB_OPENCODE_BIN: "/opt/opencode" };
-    adoptLegacyEnv(env);
-    expect(opencodeV1Mode(env)).toEqual({ kind: "serve", bin: "/opt/opencode" });
   });
 
   it("never sends a password over plain http to another host", () => {
@@ -930,7 +923,7 @@ describe("the server this one starts", () => {
   });
 
   it("keeps herdr's pane identity, this app's settings and the user's server password out of the environment", () => {
-    const env = serveEnvironment({ HOME: "/home/fixture", HERDR_SOCKET_PATH: "/x", HERDR_WEB_OPENCODE_SERVE: "1", OVIS_OPENCODE_SERVE: "1", OVIS_STATE_DIR: "/state", OPENCODE_SERVER_USERNAME: "other" }, "fresh");
+    const env = serveEnvironment({ HOME: "/home/fixture", HERDR_SOCKET_PATH: "/x", OVIS_OPENCODE_SERVE: "1", OVIS_STATE_DIR: "/state", OPENCODE_SERVER_USERNAME: "other" }, "fresh");
     expect(env["HOME"]).toBe("/home/fixture");
     expect(Object.keys(env).filter((key) => key.startsWith("HERDR_") || key.startsWith("OVIS_"))).toEqual([]);
     expect([env["OPENCODE_SERVER_USERNAME"], env["OPENCODE_SERVER_PASSWORD"]]).toEqual(["opencode", "fresh"]);

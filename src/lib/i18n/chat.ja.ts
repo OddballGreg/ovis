@@ -95,7 +95,6 @@ export const CHAT_JA: Record<string, string> = {
   "{n} earlier turns on {b} branches you navigated away from": "移動で離れた {b}件のブランチの以前の話 {n}件",
   "pi kept them in the session file but answers from the branch you chose. Use /tree in the terminal to go back.": "pi はセッションファイルに残していますが、選択したブランチから回答します。ターミナルで /tree を使うと戻れます。",
   "Ran in terminal": "ターミナルで実行済み",
-  "Open Terminal": "ターミナルを開く",
   "Background result delivered": "バックグラウンドの結果が届きました",
   "Background task ended": "バックグラウンドタスクが終了しました",
   "{n} background tasks ended": "バックグラウンドタスク {n} 件が終了しました",

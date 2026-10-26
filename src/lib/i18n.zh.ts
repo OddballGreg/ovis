@@ -263,6 +263,22 @@ const BASE: Record<string, string> = {
   // t3code ports (d)
   "Change PC": "切换电脑",
   "Selected": "已选择",
+  "Open Terminal": "打开终端",
+  "Terminal keys": "终端按键",
+  "Tab name": "标签页名称",
+  "Agent": "Agent",
+  // the composer's OpenCode model chip (components/OpencodeModelPicker.tsx)
+  "Choose the OpenCode model": "选择 OpenCode 模型",
+  "Model: {model}": "模型：{model}",
+  "Search models": "搜索模型",
+  "Switching to {model}…": "正在切换到 {model}…",
+  "No models match": "没有匹配的模型",
+  "In use": "使用中",
+  "OpenCode is working. Switch the model once it is idle.": "OpenCode 正在工作。请在它空闲后再切换模型。",
+  "A dialog is open in OpenCode. Close it in the terminal first.": "OpenCode 中有一个对话框处于打开状态。请先在终端中关闭它。",
+  "A dialog was left open in OpenCode.": "OpenCode 中仍有一个对话框处于打开状态。",
+  "Couldn't switch the model in OpenCode. Choose it in the terminal with ctrl+x m.": "无法在 OpenCode 中切换模型。请在终端中按 ctrl+x m 选择。",
+  "Model": "模型",
 };
 
 /** The parts ZH is made of; src/lib/i18n.test.ts fails when a key is in two parts, since a spread keeps only the last. */

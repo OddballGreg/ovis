@@ -95,7 +95,6 @@ export const CHAT_KO: Record<string, string> = {
   "{n} earlier turns on {b} branches you navigated away from": "이동으로 떠난 {b}개 브랜치의 이전 대화 {n}개",
   "pi kept them in the session file but answers from the branch you chose. Use /tree in the terminal to go back.": "pi는 세션 파일에 그대로 두지만 선택한 브랜치로 답변합니다. 터미널에서 /tree로 돌아갈 수 있습니다.",
   "Ran in terminal": "터미널에서 실행함",
-  "Open Terminal": "터미널 열기",
   "Background result delivered": "백그라운드 결과 도착",
   "Background task ended": "백그라운드 작업 끝남",
   "{n} background tasks ended": "백그라운드 작업 {n}개 끝남",

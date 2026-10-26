@@ -259,6 +259,22 @@ const BASE: Record<string, string> = {
   // t3code ports (d)
   "Change PC": "PC 바꾸기",
   "Selected": "선택됨",
+  "Open Terminal": "터미널 열기",
+  "Terminal keys": "터미널 키",
+  "Tab name": "탭 이름",
+  "Agent": "에이전트",
+  // the composer's OpenCode model chip (components/OpencodeModelPicker.tsx)
+  "Choose the OpenCode model": "OpenCode 모델 선택",
+  "Model: {model}": "모델: {model}",
+  "Search models": "모델 검색",
+  "Switching to {model}…": "{model}(으)로 바꾸는 중…",
+  "No models match": "일치하는 모델이 없습니다",
+  "In use": "사용 중",
+  "OpenCode is working. Switch the model once it is idle.": "OpenCode가 작업 중입니다. 작업이 끝난 뒤 모델을 바꾸세요.",
+  "A dialog is open in OpenCode. Close it in the terminal first.": "OpenCode에 대화상자가 열려 있습니다. 먼저 터미널에서 닫으세요.",
+  "A dialog was left open in OpenCode.": "OpenCode에 대화상자가 열린 채로 남았습니다.",
+  "Couldn't switch the model in OpenCode. Choose it in the terminal with ctrl+x m.": "OpenCode에서 모델을 바꾸지 못했습니다. 터미널에서 ctrl+x m으로 고르세요.",
+  "Model": "모델",
 };
 
 /** The parts KO is made of; src/lib/i18n.test.ts fails when a key is in two parts, since a spread keeps only the last. */

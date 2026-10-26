@@ -261,6 +261,22 @@ const BASE: Record<string, string> = {
   // t3code ports (d)
   "Change PC": "PCを切り替え",
   "Selected": "選択中",
+  "Open Terminal": "ターミナルを開く",
+  "Terminal keys": "ターミナルキー",
+  "Tab name": "タブ名",
+  "Agent": "エージェント",
+  // the composer's OpenCode model chip (components/OpencodeModelPicker.tsx)
+  "Choose the OpenCode model": "OpenCode のモデルを選択",
+  "Model: {model}": "モデル: {model}",
+  "Search models": "モデルを検索",
+  "Switching to {model}…": "{model} に切り替え中…",
+  "No models match": "一致するモデルはありません",
+  "In use": "使用中",
+  "OpenCode is working. Switch the model once it is idle.": "OpenCode が作業中です。作業が終わってからモデルを切り替えてください。",
+  "A dialog is open in OpenCode. Close it in the terminal first.": "OpenCode でダイアログが開いています。先にターミナルで閉じてください。",
+  "A dialog was left open in OpenCode.": "OpenCode でダイアログが開いたままです。",
+  "Couldn't switch the model in OpenCode. Choose it in the terminal with ctrl+x m.": "OpenCode でモデルを切り替えられませんでした。ターミナルで ctrl+x m を押して選んでください。",
+  "Model": "モデル",
 };
 
 /** The parts JA is made of; src/lib/i18n.test.ts fails when a key is in two parts, since a spread keeps only the last. */

@@ -29,8 +29,8 @@ async function until(check: () => boolean | Promise<boolean>, label: string) {
 async function checkInputLine(browser: Browser, mode: "legacy" | "kitty", pane: string, read: () => string) {
   const context = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
   await context.addInitScript(({ pane }) => {
-    localStorage.setItem("herdr-web-ui:settings", JSON.stringify({ language: "en", terminalInputMode: "line" }));
-    localStorage.setItem(`herdr-web-ui:view:${pane}`, "terminal");
+    localStorage.setItem("ovis:settings", JSON.stringify({ language: "en", terminalInputMode: "line" }));
+    localStorage.setItem(`ovis:view:${pane}`, "terminal");
   }, { pane });
   const page = await context.newPage();
   page.on("pageerror", (error) => errors.push(error.message));
