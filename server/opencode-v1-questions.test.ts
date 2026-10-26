@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { createBridge, listen, socketPathFor, type BridgeClient } from "../integrations/opencode/ovis-questions.js";
 import type { InteractivePrompt, PromptAnswer } from "../shared/protocol.ts";
@@ -110,7 +110,7 @@ async function pane({ plugin = true, screen = "", v2Forms = null as unknown[] | 
   const url = new URL(`http://localhost/api/pane/prompt?pane_id=${encodeURIComponent(paneId)}`);
   const answerUrl = new URL("http://localhost/api/pane/prompt/answer");
   return {
-    bridge, posted, upstream, replying, v2Replies,
+    bridge, posted, upstream, replying, v2Replies, paneId,
     stopPlugin() { handle?.close(); },
     ask(questions: unknown[], sessionID = SESSION, id = `que_fix${serial}`) {
       bridge.handleEvent({ type: "question.asked", properties: { id, sessionID, questions } });
@@ -211,6 +211,7 @@ describe("OpenCode 1.x questions through the ovis-questions plugin", () => {
     p.upstream.changeAfter = 1;
     const response = await p.answer(prompt, { option_index: 0 });
     expect(response.status).toBe(409);
+    expect(((await response.json()) as { error: { code: string; message: string } }).error).toEqual({ code: "prompt_changed", message: "The question has already been settled." });
     expect(p.posted).toEqual([]);
   });
 
@@ -261,6 +262,20 @@ describe("OpenCode 1.x questions through the ovis-questions plugin", () => {
     expect(prompt.title).toBe("Question");
     expect(prompt.multi_select).toBe(false);
     expect(prompt.options.length).toBeGreaterThan(1);
+  });
+
+  it("reads the screen when an OpenCode that exited left its socket file behind", async () => {
+    const p = await pane({ plugin: false, screen: v1Screen });
+    const path = openCodeQuestionSocket(p.paneId)!;
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    chmodSync(dirname(dirname(path)), 0o700);
+    // a process killed outright leaves its socket file behind, refusing connections
+    const child = Bun.spawn([process.execPath, "-e", `require("node:net").createServer().listen(${JSON.stringify(path)}, () => console.log("up"))`], { stdout: "pipe" });
+    await child.stdout.getReader().read();
+    child.kill("SIGKILL");
+    await child.exited;
+    expect(lstatSync(path).isSocket()).toBe(true);
+    expect((await p.read())?.title).toBe("Question");
   });
 
   it("reads the screen when the plugin has nothing pending for this session", async () => {

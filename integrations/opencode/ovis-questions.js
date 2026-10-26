@@ -344,7 +344,8 @@ export async function listen(bridge, socketPath, { log = () => {} } = {}) {
     }
     process.off("exit", close);
   };
-  // a fallback only: inside the TUI worker this event does not fire, and dispose() closes instead
+  // a fallback for a plain Node or Bun process only: inside OpenCode 1.19's TUI worker this event
+  // does not fire, and the plugin's dispose hook closes the socket only on a reload
   process.on("exit", close);
   log("listening", {});
   return { close, server };
@@ -391,9 +392,9 @@ export function createHub() {
           return null;
         });
       } else if (bridges.size === 0 && handle) {
+        log("closing", {});
         handle.close();
         handle = null;
-        log("closed", {});
       }
     });
     return chain;

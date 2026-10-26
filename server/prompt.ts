@@ -631,10 +631,10 @@ async function readKnownPrompt(
     const state = openCodeState.begin(paneId, sessionID);
     const revision = state.revision;
     const issued = ++state.issued;
-    // First the ovis-questions plugin's socket, where the pane's own OpenCode 1.x TUI serves its
-    // questions. When there is no socket, or it has no question for this session, the v2 service
-    // is asked. That is only the process that service.json names, as /api/info proves it, and
-    // never a service started here.
+    // Ovis asks the ovis-questions plugin's socket first, where the pane's own OpenCode 1.x TUI
+    // serves its questions. When there is no socket, or it has no question for this session, Ovis
+    // asks the v2 service: only the process that service.json names and /api/info confirms, never
+    // a service started here.
     let transport: "plugin" | "service" = "plugin";
     let forms = await listPluginQuestionForms(paneId, sessionID, signal);
     if ((forms === null || forms.length === 0) && !signal?.aborted) {
