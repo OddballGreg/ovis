@@ -1,5 +1,9 @@
 export const MAX_MESSAGE_BYTES: number;
 export const MAX_ANSWER_CHARS: number;
+export const MAX_LABEL_CHARS: number;
+export const MAX_HEADER_CHARS: number;
+export const MAX_QUESTIONS: number;
+export const MAX_OPTIONS: number;
 
 export interface BridgeOption { label: string; description: string }
 export interface BridgeQuestion { question: string; header: string; options: BridgeOption[]; multiple: boolean; custom: boolean }
@@ -24,13 +28,23 @@ export interface Bridge {
   list(): Promise<BridgeAnswer>;
 }
 
+export interface Handler { handle(message: unknown): Promise<BridgeAnswer> }
+type Log = (tag: string, data: Record<string, unknown>) => void;
+
 export function socketPathFor(env?: Record<string, string | undefined>): string | null;
 export function isTuiProcess(argv?: string[]): boolean;
 export function enabled(env?: Record<string, string | undefined>, argv?: string[]): boolean;
 export function normalizeRequest(value: unknown): BridgeRequest | null;
 export function validateAnswers(request: BridgeRequest, answers: unknown): string | null;
-export function createBridge(options: { client: BridgeClient; log?: (tag: string, data: Record<string, unknown>) => void }): Bridge;
-export function listen(bridge: Bridge, socketPath: string, options?: { log?: (tag: string, data: Record<string, unknown>) => void }): Promise<{ close(): void } | null>;
-export const OvisQuestionsPlugin: (input: { client?: BridgeClient }) => Promise<Record<string, unknown>>;
+export function createBridge(options: { client: BridgeClient; log?: Log }): Bridge;
+export function listen(bridge: Handler, socketPath: string, options?: { log?: Log }): Promise<{ close(): void; server: import("node:net").Server } | null>;
+export function createHub(): {
+  bridges: Set<Bridge>;
+  dispatch: Handler;
+  add(bridge: Bridge, socketPath: string, log: Log): Promise<void>;
+  remove(bridge: Bridge, socketPath: string, log: Log): Promise<void>;
+  readonly listening: boolean;
+};
+export const OvisQuestionsPlugin: (input: { client?: BridgeClient }) => Promise<{ event?(input: { event: unknown }): Promise<void>; dispose?(): Promise<void> }>;
 declare const plugin: { id: string; server: typeof OvisQuestionsPlugin };
 export default plugin;

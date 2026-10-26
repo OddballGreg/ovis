@@ -4,7 +4,7 @@ import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { createBridge, enabled, isTuiProcess, listen, socketPathFor, validateAnswers, type BridgeClient, type BridgeRequest } from "./ovis-questions.js";
+import { createBridge, createHub, enabled, isTuiProcess, listen, OvisQuestionsPlugin, socketPathFor, validateAnswers, type BridgeClient, type BridgeRequest } from "./ovis-questions.js";
 
 const asked = (id = "que_a1", sessionID = "ses_child1"): BridgeRequest & { tool?: unknown } => ({
   id, sessionID,
@@ -85,6 +85,9 @@ describe("OpenCode question bridge", () => {
     expect(isTuiProcess(["opencode", "opencode", "run", "hi"])).toBe(false);
     expect(isTuiProcess(["opencode", "opencode", "--print-logs", "serve"])).toBe(false);
     expect(isTuiProcess(["opencode", "opencode", "/some/project"])).toBe(true);
+    expect(isTuiProcess(["opencode", "opencode", "--log-level", "DEBUG", "run", "hi"])).toBe(false);
+    expect(isTuiProcess(["opencode", "opencode", "--model", "a/b", "/some/project"])).toBe(true);
+    expect(isTuiProcess(["opencode", "opencode", "providers"])).toBe(false);
   });
 
   it("makes the socket and its directory private, and removes the socket on close", async () => {
@@ -203,6 +206,99 @@ describe("OpenCode question bridge", () => {
     // the first question takes a typed answer, and a multiple choice may take none
     expect(validateAnswers(bridge.pending.get("que_a1")!, [["my own colour"], ["Small"]])).toBeNull();
     expect(validateAnswers(bridge.pending.get("que_a1")!, [[], ["Small"]])).toBeNull();
+  });
+
+  it("forgets questions OpenCode settled or whose session it deleted", async () => {
+    const { bridge, socketPath } = await serve();
+    bridge.handleEvent({ type: "question.asked", properties: asked("que_r1", "ses_child1") });
+    bridge.handleEvent({ type: "question.asked", properties: asked("que_d1", "ses_gone1") });
+    bridge.handleEvent({ type: "question.rejected", properties: { sessionID: "ses_child1", requestID: "que_r1" } });
+    bridge.handleEvent({ type: "session.deleted", properties: { info: { id: "ses_gone1" } } });
+    expect(await call(socketPath, { op: "list" })).toEqual({ ok: true, questions: [] });
+  });
+
+  it("says so when it cannot reach OpenCode's question routes, or OpenCode does not confirm", async () => {
+    const { bridge, socketPath, client } = await serve();
+    bridge.handleEvent({ type: "question.asked", properties: asked() });
+    client._client!.post = () => new Promise(() => {});
+    expect(await call(socketPath, { op: "reject", requestID: "que_a1" })).toMatchObject({ ok: false, code: "unconfirmed" });
+    delete client._client!.post;
+    expect(await call(socketPath, { op: "reject", requestID: "que_a1" })).toMatchObject({ ok: false, code: "unavailable" });
+  });
+
+  it("answers busy past the connection cap, and runs at most a few operations per connection", async () => {
+    const { socketPath } = await serve();
+    const held = await Promise.all(Array.from({ length: 16 }, () => new Promise<ReturnType<typeof connect>>((resolve) => {
+      const socket = connect({ path: socketPath });
+      socket.once("connect", () => resolve(socket));
+    })));
+    try { expect(await call(socketPath, { op: "list" })).toMatchObject({ ok: false, code: "busy" }); }
+    finally { for (const socket of held) socket.destroy(); }
+    const lines = await new Promise<string[]>((resolve) => {
+      const socket = connect({ path: socketPath });
+      let input = "";
+      socket.setEncoding("utf8");
+      socket.once("connect", () => socket.write(`${'{"op":"list"}\n'.repeat(50)}`));
+      socket.on("data", (chunk) => { input += chunk; });
+      socket.once("close", () => resolve(input.trim().split("\n")));
+    });
+    expect(lines.length).toBeLessThanOrEqual(5);
+    expect(JSON.parse(lines.at(-1)!)).toMatchObject({ ok: false, code: "busy" });
+  });
+
+  it("leaves a socket that another process made at the path after it", async () => {
+    const { socketPath, handle, client } = await serve();
+    rmSync(socketPath);
+    const other = await listen(createBridge({ client }), socketPath);
+    closers.push(() => other?.close());
+    handle.close();
+    expect(lstatSync(socketPath).isSocket()).toBe(true);
+    expect((await call(socketPath, { op: "list" })).ok).toBe(true);
+  });
+
+  it("serves every OpenCode instance in the process on one socket, until the last is gone", async () => {
+    const runtime = temp();
+    const socketPath = socketPathFor({ XDG_RUNTIME_DIR: runtime, HERDR_PANE_ID: "w1:p8" })!;
+    const hub = createHub();
+    const first = fakeClient();
+    const second = fakeClient();
+    const a = createBridge({ client: first.client });
+    const b = createBridge({ client: second.client });
+    await hub.add(a, socketPath, () => {});
+    await hub.add(b, socketPath, () => {});
+    closers.push(() => { void hub.remove(a, socketPath, () => {}); void hub.remove(b, socketPath, () => {}); });
+    a.handleEvent({ type: "question.asked", properties: asked("que_a1") });
+    b.handleEvent({ type: "question.asked", properties: asked("que_b1", "ses_other1") });
+    expect(((await call(socketPath, { op: "list" })).questions as { id: string }[]).map((q) => q.id).sort()).toEqual(["que_a1", "que_b1"]);
+    // the reply goes to the instance that asked
+    expect(await call(socketPath, { op: "reply", requestID: "que_b1", answers: [["Red"], ["Small"]] })).toEqual({ ok: true });
+    expect(first.calls.filter((c) => c.body)).toEqual([]);
+    expect(second.calls.filter((c) => c.body)).toHaveLength(1);
+    await hub.remove(a, socketPath, () => {});
+    expect(lstatSync(socketPath).isSocket()).toBe(true);
+    await hub.remove(b, socketPath, () => {});
+    expect(() => lstatSync(socketPath)).toThrow();
+  });
+
+  it("removes its socket when OpenCode disposes the plugin", async () => {
+    const runtime = temp();
+    const saved = { ...process.env };
+    Object.assign(process.env, { XDG_RUNTIME_DIR: runtime, HERDR_PANE_ID: "w1:p9", OVIS_OPENCODE_QUESTIONS: "1" });
+    try {
+      const hooks = await OvisQuestionsPlugin({ client: fakeClient().client });
+      const socketPath = socketPathFor()!;
+      for (let tries = 0; tries < 100; tries++) {
+        try { if (lstatSync(socketPath).isSocket()) break; } catch { /* not yet */ }
+        await Bun.sleep(5);
+      }
+      expect(lstatSync(socketPath).isSocket()).toBe(true);
+      await hooks.dispose!();
+      expect(() => lstatSync(socketPath)).toThrow();
+    } finally {
+      for (const key of ["XDG_RUNTIME_DIR", "HERDR_PANE_ID", "OVIS_OPENCODE_QUESTIONS"]) {
+        if (saved[key] === undefined) delete process.env[key]; else process.env[key] = saved[key];
+      }
+    }
   });
 
   it("drops malformed question events", () => {

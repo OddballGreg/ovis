@@ -18,8 +18,9 @@ Everything here rests on three rules. A change that breaks one of them is a bug,
    was checked against the running version), `shadows` and a stable `id`.
 2. **The terminal is the only way a command is sent.** Chat types into the pane exactly as the
    user would, through the same submit path as any message. No command goes through an agent's
-   API. The native writes the bridge keeps are answering a pending OpenCode v2 form, and a pending
-   OpenCode 1.x question through the ovis-questions plugin. Each is an answer, not a command.
+   API. The bridge keeps two native writes: an answer to a pending OpenCode v2 form, and an answer
+   to a pending OpenCode 1.x question through the ovis-questions plugin. Each is an answer, not a
+   command.
 3. **An outcome changes only on evidence tied to that send.** Sending a command records
    `accepted` and nothing more. A later state needs evidence that belongs to this send, listed
    under [Outcome states](#outcome-states-and-their-evidence). A screen that changed, an idle agent

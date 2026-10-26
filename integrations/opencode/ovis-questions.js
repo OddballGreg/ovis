@@ -1,8 +1,9 @@
 // Ovis question bridge for OpenCode 1.x (plain JS, no dependencies).
 //
-// Sits beside herdr's managed herdr-agent-state.js in an OpenCode plugins directory. Inside the
-// TUI's own process it keeps the questions OpenCode is waiting on and answers them for Ovis over
-// a unix socket only this user can open:
+// Goes in an OpenCode plugins folder, such as ~/.config/opencode/plugins beside herdr's own
+// herdr-agent-state.js. An OpenCode 1.x TUI keeps its questions in its own process and opens no
+// port, so inside that process this plugin keeps the questions it waits on and takes Ovis's
+// replies to them over a unix socket only this user can open:
 //   $XDG_RUNTIME_DIR/ovis/opencode-questions/<HERDR_PANE_ID>.sock
 // One JSON object per line, three operations and nothing else:
 //   {"op":"list"}                                 -> {"ok":true,"questions":[...]}
@@ -17,19 +18,27 @@ import path from "node:path";
 
 export const MAX_MESSAGE_BYTES = 64 * 1024;
 export const MAX_ANSWER_CHARS = 12_000;
-const MAX_QUESTIONS = 64;
-const MAX_OPTIONS = 64;
+export const MAX_LABEL_CHARS = 1_000;
+export const MAX_HEADER_CHARS = 200;
+export const MAX_QUESTIONS = 64;
+export const MAX_OPTIONS = 64;
 const MAX_CONNECTIONS = 16;
+// operations one connection may have waiting: Ovis sends one per connection
+const MAX_QUEUED = 4;
 const IDLE_MS = 5_000;
-const UPSTREAM_MS = 3_000;
+// each call to OpenCode inside the process; a reply makes two (the pending list, then the reply)
+const UPSTREAM_MS = 1_000;
 const PANE_RE = /^[A-Za-z0-9:._-]{1,64}$/;
 const REQUEST_RE = /^que_[A-Za-z0-9]{1,120}$/;
 const SESSION_RE = /^ses_[A-Za-z0-9]{1,120}$/;
-// processes that carry the pane's environment but are not its TUI
+// OpenCode 1.19's commands other than the TUI: processes that carry the pane's environment
+// (an agent's `opencode run`, a `serve`) but are not the pane's TUI
 const OTHER_COMMANDS = new Set([
   "run", "serve", "web", "attach", "acp", "mcp", "github", "pr", "debug", "export", "import", "stats",
-  "models", "auth", "agent", "upgrade", "uninstall", "session", "generate", "db",
+  "models", "providers", "auth", "agent", "upgrade", "uninstall", "session", "generate", "db", "console", "plugin", "plug",
 ]);
+// global options that take a value as the next argument
+const VALUE_OPTIONS = new Set(["--log-level", "--port", "--hostname", "--model", "-m", "--agent", "--session", "-s", "--prompt"]);
 
 /** The socket for this pane, or null when the pane id or runtime directory is unusable. */
 export function socketPathFor(env = process.env) {
@@ -42,7 +51,10 @@ export function socketPathFor(env = process.env) {
 /** Whether this process is the pane's interactive OpenCode (its TUI worker), not a run or serve. */
 export function isTuiProcess(argv = process.argv) {
   const args = argv.slice(2);
-  while (args.length && args[0].startsWith("-")) args.shift();
+  while (args.length && args[0].startsWith("-")) {
+    const option = args.shift();
+    if (VALUE_OPTIONS.has(option)) args.shift();
+  }
   return !OTHER_COMMANDS.has(args[0] ?? "");
 }
 
@@ -60,11 +72,11 @@ export function normalizeRequest(value) {
   if (!Array.isArray(questions) || questions.length === 0 || questions.length > MAX_QUESTIONS) return null;
   const out = [];
   for (const question of questions) {
-    if (!question || typeof question !== "object" || !string(question.question, MAX_ANSWER_CHARS) || !string(question.header ?? "", 200)) return null;
+    if (!question || typeof question !== "object" || !string(question.question, MAX_ANSWER_CHARS) || !string(question.header ?? "", MAX_HEADER_CHARS)) return null;
     if (!Array.isArray(question.options) || question.options.length > MAX_OPTIONS) return null;
     const options = [];
     for (const option of question.options) {
-      if (!option || typeof option !== "object" || !string(option.label, 1_000) || !option.label || !string(option.description ?? "", MAX_ANSWER_CHARS)) return null;
+      if (!option || typeof option !== "object" || !string(option.label, MAX_LABEL_CHARS) || !option.label || !string(option.description ?? "", MAX_ANSWER_CHARS)) return null;
       options.push({ label: option.label, description: option.description ?? "" });
     }
     out.push({
@@ -159,7 +171,7 @@ export function createBridge({ client, log = () => {} }) {
       const request = normalizeRequest(properties);
       if (request) { pending.set(request.id, request); log("asked", { requestID: request.id, questions: request.questions.length }); }
     } else if (type === "question.replied" || type === "question.rejected") {
-      if (typeof properties.requestID === "string" && pending.delete(properties.requestID)) log(type.slice(9), { requestID: properties.requestID });
+      if (typeof properties.requestID === "string" && pending.delete(properties.requestID)) log(type === "question.replied" ? "replied" : "rejected", { requestID: properties.requestID });
     } else if (type === "session.deleted" && info?.id) {
       for (const [id, request] of pending) if (request.sessionID === info.id) pending.delete(id);
     }
@@ -216,7 +228,7 @@ export function createBridge({ client, log = () => {} }) {
   return { pending, parents, handleEvent, handle, list };
 }
 
-/** A path is ours to use: a real directory or socket this user owns, not a link. */
+/** A path someone else made is never ours: on POSIX the owner must be this user. */
 function ownedBy(stat, uid) {
   return typeof process.getuid !== "function" || stat.uid === uid;
 }
@@ -232,7 +244,10 @@ function prepareDirectory(dir) {
   }
 }
 
-/** Removes a socket nobody listens on; true when the path is free, false when a live one holds it. */
+/**
+ * Removes a socket nobody listens on; true when the path is free. A socket that answers, or one
+ * whose probe fails any other way than a refused connection, is left alone (false).
+ */
 function clearStale(socketPath) {
   let stat;
   try { stat = fs.lstatSync(socketPath); } catch (error) { if (error?.code === "ENOENT") return Promise.resolve(true); throw error; }
@@ -241,26 +256,31 @@ function clearStale(socketPath) {
     const probe = net.createConnection({ path: socketPath });
     const timer = setTimeout(() => { probe.destroy(); resolve(false); }, 500);
     probe.once("connect", () => { clearTimeout(timer); probe.destroy(); resolve(false); });
-    probe.once("error", () => {
+    probe.once("error", (error) => {
       clearTimeout(timer);
+      if (error?.code !== "ECONNREFUSED") { resolve(false); return; }
       try { fs.unlinkSync(socketPath); } catch { /* gone already */ }
       resolve(true);
     });
   });
 }
 
-/** Serves `bridge` on `socketPath`. Resolves to a handle with close(), or null when another process holds it. */
+/** Serves `bridge` (anything with handle(message)) on `socketPath`. Resolves to a handle with close(), or null when another process holds it. */
 export async function listen(bridge, socketPath, { log = () => {} } = {}) {
   prepareDirectory(path.dirname(socketPath));
   if (!(await clearStale(socketPath))) { log("busy", {}); return null; }
   const sockets = new Set();
+  let closed = false;
+  const refuse = (socket, code, message) => { socket.end(`${JSON.stringify({ ok: false, code, message })}\n`); };
   const server = net.createServer((socket) => {
-    if (sockets.size >= MAX_CONNECTIONS) { socket.destroy(); return; }
+    if (closed) { socket.destroy(); return; }
+    if (sockets.size >= MAX_CONNECTIONS) { refuse(socket, "busy", "too many connections"); return; }
     sockets.add(socket);
     socket.setEncoding("utf8");
     socket.setTimeout(IDLE_MS, () => socket.destroy());
     let buffer = "";
     let refused = false;
+    let queued = 0;
     let chain = Promise.resolve();
     const send = (value) => { if (!socket.destroyed) socket.write(`${JSON.stringify(value)}\n`); };
     socket.on("data", (chunk) => {
@@ -269,19 +289,30 @@ export async function listen(bridge, socketPath, { log = () => {} } = {}) {
       if (Buffer.byteLength(buffer) > MAX_MESSAGE_BYTES && !buffer.includes("\n")) {
         refused = true;
         buffer = "";
-        chain = chain.then(() => { send({ ok: false, code: "too_large", message: `a message is at most ${MAX_MESSAGE_BYTES} bytes` }); socket.end(); });
+        chain = chain.then(() => refuse(socket, "too_large", `a message is at most ${MAX_MESSAGE_BYTES} bytes`));
         return;
       }
-      for (let end = buffer.indexOf("\n"); end >= 0; end = buffer.indexOf("\n")) {
+      for (let end = buffer.indexOf("\n"); end >= 0 && !refused; end = buffer.indexOf("\n")) {
         const line = buffer.slice(0, end);
         buffer = buffer.slice(end + 1);
         if (!line.trim()) continue;
-        if (Buffer.byteLength(line) > MAX_MESSAGE_BYTES) { chain = chain.then(() => send({ ok: false, code: "too_large", message: `a message is at most ${MAX_MESSAGE_BYTES} bytes` })); continue; }
+        if (++queued > MAX_QUEUED) {
+          refused = true;
+          buffer = "";
+          chain = chain.then(() => refuse(socket, "busy", `at most ${MAX_QUEUED} operations wait on one connection`));
+          break;
+        }
+        if (Buffer.byteLength(line) > MAX_MESSAGE_BYTES) { chain = chain.then(() => { queued--; send({ ok: false, code: "too_large", message: `a message is at most ${MAX_MESSAGE_BYTES} bytes` }); }); continue; }
         let message;
         try { message = JSON.parse(line); } catch { message = undefined; }
         chain = chain.then(async () => {
-          if (message === undefined) return send({ ok: false, code: "invalid_json", message: "each line must be one JSON object" });
-          try { send(await bridge.handle(message)); } catch { send({ ok: false, code: "internal", message: "the bridge failed" }); }
+          // a client gone meanwhile gets nothing done for it
+          if (socket.destroyed) return;
+          try {
+            if (message === undefined) send({ ok: false, code: "invalid_json", message: "each line must be one JSON object" });
+            else send(await bridge.handle(message));
+          } catch { send({ ok: false, code: "internal", message: "the bridge failed" }); }
+          finally { queued--; }
         });
       }
     });
@@ -293,22 +324,85 @@ export async function listen(bridge, socketPath, { log = () => {} } = {}) {
     server.listen(socketPath, () => { server.off("error", reject); resolve(); });
   });
   fs.chmodSync(socketPath, 0o600);
-  const inode = fs.lstatSync(socketPath).ino;
+  const stamp = (stat) => `${stat.dev}:${stat.ino}:${stat.ctimeMs}`;
+  const mine = stamp(fs.lstatSync(socketPath));
   server.unref();
-  let closed = false;
   const close = () => {
     if (closed) return;
     closed = true;
     for (const socket of sockets) socket.destroy();
-    server.close();
-    // only our own socket: a later process may have taken the path
-    try { if (fs.lstatSync(socketPath).ino === inode) fs.unlinkSync(socketPath); } catch { /* gone already */ }
+    let ours = false;
+    try { ours = stamp(fs.lstatSync(socketPath)) === mine; } catch { /* gone already */ }
+    // Bun's close unlinks the path whoever made it: when a later process holds the path now, this
+    // listener is left open, unreferenced, to end with the process, rather than delete its socket
+    if (ours) {
+      server.close();
+      try { fs.unlinkSync(socketPath); } catch { /* Bun removed it */ }
+    }
     process.off("exit", close);
   };
   process.on("exit", close);
   log("listening", {});
   return { close, server };
 }
+
+/**
+ * Every OpenCode instance in this process (one per project folder the TUI opens) gets a bridge of
+ * its own, since each has its own client and events; the pane has one socket, served once for
+ * all of them.
+ */
+export function createHub() {
+  const bridges = new Set();
+  let handle = null;
+  let chain = Promise.resolve();
+
+  const dispatch = {
+    async handle(message) {
+      if (!message || typeof message !== "object" || Array.isArray(message)) return { ok: false, code: "invalid_message", message: "a JSON object is required" };
+      if (message.op === "list") {
+        const seen = new Set();
+        const questions = [];
+        for (const listed of await Promise.all([...bridges].map((bridge) => bridge.list()))) {
+          for (const question of listed.questions ?? []) if (!seen.has(question.id)) { seen.add(question.id); questions.push(question); }
+        }
+        return { ok: true, questions };
+      }
+      if (message.op !== "reply" && message.op !== "reject") return { ok: false, code: "unknown_op", message: "op must be list, reply or reject" };
+      if (typeof message.requestID !== "string" || !REQUEST_RE.test(message.requestID)) return { ok: false, code: "invalid_request", message: "requestID is invalid" };
+      // only the instance that holds the question settles it
+      for (const bridge of bridges) {
+        const answer = await bridge.handle(message);
+        if (answer.ok || answer.code !== "not_pending") return answer;
+      }
+      return { ok: false, code: "not_pending", message: "that question is not pending" };
+    },
+  };
+
+  /** Listens while any bridge is registered, and stops when the last one goes; one change at a time. */
+  const sync = (socketPath, log) => {
+    chain = chain.then(async () => {
+      if (bridges.size > 0 && !handle) {
+        handle = await listen(dispatch, socketPath, { log }).catch((error) => {
+          log("listen-failed", { error: String(error?.code ?? error?.message ?? error) });
+          return null;
+        });
+      } else if (bridges.size === 0 && handle) {
+        handle.close();
+        handle = null;
+      }
+    });
+    return chain;
+  };
+
+  return {
+    bridges, dispatch,
+    add(bridge, socketPath, log) { bridges.add(bridge); return sync(socketPath, log); },
+    remove(bridge, socketPath, log) { bridges.delete(bridge); return sync(socketPath, log); },
+    get listening() { return handle !== null; },
+  };
+}
+
+const hub = createHub();
 
 function fileLog(env) {
   const target = env.OVIS_OPENCODE_QUESTIONS_LOG;
@@ -322,10 +416,15 @@ export const OvisQuestionsPlugin = async (input) => {
   const env = process.env;
   if (!enabled(env)) return {};
   const log = fileLog(env);
+  const socketPath = socketPathFor(env);
   const bridge = createBridge({ client: input?.client, log });
-  // never delay OpenCode's start, and never fail it: without the socket the screen reader still works
-  listen(bridge, socketPathFor(env), { log }).catch((error) => log("listen-failed", { error: String(error?.code ?? error?.message ?? error) }));
-  return { event: async ({ event }) => bridge.handleEvent(event) };
+  // never delay OpenCode's start, and never fail it: without the socket Ovis reads the question off the screen
+  void hub.add(bridge, socketPath, log);
+  return {
+    event: async ({ event }) => bridge.handleEvent(event),
+    // OpenCode disposes an instance on exit and on a reload; the last one out removes the socket
+    dispose: async () => { await hub.remove(bridge, socketPath, log); },
+  };
 };
 
 export default {

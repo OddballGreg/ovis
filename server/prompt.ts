@@ -631,15 +631,18 @@ async function readKnownPrompt(
     const state = openCodeState.begin(paneId, sessionID);
     const revision = state.revision;
     const issued = ++state.issued;
-    // OpenCode 1.x's TUI answers for its own pane through the ovis-questions plugin's socket; only
-    // without one is a v2 service asked: the process service.json names, as /api/info proves it,
-    // never a service started here
+    // The pane's own OpenCode 1.x TUI serves its questions through the ovis-questions plugin's
+    // socket. When that socket has none for this session, the v2 service is asked: only the
+    // process service.json names, as /api/info proves it, never a service started here.
     let transport: "plugin" | "service" = "plugin";
     let forms = await listPluginQuestionForms(paneId, sessionID, signal);
-    if (forms === null && !signal?.aborted) {
-      transport = "service";
+    if ((forms === null || forms.length === 0) && !signal?.aborted) {
       const config = (await openCodeService(openCodeStateDir, signal, { onWindows: true }))?.config ?? null;
-      forms = config ? await listPendingQuestionForms(config, sessionID, signal) : null;
+      const served = config ? await listPendingQuestionForms(config, sessionID, signal) : null;
+      if (served !== null && (forms === null || served.length > 0)) {
+        forms = served;
+        transport = "service";
+      }
     }
     if (signal?.aborted || openCodeState.entries.get(paneId) !== state) return { prompt: null, stale: true };
     if (state.revision === revision && issued >= state.applied) {
@@ -659,11 +662,11 @@ async function readKnownPrompt(
     // A late read renders the newer applied form and draft, never a synthetic empty card.
     const form = state.listed;
     if (!form || form.fields.length === 0) break native;
-    const via = state.transport ?? "service";
+    const formTransport = state.transport ?? "service";
 
     // Schema changes under a reused form id are a replacement too.
     const identity = JSON.stringify({
-      id: form.id, title: form.title, via,
+      id: form.id, title: form.title, transport: formTransport,
       fields: form.fields.map(({ key, type, title, description, required, custom, options }) => ({
         key, type, title, description, required, custom,
         options: options?.map(({ value, label, description }) => ({ value, label, description })),
@@ -703,9 +706,9 @@ async function readKnownPrompt(
       }
     }
 
+    let title = field.title && field.title !== field.description ? field.title : (form.title || "Question");
     // OpenCode 1.x names each question with a short header, which the steps show; the card says where it stands
-    const title = via === "plugin" && form.fields.length > 1 ? `Question ${stepIndex + 1} of ${form.fields.length}`
-      : field.title && field.title !== field.description ? field.title : (form.title || "Question");
+    if (formTransport === "plugin" && form.fields.length > 1) title = `Question ${stepIndex + 1} of ${form.fields.length}`;
     const question = field.description || field.title || form.title || "";
     const steps = form.fields.length > 1
       ? form.fields.map((f, i) => ({
@@ -766,7 +769,8 @@ async function readKnownPrompt(
           stepIndex,
           totalSteps: form.fields.length,
           fieldKeys: form.fields.map((f) => f.key),
-          transport: via,
+          fieldsSignature: JSON.stringify(form.fields),
+          transport: formTransport,
           options: rawOptions,
           sessionID,
           state,
@@ -1030,7 +1034,8 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
       const parsedPrompt = parsedByPublicPrompt.get(prompt);
       if (parsedPrompt?.responder === "opencode-question" && parsedPrompt.openCodeForm) {
         const openCodeForm = parsedPrompt.openCodeForm;
-        if (!openCodeForm.available) return jsonResponse({ error: { code: "service_unavailable", message: "OpenCode service is not available. Your answer has not been sent." } }, 502);
+        const pluginSilent = (): Response => jsonResponse({ error: { code: "service_unavailable", message: "OpenCode's question plugin did not answer. Your answer has not been sent." } }, 502);
+        if (!openCodeForm.available) return openCodeForm.transport === "plugin" ? pluginSilent() : jsonResponse({ error: { code: "service_unavailable", message: "OpenCode service is not available. Your answer has not been sent." } }, 502);
         const state = openCodeForm.state;
         const asking = askings.get(body.pane_id);
         const current = (): boolean => !deadline.aborted
@@ -1147,11 +1152,12 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
         let replyResult: { ok: boolean; status: number };
         if (openCodeForm.transport === "plugin") {
           if (!(await stillBound())) return promptChanged();
-          // asked again just before sending: the question must still be pending, unchanged, in this pane's TUI
+          // asked again just before sending: the same question, with the same fields, must still be
+          // pending in this pane's TUI
           const live = await listPluginQuestionForms(body.pane_id, openCodeForm.sessionID, deadline);
-          if (live === null) return jsonResponse({ error: { code: "service_unavailable", message: "OpenCode's question plugin did not answer. Your answer has not been sent." } }, 502);
+          if (live === null) return pluginSilent();
           const still = live.find((candidate) => candidate.id === openCodeForm.formId);
-          if (!still || JSON.stringify(still.fields.map((f) => f.key)) !== JSON.stringify(openCodeForm.fieldKeys)) {
+          if (!still || JSON.stringify(still.fields) !== openCodeForm.fieldsSignature) {
             if (current()) {
               state.draft = undefined;
               state.form = null;
@@ -1197,7 +1203,7 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
           state.revision++;
           return jsonResponse({ error: { code: "prompt_changed", message: "The form has already been settled." } }, 409);
         }
-        if (openCodeForm.transport === "plugin" && replyResult.status === 503) return jsonResponse({ error: { code: "service_unavailable", message: "OpenCode's question plugin did not answer. Your answer has not been sent." } }, 502);
+        if (openCodeForm.transport === "plugin" && replyResult.status === 503) return pluginSilent();
         return jsonResponse({ error: { code: "reply_failed", message: `Failed to reply to OpenCode form (HTTP ${replyResult.status}).` } }, 502);
       }
 

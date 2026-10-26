@@ -1,33 +1,44 @@
 import { lstatSync } from "node:fs";
 import { connect } from "node:net";
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute } from "node:path";
 
+import { MAX_ANSWER_CHARS, MAX_HEADER_CHARS, MAX_LABEL_CHARS, MAX_OPTIONS, MAX_QUESTIONS, socketPathFor } from "../integrations/opencode/ovis-questions.js";
 import { OPENCODE_HTTP_TIMEOUT_MS, type OpenCodeFormInfo } from "./opencode-service.ts";
 
 /**
- * OpenCode 1.x keeps no form a service could answer. Its questions reach Ovis through the
- * ovis-questions plugin (integrations/opencode/ovis-questions.js), which runs inside the pane's
- * own TUI and answers on a unix socket named after the herdr pane: list, reply and reject, for a
- * question pending now and nothing else. No socket, or one that does not answer, is no answer,
- * and the screen reader (dialogs/opencode.ts) reads the prompt as before.
+ * An OpenCode 1.x TUI keeps its questions in its own process and opens no port. They reach Ovis
+ * through the ovis-questions plugin (integrations/opencode/ovis-questions.js), which runs inside
+ * that process and serves them on a unix socket named after the herdr pane: list, reply and
+ * reject, for a question pending now and nothing else. When there is no socket, or it does not
+ * answer, these calls return null and Ovis reads the prompt off the screen (dialogs/opencode.ts).
  */
 export const openCodeQuestionSocketOptions: { runtimeDir?: string } = {};
 
-const PANE_RE = /^[A-Za-z0-9:._-]{1,64}$/u;
 const MAX_REPLY_BYTES = 1024 * 1024;
-const MAX_FIELDS = 64;
+/** a reply makes two calls inside OpenCode (its pending list, then the reply), a second each at most */
+const REPLY_TIMEOUT_MS = 3_000;
 
+/** The pane's socket by the plugin's own rule, under this server's XDG_RUNTIME_DIR (tests point it elsewhere). */
 export function openCodeQuestionSocket(paneId: string, env: Record<string, string | undefined> = process.env): string | null {
   const runtime = openCodeQuestionSocketOptions.runtimeDir ?? env["XDG_RUNTIME_DIR"];
-  if (!runtime || !isAbsolute(runtime) || !PANE_RE.test(paneId)) return null;
-  return join(runtime, "ovis", "opencode-questions", `${paneId}.sock`);
+  if (!runtime || !isAbsolute(runtime)) return null;
+  return socketPathFor({ XDG_RUNTIME_DIR: runtime, HERDR_PANE_ID: paneId });
 }
 
-/** This user's own socket, or nothing: a path someone else made never gets an answer written to it. */
+/**
+ * This user's own socket in this user's own directories, or nothing: a path someone else made
+ * never gets an answer written to it.
+ */
 function ownSocket(path: string): boolean {
+  const uid = typeof process.getuid === "function" ? process.getuid() : null;
   try {
-    const stat = lstatSync(path);
-    return stat.isSocket() && (typeof process.getuid !== "function" || stat.uid === process.getuid());
+    const socket = lstatSync(path);
+    if (!socket.isSocket() || (uid !== null && socket.uid !== uid)) return false;
+    for (const dir of [dirname(path), dirname(dirname(path))]) {
+      const stat = lstatSync(dir);
+      if (!stat.isDirectory() || (uid !== null && stat.uid !== uid) || (stat.mode & 0o077) !== 0) return false;
+    }
+    return true;
   } catch { return false; }
 }
 
@@ -35,7 +46,7 @@ function ownSocket(path: string): boolean {
  * One request line and its one answer line. `sent` says whether the request left: an answer that
  * never came after it may still have been acted on.
  */
-function exchange(path: string, message: unknown, signal?: AbortSignal): Promise<{ answer: Record<string, unknown> | null; sent: boolean }> {
+function exchange(path: string, message: unknown, signal?: AbortSignal, timeoutMs = OPENCODE_HTTP_TIMEOUT_MS): Promise<{ answer: Record<string, unknown> | null; sent: boolean }> {
   return new Promise((resolve) => {
     if (signal?.aborted || !ownSocket(path)) { resolve({ answer: null, sent: false }); return; }
     let sent = false;
@@ -51,7 +62,7 @@ function exchange(path: string, message: unknown, signal?: AbortSignal): Promise
       resolve({ answer, sent });
     };
     const abort = () => finish(null);
-    const timer = setTimeout(abort, OPENCODE_HTTP_TIMEOUT_MS);
+    const timer = setTimeout(abort, timeoutMs);
     signal?.addEventListener("abort", abort, { once: true });
     socket.setEncoding("utf8");
     socket.once("connect", () => { sent = true; socket.write(`${JSON.stringify(message)}\n`); });
@@ -70,23 +81,24 @@ function exchange(path: string, message: unknown, signal?: AbortSignal): Promise
 }
 
 const text = (value: unknown, max: number): value is string => typeof value === "string" && value.length <= max;
+const ID_CHARS = 200;
 
 /** One question request from the plugin as the form the native card reads, or null for any other shape. */
 function formOf(item: unknown, sessionID: string): OpenCodeFormInfo | null {
   if (typeof item !== "object" || item === null) return null;
   const { id, sessionID: asker, rootSessionID, questions } = item as Record<string, unknown>;
-  if (!text(id, 200) || !id || !text(asker, 200) || (asker !== sessionID && rootSessionID !== sessionID)) return null;
-  if (!Array.isArray(questions) || questions.length === 0 || questions.length > MAX_FIELDS) return null;
+  if (!text(id, ID_CHARS) || !id || !text(asker, ID_CHARS) || (asker !== sessionID && rootSessionID !== sessionID)) return null;
+  if (!Array.isArray(questions) || questions.length === 0 || questions.length > MAX_QUESTIONS) return null;
   const fields: OpenCodeFormInfo["fields"] = [];
   for (const [index, question] of questions.entries()) {
     if (typeof question !== "object" || question === null) return null;
     const { question: asked, header, options, multiple, custom } = question as Record<string, unknown>;
-    if (!text(asked, 12_000) || !text(header ?? "", 200) || !Array.isArray(options) || options.length > MAX_FIELDS) return null;
+    if (!text(asked, MAX_ANSWER_CHARS) || !text(header ?? "", MAX_HEADER_CHARS) || !Array.isArray(options) || options.length > MAX_OPTIONS) return null;
     const choices: { value: string; label: string; description?: string }[] = [];
     for (const option of options) {
       if (typeof option !== "object" || option === null) return null;
       const { label, description } = option as Record<string, unknown>;
-      if (!text(label, 1_000) || !label || !text(description ?? "", 12_000)) return null;
+      if (!text(label, MAX_LABEL_CHARS) || !label || !text(description ?? "", MAX_ANSWER_CHARS)) return null;
       choices.push({ value: label, label, ...(description ? { description: description as string } : {}) });
     }
     fields.push({
@@ -129,15 +141,17 @@ export function pluginAnswers(fieldKeys: readonly string[], answers: Record<stri
 
 /**
  * Sends one reply through the plugin. Status follows the HTTP form the card's other path reads:
- * 200 sent, 409 no longer pending, 400 refused, 503 never reached the plugin, 0 sent but unconfirmed.
+ * 200 sent, 409 no longer pending, 400 refused by the plugin's checks, 503 not sent (no plugin, or
+ * it was busy), 0 sent but unconfirmed, 502 any other failure OpenCode reported.
  */
 export async function replyPluginQuestion(paneId: string, requestID: string, answers: string[][], signal?: AbortSignal): Promise<{ ok: boolean; status: number }> {
   const path = openCodeQuestionSocket(paneId);
   if (!path) return { ok: false, status: 503 };
-  const { answer, sent } = await exchange(path, { op: "reply", requestID, answers }, signal);
+  const { answer, sent } = await exchange(path, { op: "reply", requestID, answers }, signal, REPLY_TIMEOUT_MS);
   if (!answer) return { ok: false, status: sent ? 0 : 503 };
   if (answer.ok === true) return { ok: true, status: 200 };
   if (answer.code === "not_pending") return { ok: false, status: 409 };
+  if (answer.code === "busy") return { ok: false, status: 503 };
   if (answer.code === "unconfirmed") return { ok: false, status: 0 };
   if (answer.code === "invalid_answer" || answer.code === "invalid_request") return { ok: false, status: 400 };
   return { ok: false, status: 502 };

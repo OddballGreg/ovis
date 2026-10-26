@@ -4,7 +4,7 @@ import { createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { createBridge, listen, type BridgeClient } from "../integrations/opencode/ovis-questions.js";
+import { createBridge, listen, socketPathFor, type BridgeClient } from "../integrations/opencode/ovis-questions.js";
 import type { InteractivePrompt, PromptAnswer } from "../shared/protocol.ts";
 import { openCodeQuestionSocket, openCodeQuestionSocketOptions, pluginAnswers } from "./opencode-v1-questions.ts";
 import { handlePromptRequest } from "./prompt.ts";
@@ -17,14 +17,16 @@ const size = { question: "Pick a size", header: "Size", options: [{ label: "Smal
 
 let serial = 0;
 let root = "";
+let previous: string | undefined;
 let cleanup: (() => void)[] = [];
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "opencode-v1-questions-"));
+  previous = openCodeQuestionSocketOptions.runtimeDir;
   openCodeQuestionSocketOptions.runtimeDir = root;
 });
 afterEach(() => {
   for (const close of cleanup.splice(0)) close();
-  delete openCodeQuestionSocketOptions.runtimeDir;
+  openCodeQuestionSocketOptions.runtimeDir = previous;
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -35,6 +37,8 @@ afterEach(() => {
 async function pane({ plugin = true, screen = "" } = {}) {
   const paneId = `w9:p${++serial}`;
   const posted: { url: string; body?: unknown }[] = [];
+  /** how OpenCode answers a reply: 200 by default, any other status, or never */
+  const replying = { status: 200 as number | "never" };
   /** OpenCode's own pending list: unread (the plugin keeps its events) until `live` is set */
   const upstream = { live: null as unknown[] | null, settleAfter: Infinity };
   const client: BridgeClient = {
@@ -44,13 +48,18 @@ async function pane({ plugin = true, screen = "" } = {}) {
         if (--upstream.settleAfter < 0) upstream.live = [];
         return { data: upstream.live, response: { status: 200 } };
       },
-      post: async ({ url, body }) => { posted.push({ url, body }); return { data: true, response: { status: 200 } }; },
+      post: async ({ url, body }) => {
+        posted.push({ url, body });
+        if (replying.status === "never") return new Promise(() => {});
+        return replying.status < 400 ? { data: true, response: { status: replying.status } } : { error: {}, response: { status: replying.status } };
+      },
     },
     session: { get: async ({ path }) => ({ data: path.id === "ses_childfix1" ? { parentID: SESSION } : {} }) },
   };
   const bridge = createBridge({ client });
+  let handle: Awaited<ReturnType<typeof listen>> = null;
   if (plugin) {
-    const handle = await listen(bridge, openCodeQuestionSocket(paneId)!);
+    handle = await listen(bridge, openCodeQuestionSocket(paneId)!);
     cleanup.push(() => handle?.close());
   }
   const herdr = join(root, `herdr-${serial}.sock`);
@@ -83,7 +92,8 @@ async function pane({ plugin = true, screen = "" } = {}) {
   const url = new URL(`http://localhost/api/pane/prompt?pane_id=${encodeURIComponent(paneId)}`);
   const answerUrl = new URL("http://localhost/api/pane/prompt/answer");
   return {
-    bridge, posted, upstream,
+    bridge, posted, upstream, replying,
+    stopPlugin() { handle?.close(); },
     ask(questions: unknown[], sessionID = SESSION, id = `que_fix${serial}`) {
       bridge.handleEvent({ type: "question.asked", properties: { id, sessionID, questions } });
       if (upstream.live) upstream.live.push({ id, sessionID, questions });
@@ -163,7 +173,7 @@ describe("OpenCode 1.x questions through the ovis-questions plugin", () => {
     expect(p.posted).toEqual([]);
   });
 
-  it("does not send an answer to a question settled before it arrives", async () => {
+  it("refuses an answer to a card whose question was settled before the answer arrived", async () => {
     const p = await pane();
     const id = p.ask([size]);
     const prompt = (await p.read())!;
@@ -171,6 +181,38 @@ describe("OpenCode 1.x questions through the ovis-questions plugin", () => {
     p.bridge.handleEvent({ type: "question.replied", properties: { sessionID: SESSION, requestID: id, answers: [["Small"]] } });
     expect((await p.answer(prompt, { option_index: 1 })).status).toBe(409);
     expect(p.posted).toEqual([]);
+  });
+
+  it("keeps the card but sends nothing when the plugin stops answering", async () => {
+    const p = await pane();
+    p.ask([size]);
+    const prompt = (await p.read())!;
+    p.stopPlugin();
+    const response = await p.answer(prompt, { option_index: 0 });
+    expect(response.status).toBe(502);
+    expect(((await response.json()) as { error: { code: string; message: string } }).error).toEqual({
+      code: "service_unavailable", message: "OpenCode's question plugin did not answer. Your answer has not been sent.",
+    });
+    expect(p.posted).toEqual([]);
+  });
+
+  it("reports an unknown delivery when OpenCode does not confirm the reply", async () => {
+    const p = await pane();
+    p.ask([size]);
+    p.replying.status = "never";
+    const response = await p.answer((await p.read())!, { option_index: 0 });
+    expect(response.status).toBe(504);
+    expect(((await response.json()) as { error: { code: string } }).error.code).toBe("reply_unconfirmed");
+    expect(p.posted).toHaveLength(1);
+  }, 5_000);
+
+  it("treats a question OpenCode no longer knows as settled", async () => {
+    const p = await pane();
+    p.ask([size]);
+    p.replying.status = 404;
+    const response = await p.answer((await p.read())!, { option_index: 0 });
+    expect(response.status).toBe(409);
+    expect(((await response.json()) as { error: { code: string } }).error.code).toBe("prompt_changed");
   });
 
   it("reads OpenCode 1.x's own prompt off the screen when the pane has no plugin", async () => {
@@ -185,6 +227,20 @@ describe("OpenCode 1.x questions through the ovis-questions plugin", () => {
     const p = await pane({ screen: v1Screen });
     p.ask([size], "ses_someoneelse1");
     expect((await p.read())?.title).toBe("Question");
+  });
+});
+
+describe("the pane's socket", () => {
+  it("is where the plugin listens", () => {
+    for (const pane of ["w1:p5", "w2:p1C", "x"]) expect(openCodeQuestionSocket(pane)).toBe(socketPathFor({ XDG_RUNTIME_DIR: root, HERDR_PANE_ID: pane }));
+    for (const pane of ["../x", "w1/p5", ""]) expect(openCodeQuestionSocket(pane)).toBeNull();
+  });
+
+  it("is never under the user's runtime directory in a test run", () => {
+    openCodeQuestionSocketOptions.runtimeDir = previous;
+    expect(previous).toBeDefined();
+    const real = process.env["XDG_RUNTIME_DIR"];
+    if (real) expect(openCodeQuestionSocket("w1:p1")!.startsWith(real)).toBe(false);
   });
 });
 
