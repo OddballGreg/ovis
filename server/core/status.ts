@@ -28,6 +28,7 @@ import type { PreferenceStore } from "../preferences.ts";
 import { promptWaitEnded, type OpenCodePromptState } from "../prompt.ts";
 import { type AlertTiming, createPushService, defaultStateDir } from "../push.ts";
 import { SessionPlans } from "../session-plan.ts";
+import { memoryEndpoint, SessionImportance, WaitClocks, type MemoryEndpoint } from "../session-importance.ts";
 import type { Telemetry } from "../telemetry.ts";
 import type { UsageLoginService } from "../usage-login.ts";
 import type { UsageService } from "../usage.ts";
@@ -50,6 +51,8 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
     openCodeState?: OpenCodePromptState;
     /** this server's workspace-order counter (server/order-sequence.ts); createServer makes the one there is */
     orderSequence?: OrderSequence;
+    /** opencode-memory for Settings → Agents order → Importance (server/session-importance.ts); null turns it off, absent reads OVIS_MEMORY_URL */
+    importance?: { endpoint?: MemoryEndpoint | null; fetch?: typeof fetch; pollMs?: number };
   };
   devices: DeviceStore;
   /** the preferences every browser shares (server/preferences.ts): web push reads the muted panes from it */
@@ -122,6 +125,19 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
     codexPath: async (pane) => codexOpenRollout(pane.pane_id, pane.cwd, await paneCodexHome(pane.pane_id, options.codexHome)),
     onChange: (paneId, summary) => planChanged(paneId, summary),
   });
+  /** whether a browser watches: importance is asked of memory only then. The PC roster's listeners join once it exists */
+  let watched = (): boolean => clients.size > 0;
+  const importance = new SessionImportance({
+    endpoint: options.importance?.endpoint === undefined ? memoryEndpoint() : options.importance.endpoint,
+    fetch: options.importance?.fetch,
+    pollMs: options.importance?.pollMs,
+    now: options.statusNow,
+    active: () => watched(),
+    onChange: () => broadcastAll({ type: "session-changed" }),
+    log: (line) => console.log(line),
+  });
+  /** when each pane came to its state, beside the shared preferences (preferences.json) so a restart keeps them */
+  const waitClocks = new WaitClocks(join(options.stateDir ?? defaultStateDir(), "wait-clocks.json"), options.statusNow);
   /** herdr's snapshot with OmO's and GJC's own status in it: what the completion tracker and web push are given */
   const rawSnapshot = async (): Promise<SessionSnapshot> => {
     const promptCheckpoint = options.openCodeState?.checkpoint();
@@ -155,8 +171,20 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
         return background > 0 || waiting || plan !== null ? { ...pane, ...(background > 0 ? { background_tasks: background } : {}), ...(waiting ? { background_wait: true as const } : {}), ...(plan !== null ? { plan } : {}) } : pane;
       }),
     }, completions);
-    return order ? { ...settled, ...order } : settled;
+    const ranked = withImportance(settled);
+    return order ? { ...ranked, ...order } : ranked;
   };
+  /** Each pane's wait clock and its session's importance, as the Agents list's Importance order reads them. */
+  function withImportance(snapshot: SessionSnapshot): SessionSnapshot {
+    const seqs = new Map(snapshot.agents.map((agent) => [agent.pane_id, agent.state_change_seq]));
+    const waits = waitClocks.stamp(snapshot.panes, (paneId) => seqs.get(paneId) ?? undefined);
+    importance.refresh(snapshot.panes);
+    return { ...snapshot, panes: snapshot.panes.map((pane) => {
+      const wait = waits.get(pane.pane_id);
+      const level = importance.of(pane);
+      return wait || level ? { ...pane, ...(wait ? { wait } : {}), ...(level ? { importance: level } : {}) } : pane;
+    }) };
+  }
   /**
    * A browser visit for the daily active message: the call is made now so the visit's day is the
    * trigger's, the panes are read after. Nothing is read while telemetry cannot send; a socket open
@@ -180,6 +208,7 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
     ({ type: "pane-status", pane_id: paneId, agent_status: status, ...finishes.status(paneId, status), ...about, ...(waits.waiting(paneId) ? { background_wait: true as const } : {}) });
   const machines = options.machines === false ? null : new MachineManager(options.stateDir ?? defaultStateDir(), push, completions, clientSnapshot, { bootId: options.orderSequence?.epoch });
   if (machines && options.herdrProfiles) machines.watchHerdrProfiles(options.herdrProfiles);
+  if (machines) watched = () => clients.size > 0 || machines.watched();
 
   function broadcastAll(message: ServerMessage): void {
     machines?.localMessage(message);
@@ -348,6 +377,7 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
       holdPendingPane(paneId, { code: "pane_not_found", message: "The pane ended; its pending messages were not sent" });
       pending.forget(paneId);
       waits.forget(paneId);
+      waitClocks.forget(paneId);
       completions.forget(paneId);
       // the terminal is gone, so is whatever its chat parsed (server/conversation.ts)
       forgetPaneTranscriptState(paneId);
@@ -363,10 +393,11 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
   const waitTimer = setInterval(waitsRanOut, 1000);
   waitTimer.unref?.();
   plans.start();
+  importance.start();
 
   // a verified OpenCode pane is tracked like a usage-login pane: closing it reaches onPaneEnded above
   const untrackOpenCode = trackVerifiedOpenCodePanes((paneId) => collector.trackPane(paneId));
   const tracked = { ...collector, stop() { untrackOpenCode(); stopMutes(); collector.stop(); } };
 
-  return { push, omo, gjc, claudeAgents, plans, clientSnapshot, countVisit, machines, broadcastAll, logPushError, collector: tracked, waitTimer };
+  return { push, omo, gjc, claudeAgents, plans, importance, waitClocks, clientSnapshot, countVisit, machines, broadcastAll, logPushError, collector: tracked, waitTimer };
 }

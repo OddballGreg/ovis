@@ -1335,6 +1335,8 @@ async function route(url: URL, method: string, init: RequestInit | undefined, in
     structureChanged();
     return json({ ok: true });
   }
+  // the demo has no opencode-memory: its agents stay neutral, and a level set by hand is taken and forgotten
+  if (path === "/api/agent/importance") return json({ ok: true });
   if (path === "/api/agent/rename") {
     const body = await bodyOf(init, input);
     const paneId = String(body["pane_id"] ?? "");

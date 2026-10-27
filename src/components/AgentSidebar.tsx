@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { Bell, BellOff, ChevronDown, ChevronRight, Ellipsis, Pin, PinOff, Terminal } from "lucide-react";
+import { Bell, BellOff, ChevronDown, ChevronRight, Ellipsis, Flag, Pin, PinOff, Terminal, X } from "lucide-react";
 
 import type { Machine } from "../../shared/machines.ts";
 import { paneStorageId } from "../../shared/machines.ts";
 import { paneTokenValues } from "../../shared/pane-tokens.ts";
-import type { AgentStatus, PlanSummary } from "../../shared/protocol.ts";
+import { IMPORTANCE_LEVELS, type AgentStatus, type ImportanceLevel, type PaneImportance, type PlanSummary } from "../../shared/protocol.ts";
+import { setAgentImportance } from "../lib/api.ts";
+import { userErrorMessage } from "../lib/userError.ts";
 import { currentAgentRowTokens, subscribeAgentRowTokens } from "../lib/agentRowTokens.ts";
 import { useT } from "../lib/i18n.ts";
 import { useAnnouncedText } from "../lib/useAnnouncedText.ts";
@@ -41,14 +43,18 @@ interface AgentRowBodyProps {
   note?: string | null;
   /** its alerts are off for everyone (lib/paneMutes.ts): said beside the state, as a word for a screen reader */
   muted: boolean;
+  /** Settings → Agents order → Importance: the row's band from opencode-memory, null when memory said nothing (neutral P2) */
+  importance?: PaneImportance | null;
 }
 
 /**
  * One agent in a list: the coding agent's mark, what it is working on, who and where it is, what
  * its plugins report, and how it is doing.
  */
-function AgentRowBody({ mark, markKind, title, name, context, tokens, backgroundTasks, plan, status, note = null, muted }: AgentRowBodyProps) {
+function AgentRowBody({ mark, markKind, title, name, context, tokens, backgroundTasks, plan, status, note = null, muted, importance }: AgentRowBodyProps) {
   const t = useT();
+  const level = importance === undefined ? null : importance?.level ?? "P2";
+  const levelWords = importance === undefined ? "" : importance === null ? t("No importance from opencode-memory, so it counts as P2") : importance.reason || importance.source;
   return <>
     <span className="sidebar-mark" aria-hidden="true">{mark !== null ? <AgentMark agent={mark} size={18} /> : <Terminal />}</span>
     <span className="agent-copy">
@@ -68,6 +74,9 @@ function AgentRowBody({ mark, markKind, title, name, context, tokens, background
     </span>
     <span className="agent-row-status">
       {note !== null && <span className="sidebar-filter-note">{note}</span>}<BackgroundBadge count={backgroundTasks} /><PlanBadge plan={plan} />
+      {level !== null && <span className={`agent-importance is-${level.toLowerCase()}${importance === null || importance?.source === "neutral" ? " is-neutral" : ""}`} title={levelWords} data-testid="agent-importance">
+        <span aria-hidden="true">{level}</span><span className="visually-hidden">{t("Importance {level}: {reason}", { level, reason: levelWords })}</span>
+      </span>}
       {muted && <span className="agent-muted" title={t("Alerts muted")} data-testid="alerts-muted"><BellOff aria-hidden="true" /><span className="visually-hidden">{t("Alerts muted")}</span></span>}
     </span>
     {/* drawn at the row's right edge, after its ⋯, as a workspace row's state is (AgentSidebar.css) */}
@@ -86,6 +95,11 @@ export interface AgentSidebarProps {
   onSelect(machineId: string, paneId: string): void;
 }
 
+/** how often Importance order reads the wait clocks again */
+const IMPORTANCE_TICK_MS = 30_000;
+/** whether herdr names the pane's OpenCode session, which opencode-memory keeps an importance for */
+const hasAgentSession = (pane: { agent_session?: { kind: string; value: string } | null }): boolean =>
+  pane.agent_session?.kind === "id" && pane.agent_session.value.startsWith("ses_");
 /** the width under which the sidebar is a drawer (src/styles.css) */
 const DRAWER_QUERY = "(max-width: 768px)";
 /** whether this screen draws the sidebar as the phone's drawer */
@@ -134,7 +148,16 @@ export function AgentSidebar({ machines, selectedMachineId, selectedPaneId, stat
   // Settings → Agents order: herdr's order, or Activity or Longest wait within each PC (each herdr counts its own
   // changes); the pinned rows stand first, in the order they were pinned (lib/agentRoster.ts)
   const order = settings.agentOrder;
-  const roster = useMemo(() => agentRoster(machines, { order, seqs: activity.seqs, status: activity.status, pinned }), [machines, order, activity, pinned]);
+  const aging = settings.importanceAging;
+  // Importance ages a row by its wait, so its order is read again as the clock moves on
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (order !== "importance") return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), IMPORTANCE_TICK_MS);
+    return () => window.clearInterval(timer);
+  }, [order]);
+  const roster = useMemo(() => agentRoster(machines, { order, seqs: activity.seqs, status: activity.status, pinned, now, aging }), [machines, order, activity, pinned, now, aging]);
   const allRows = useMemo(() => [...roster.pinned, ...roster.rest], [roster]);
   // the sidebar's filter (lib/sidebarFilter.ts) keeps the matched rows and the selected one, in the same
   // order and cards; the pins and their pruning go on reading every row
@@ -173,6 +196,15 @@ export function AgentSidebar({ machines, selectedMachineId, selectedPaneId, stat
     sectionRef.current?.querySelector<HTMLButtonElement>(`.agent-item[data-pin-key="${CSS.escape(target.key)}"] .${target.control}`)?.focus({ preventScroll: true });
   }, [pinned]);
   const [menu, setMenu] = useState<PinMenu | null>(null);
+  // a level memory refused to set, said until it is dismissed or the next one lands
+  const [importanceError, setImportanceError] = useState<string | null>(null);
+  const setImportance = (machineId: string, paneId: string, level: ImportanceLevel | null): void => {
+    setImportanceError(null);
+    setAgentImportance(paneId, level, machineId).catch((error: unknown) => {
+      const { message, detail } = userErrorMessage(error);
+      setImportanceError(t("Importance was not set: {reason}", { reason: detail ?? message }));
+    });
+  };
   const closeMenu = useCallback(() => setMenu(null), []);
   const menuRow = menu === null ? undefined : rows.find(({ machine, entry }) => machine.state !== "disconnected" && machine.state !== "error" && sidebarPinKey(machine.id, entry.pane.pane_id) === menu.key);
   // a row that left the list or whose PC stopped connecting takes its menu with it; a retry keeps it
@@ -229,7 +261,8 @@ export function AgentSidebar({ machines, selectedMachineId, selectedPaneId, stat
           event.dataTransfer.setData(PANE_DRAG_TYPE, paneDragData({ machineId: machine.id, paneId: pane.pane_id }));
         }}>
         {/* a saved roster's state is not news: a PC that is away says nothing about its agents */}
-        <AgentRowBody mark={mark} markKind={markKind} title={title} name={name} context={context} tokens={tokens} backgroundTasks={online ? pane.background_tasks : 0} plan={online ? pane.plan : undefined} status={online ? activity.status(machine.id, pane) : undefined} note={filterContext && selected ? t("Selected") : null} muted={muted?.includes(paneMuteKey(machine.id, pane.pane_id)) === true} />
+        <AgentRowBody mark={mark} markKind={markKind} title={title} name={name} context={context} tokens={tokens} backgroundTasks={online ? pane.background_tasks : 0} plan={online ? pane.plan : undefined} status={online ? activity.status(machine.id, pane) : undefined} note={filterContext && selected ? t("Selected") : null} muted={muted?.includes(paneMuteKey(machine.id, pane.pane_id)) === true}
+          importance={order === "importance" && online && hasAgentSession(pane) ? pane.importance ?? null : undefined} />
       </button>
       <div className="agent-actions">
         <button type="button" className="sidebar-row-action row-menu-toggle" aria-label={t("More for {title}", { title })} aria-haspopup="menu" aria-expanded={menuOpen} onClick={(event) => toggleMenu(event.currentTarget)}>
@@ -248,6 +281,9 @@ export function AgentSidebar({ machines, selectedMachineId, selectedPaneId, stat
   const menuPinned = menu !== null && pinned.includes(menu.key);
   const menuShown = menuRow === undefined ? null : describe(menuRow);
   const menuMuted = menuRow !== undefined && muted !== null && muted.includes(paneMuteKey(menuRow.machine.id, menuRow.entry.pane.pane_id));
+  // only an OpenCode session has an importance at opencode-memory; the level set by hand, if any, is the one ticked
+  const menuSession = menuRow !== undefined && hasAgentSession(menuRow.entry.pane);
+  const menuOverride = menuRow?.entry.pane.importance?.override?.level ?? null;
   const runPin = (state: PinMenu): void => {
     // where the menu hands the focus back (lib RowMenu): the ⋯ itself unless the right-click said otherwise
     const back = state.previousFocus === undefined ? state.anchor : state.previousFocus;
@@ -268,6 +304,10 @@ export function AgentSidebar({ machines, selectedMachineId, selectedPaneId, stat
     </button>
     <div className="agent-list-contents" id={listId} hidden={folded}>
       <p className={shownEmpty === null ? "visually-hidden" : "agent-empty"} role="status">{shownEmpty}</p>
+      {importanceError !== null && <p className="agent-importance-error" role="alert">
+        <span>{importanceError}</span>
+        <button type="button" className="icon-button" aria-label={t("Dismiss")} onClick={() => setImportanceError(null)}><X aria-hidden="true" /></button>
+      </p>}
       {rows.length > 0 && <>
         {split.pinned.length > 0 && <>
           <p className="sidebar-pinned-label" aria-hidden="true"><span><Pin />{t("Pinned")}</span></p>
@@ -285,6 +325,11 @@ export function AgentSidebar({ machines, selectedMachineId, selectedPaneId, stat
         id: "mute", label: menuMuted ? t("Unmute alerts") : t("Mute alerts"), icon: menuMuted ? Bell : BellOff, checked: menuMuted, disabled: watching,
         run: () => toggleMute(menuRow.machine.id, menuRow.entry.pane.pane_id),
       }]),
+      ...(!menuSession || menuRow === undefined ? [] : [null, ...IMPORTANCE_LEVELS].map((level, index) => ({
+        id: `importance-${level ?? "auto"}`, label: level === null ? t("Importance: Auto") : t("Importance: {level}", { level }), icon: Flag,
+        divider: index === 0, current: menuOverride === level, disabled: watching,
+        run: () => setImportance(menuRow.machine.id, menuRow.entry.pane.pane_id, level),
+      }))),
     ]} />}
   </section>;
 }

@@ -50,7 +50,28 @@ export type HerdrPane = PaneInfo & {
   background_tasks?: number; background_wait?: true; plan?: PlanSummary;
   /** This bridge's counter of transitions into displayed DONE, scoped by finish_epoch. */
   finish_id?: number;
+  /** how much this pane's OpenCode session matters, from opencode-memory (server/session-importance.ts); absent when memory said nothing */
+  importance?: PaneImportance;
+  /** when this server first saw the pane in its current state, kept across restarts (server/session-importance.ts) */
+  wait?: PaneWait;
 };
+
+/** P0 is the most urgent band, P3 the least; a pane memory knows nothing of counts as P2. */
+export type ImportanceLevel = "P0" | "P1" | "P2" | "P3";
+export const IMPORTANCE_LEVELS: readonly ImportanceLevel[] = ["P0", "P1", "P2", "P3"];
+export const isImportanceLevel = (value: unknown): value is ImportanceLevel => typeof value === "string" && (IMPORTANCE_LEVELS as readonly string[]).includes(value);
+export interface PaneImportance {
+  level: ImportanceLevel;
+  /** what decided the level: queue, effort, objective, override or neutral */
+  source: string;
+  reason: string;
+  /** a level set by hand, which wins until it expires */
+  override?: { level: ImportanceLevel; expires_at: string | null } | null;
+}
+/** `since` is epoch milliseconds; `status` is the state it was stamped for, so a newer status frame shows a fresh wait */
+export interface PaneWait { since: number; status: AgentStatus }
+/** POST /api/agent/importance: a level set by hand on the pane's OpenCode session, or null to go back to Auto */
+export interface AgentImportanceRequest { pane_id: string; level: ImportanceLevel | null; ttl_hours?: number }
 /** Missing finish fields on an older bridge mean no finish can be acknowledged here. */
 export type SessionSnapshot = Omit<HerdrSnapshot, "panes"> & {
   panes: HerdrPane[];

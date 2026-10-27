@@ -344,6 +344,8 @@ export class MachineManager {
   }
   private runtime(machine: Machine): Runtime { return { machine, attempts: 0, generation: 0, refreshing: false, refreshQueued: false, snapshotRevision: 0, terminals: new Set() }; }
   list(): Machine[] { return [this.local, ...[...this.machines.values()].map((r) => r.machine)]; }
+  /** whether some browser listens to the PCs' events now */
+  watched(): boolean { return this.listeners.size > 0; }
   subscribe(listener: (event: MachineEvent) => void): () => void {
     this.listeners.add(listener);
     listener({ type: "machines", machines: this.list() });

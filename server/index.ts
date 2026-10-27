@@ -61,6 +61,8 @@ import { reapOpencodeV1Orphans, stopOpencodeV1 } from "./opencode-v1.ts";
 import { MachineRelay } from "./machine-relay.ts";
 import { sameOrigin } from "./machine-security.ts";
 import { handlePluginRequest } from "./plugin-routes.ts";
+import { handleImportanceRequest } from "./importance-routes.ts";
+import type { MemoryEndpoint } from "./session-importance.ts";
 
 /** The gap between a composer message's text and its Enter (see submitText). */
 export const SUBMIT_DELAY_MS = 120;
@@ -183,6 +185,8 @@ export function createServer(
     backgroundWait?: { grace: number; limit: number };
     /** Clock for background holds and alert turn durations; tests advance it explicitly. */
     statusNow?: () => number;
+    /** opencode-memory for the Importance order (server/session-importance.ts): absent reads OVIS_MEMORY_URL, which a test leaves off */
+    importance?: { endpoint?: MemoryEndpoint | null; fetch?: typeof fetch; pollMs?: number };
     /** ATTACH_RETRY_FOR_MS; tests shorten it */
     attachRetryForMs?: number;
     /** ATTACH_HELD_RETRY_MS; tests shorten it */
@@ -245,7 +249,7 @@ export function createServer(
   const draftTimer = setInterval(() => openCodeState.prune(), 60_000);
   draftTimer.unref();
   const core = createCore({ options: { ...options, stateDir, openCodeState, orderSequence }, devices, preferences, usage, usageLogin, TYPED_SETTLE_MS, KEY_SETTLE_MS, SUBMIT_DEADLINE_MS, SUBMIT_DELAY_MS, DRAFT_CLEAR_WAIT_MS, DRAFT_CLEAR_POLL_MS });
-  const { sidecar, serialize, push, logPushError, omo, claudeAgents, plans, clientSnapshot, machines, broadcastAll, collector, queueFirstMessage } = core;
+  const { sidecar, serialize, push, logPushError, omo, claudeAgents, plans, importance, clientSnapshot, machines, broadcastAll, collector, queueFirstMessage } = core;
   // started after createCore's Node probe (server/pty/sidecar.ts), which can hold the thread up to 3 s: that wait
   // would count against the read's own 2.5 s limit, and a read cut short leaves the owner unknown for 5 minutes
   identityOf(false, null);
@@ -281,7 +285,7 @@ export function createServer(
       const url = new URL(request.url);
       let { pathname } = url;
       const bridgeAuthorized = isAuthenticated(request, bridgeToken);
-      const bridgePath = pathname === "/api/bridge" || pathname === "/api/session" || pathname === SESSION_HISTORY_PATH || pathname === SESSION_RESUME_PATH || pathname === "/api/agents" || pathname === "/api/agent/rename" || pathname === "/api/agent/commands" || pathname === "/api/agent/models" || pathname === "/api/integrations" || pathname === "/api/plugins/actions" || pathname === "/api/plugin/action" || pathname.startsWith("/api/pane/") || pathname.startsWith("/api/workspace/") || pathname.startsWith("/api/worktree/") || pathname.startsWith("/api/tab/") || pathname === "/api/layout/ratio" || pathname.startsWith("/api/fs/") || pathname === "/ws";
+      const bridgePath = pathname === "/api/bridge" || pathname === "/api/session" || pathname === SESSION_HISTORY_PATH || pathname === SESSION_RESUME_PATH || pathname === "/api/agents" || pathname === "/api/agent/rename" || pathname === "/api/agent/importance" || pathname === "/api/agent/commands" || pathname === "/api/agent/models" || pathname === "/api/integrations" || pathname === "/api/plugins/actions" || pathname === "/api/plugin/action" || pathname.startsWith("/api/pane/") || pathname.startsWith("/api/workspace/") || pathname.startsWith("/api/worktree/") || pathname.startsWith("/api/tab/") || pathname === "/api/layout/ratio" || pathname.startsWith("/api/fs/") || pathname === "/ws";
       const ip = bunServer.requestIP(request);
       const loopback = ip !== null && isLoopbackAddress(ip.address);
       const forwarded = cameThroughProxy(request.headers);
@@ -377,7 +381,7 @@ export function createServer(
         if (pathname.startsWith("/api/machines/local/")) {
           if (!sameOrigin(request) || (request.method !== "GET" && request.headers.get("x-herdr-machine") !== "1")) return jsonResponse({ error: { code: "invalid_origin", message: "Use PC controls from this app" } }, 403);
           pathname = pathname.replace("/api/machines/local/", "/api/");
-          if (!/^\/api\/(session|agents|integrations|pane\/|workspace\/|worktree\/|tab\/|layout\/ratio$|agent\/(?:rename|commands)$|plugins\/actions$|plugin\/action$|sessions\/(?:history|resume)$)/.test(pathname)) return badRequest("invalid_route", "Unknown PC endpoint");
+          if (!/^\/api\/(session|agents|integrations|pane\/|workspace\/|worktree\/|tab\/|layout\/ratio$|agent\/(?:rename|importance|commands)$|plugins\/actions$|plugin\/action$|sessions\/(?:history|resume)$)/.test(pathname)) return badRequest("invalid_route", "Unknown PC endpoint");
           url.pathname = pathname;
         } else {
           // a worktree made with an agent waits on git and then agent.start, up to 150 s on the PC, and a
@@ -533,6 +537,9 @@ export function createServer(
 
       const paneResponse = await handlePaneRequest(request, url, pathname, options);
       if (paneResponse) return paneResponse;
+
+      const importanceResponse = await handleImportanceRequest(request, pathname, importance);
+      if (importanceResponse) return importanceResponse;
 
       const modelResponse = await handleOpencodeModelRequest(request, url, pathname, { serialize });
       if (modelResponse) return modelResponse;
