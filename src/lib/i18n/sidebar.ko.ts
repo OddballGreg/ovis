@@ -53,4 +53,9 @@ export const SIDEBAR_KO: Record<string, string> = {
   "Collapse": "접기",
   "Expand": "펼치기",
   "Shell": "셸",
+  "No importance from opencode-memory, so it counts as P2": "opencode-memory에서 받은 중요도가 없어 P2로 칩니다",
+  "Importance {level}": "중요도 {level}",
+  "Importance was not set: {reason}": "중요도를 설정하지 못했습니다: {reason}",
+  "Importance: Auto": "중요도: 자동",
+  "Importance: {level}": "중요도: {level}",
 };

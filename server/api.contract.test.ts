@@ -1027,7 +1027,7 @@ describe("mutation body validation", () => {
     for (const path of [
       "/api/workspace/create", "/api/tab/create", "/api/tab/rename", "/api/tab/close", "/api/tab/move", "/api/tab/move-to-workspace", "/api/workspace/rename", "/api/workspace/move", "/api/workspace/close",
       "/api/pane/rename", "/api/pane/input", "/api/pane/keys", "/api/pane/close", "/api/pane/image",
-      "/api/pane/scroll", "/api/agent/rename",
+      "/api/pane/scroll", "/api/agent/rename", "/api/agent/importance",
     ]) {
       for (const body of [null, [], "text", 42, true]) {
         const response = await fetch(`${base()}${path}`, {
@@ -2092,6 +2092,8 @@ describe("workspace and discovery endpoints", () => {
       ["/api/layout/ratio", { tab_id: "x", path: [0], ratio: 0.5 }, "invalid_path"],
       ["/api/layout/ratio", { tab_id: "x", path: [], ratio: 1 }, "invalid_ratio"],
       ["/api/agent/rename", {}, "missing_pane_id"],
+      ["/api/agent/importance", {}, "missing_pane_id"],
+      ["/api/agent/importance", { pane_id: "x", level: "P9" }, "invalid_level"],
     ] as const) {
       const res = await fetch(`${base()}${path}`, {
         method: "POST",

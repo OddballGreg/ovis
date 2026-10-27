@@ -12,7 +12,7 @@ import { exactChordRisk, isReservedShortcutKey, parseExactChord } from "../lib/s
 import { WEB_LINK_TARGETS } from "../lib/webPanel.ts";
 import { FILE_OPEN_TARGETS } from "../lib/filePresentation.ts";
 import { CLAUDE_LAUNCH_MODES, CODEX_LAUNCH_MODES, type ClaudeLaunchMode, type CodexLaunchMode } from "../lib/agentLaunchMode.ts";
-import { CHAT_FONT_MAX, CHAT_FONT_MIN, CHAT_WIDTHS, chatFontSize, DEFAULT_SETTINGS, DIFF_STYLES, MARKDOWN_WIDTHS, QUICK_REPLIES_MAX, QUICK_REPLY_MAX_CHARS, TERMINAL_FONT_MAX, TERMINAL_FONT_MIN, TERMINAL_WHEEL_SPEED_MAX, TERMINAL_WHEEL_SPEED_MIN, DICTATION_LANGUAGES, VOICE_BUTTONS, useSettings, forgetPaneViews, uiFontSize, type DictationLanguage, type VoiceButton } from "../lib/settings.ts";
+import { CHAT_FONT_MAX, CHAT_FONT_MIN, CHAT_WIDTHS, chatFontSize, DEFAULT_SETTINGS, DIFF_STYLES, MARKDOWN_WIDTHS, QUICK_REPLIES_MAX, QUICK_REPLY_MAX_CHARS, TERMINAL_FONT_MAX, TERMINAL_FONT_MIN, TERMINAL_WHEEL_SPEED_MAX, TERMINAL_WHEEL_SPEED_MIN, DICTATION_LANGUAGES, IMPORTANCE_AGING_FACTORS, IMPORTANCE_AGING_MINUTES, VOICE_BUTTONS, useSettings, forgetPaneViews, uiFontSize, type DictationLanguage, type VoiceButton } from "../lib/settings.ts";
 import { pickTheme, rowFor, THEME_IDS, type Mode, type ThemeId } from "../lib/themes.ts";
 import { LANGUAGE_NAMES, LANGUAGE_SETTINGS, useLocale, useT } from "../lib/i18n.ts";
 import { useFocusTrap } from "../lib/useFocusTrap.ts";
@@ -48,6 +48,9 @@ import { useMediaQuery } from "../lib/useMediaQuery.ts";
 import { CrashProbe, RegionCrash } from "./AppCrash.tsx";
 import { RenderBoundary } from "./RenderBoundary.tsx";
 import { requestedSettingsPage, requestSettingsPage, type SettingsPageId } from "../lib/paletteSettings.ts";
+
+/** the offered values, with a hand-set one that is not among them kept in its place */
+const agingChoices = (offered: readonly number[], current: number): number[] => [...new Set([...offered, current])].sort((a, b) => a - b);
 
 export interface SettingsDialogProps {
   open: boolean;
@@ -358,9 +361,23 @@ function AppearancePage() {
       <SettingsRow label={t("Sidebar rows")} description={t("Name each workspace on one line, or show what its agent is doing with the workspace under it")} wide>
         <Segmented label={t("Sidebar rows")} value={settings.sidebarRows} onChange={(sidebarRows) => update({ sidebarRows })} options={[{ value: "one", label: t("One line") }, { value: "two", label: t("Two lines") }]} />
       </SettingsRow>
-      <SettingsRow label={t("Agents order")} description={t("Activity keeps a waiting agent on top, then the one that changed last. Longest wait lists agents asking for input, then unread finishes, then ready, then working, each oldest first. herdr's own order is not changed")} wide>
-        <Segmented label={t("Agents order")} value={settings.agentOrder} onChange={(agentOrder) => update({ agentOrder })} options={[{ value: "workspace", label: t("Workspaces") }, { value: "activity", label: t("Activity") }, { value: "waiting", label: t("Longest wait") }]} />
+      <SettingsRow label={t("Agents order")} description={t("Activity keeps a waiting agent on top, then the one that changed last. Longest wait lists agents asking for input, then unread finishes, then ready, then working, each oldest first. Importance keeps those groups and puts the band opencode-memory gives each OpenCode session first, P0 to P3. herdr's own order is not changed")} wide>
+        <Segmented label={t("Agents order")} value={settings.agentOrder} onChange={(agentOrder) => update({ agentOrder })} options={[{ value: "workspace", label: t("Workspaces") }, { value: "activity", label: t("Activity") }, { value: "waiting", label: t("Longest wait") }, { value: "importance", label: t("Importance") }]} />
       </SettingsRow>
+      {settings.agentOrder === "importance" && <>
+        {(["p1", "p2", "p3"] as const).map((band) => (
+          <SettingsRow key={band} label={t("{band} wait limit", { band: band.toUpperCase() })} description={band === "p1" ? t("An agent that waits longer than this goes first in its band, longest wait first. A P0 has no limit and goes by longest wait at once") : undefined} htmlFor={`settings-importance-${band}`}>
+            <SettingsSelect id={`settings-importance-${band}`} value={String(settings.importanceAging[band])} onChange={(event) => update({ importanceAging: { ...settings.importanceAging, [band]: Number(event.target.value) } })}>
+              {agingChoices(IMPORTANCE_AGING_MINUTES, settings.importanceAging[band]).map((minutes) => <option key={minutes} value={minutes}>{t("{minutes} min", { minutes })}</option>)}
+            </SettingsSelect>
+          </SettingsRow>
+        ))}
+        <SettingsRow label={t("Joins the top band after")} description={t("An agent that waits this many times its band's limit is ordered with the most urgent band of its group, so none waits forever")} htmlFor="settings-importance-factor">
+          <SettingsSelect id="settings-importance-factor" value={String(settings.importanceAging.factor)} onChange={(event) => update({ importanceAging: { ...settings.importanceAging, factor: Number(event.target.value) } })}>
+            {agingChoices(IMPORTANCE_AGING_FACTORS, settings.importanceAging.factor).map((factor) => <option key={factor} value={factor}>{t("{factor}× its limit", { factor })}</option>)}
+          </SettingsSelect>
+        </SettingsRow>
+      </>}
       <SettingsRow label={t("Agent row title")} description={t("Name an agent row by its agent's title, or by its tab's name once the tab is renamed, with the agent's title under it")} wide>
         <Segmented label={t("Agent row title")} value={settings.agentRowTitle} onChange={(agentRowTitle) => update({ agentRowTitle })} options={[{ value: "agent", label: t("Agent") }, { value: "tab", label: t("Tab name") }]} />
       </SettingsRow>

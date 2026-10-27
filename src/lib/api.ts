@@ -9,6 +9,8 @@ import type {
   OpencodeModelCatalog,
   OpencodeModelRequest,
   AgentRenameRequest,
+  AgentImportanceRequest,
+  ImportanceLevel,
   CommandOutcome,
   ConversationResponse,
   CreateWorktreeRequest,
@@ -568,6 +570,11 @@ export async function renamePane(paneId: string, label: string, machineId = "loc
 /** POST /api/agent/rename: the live name of the agent in the pane, what `herdr agent prompt <name>` addresses; null clears it. */
 export async function renameAgent(paneId: string, name: string | null, machineId = "local"): Promise<void> {
   await sendJson(machinePath(machineId, "agent/rename"), "POST", { pane_id: paneId, name } satisfies AgentRenameRequest);
+}
+
+/** POST /api/agent/importance: the pane's OpenCode session's importance set by hand at opencode-memory, through this server; null is Auto. */
+export async function setAgentImportance(paneId: string, level: ImportanceLevel | null, machineId = "local"): Promise<void> {
+  await sendJson(machinePath(machineId, "agent/importance"), "POST", { pane_id: paneId, level } satisfies AgentImportanceRequest);
 }
 
 /**

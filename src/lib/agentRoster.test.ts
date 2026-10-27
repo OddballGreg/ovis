@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import type { Machine, MachineState } from "../../shared/machines.ts";
 import type { AgentStatus, HerdrPane, SessionSnapshot } from "../../shared/protocol.ts";
 import fixture from "../../site/demo/fixtures/machines.json";
-import { agentRoster } from "./agentRoster.ts";
+import { agentRoster, paneWaitMs } from "./agentRoster.ts";
 import { sidebarPinKey } from "./sidebarPins.ts";
 
 const template = fixture.machines[0]!.snapshot as SessionSnapshot;
@@ -39,5 +39,29 @@ describe("agent roster", () => {
     const split = agentRoster(machines, { order: "waiting", seqs: (id) => seqs.get(id) ?? new Map(), status, pinned: [] });
     const key = ({ machine, entry }: { machine: Machine; entry: { pane: HerdrPane } }) => `${machine.id}/${entry.pane.pane_id}`;
     expect(split.rest.map(key)).toEqual(["local/d", "local/b", "local/c", "local/a", "remote/f", "remote/e"]);
+  });
+
+  it("orders each PC's rows by Importance from the server's bands and wait clocks", () => {
+    const now = 1_000_000_000;
+    const local = machine("local", "connected", [["a", "idle"], ["b", "idle"], ["c", "idle"], ["d", "idle"]]);
+    const extra: Record<string, Partial<HerdrPane>> = {
+      a: { importance: { level: "P3", source: "queue", reason: "low" }, wait: { since: now - 10 * 60_000, status: "idle" } },
+      b: { importance: { level: "P1", source: "objective", reason: "urgent" }, wait: { since: now - 60_000, status: "idle" } },
+      // no importance: neutral P2, aged past 30 min
+      c: { wait: { since: now - 45 * 60_000, status: "idle" } },
+      // P2 whose clock was stamped for another status: a fresh wait, not aged
+      d: { importance: { level: "P2", source: "neutral", reason: "" }, wait: { since: now - 500 * 60_000, status: "working" } },
+    };
+    local.snapshot = { ...local.snapshot!, panes: local.snapshot!.panes.map((pane) => ({ ...pane, ...extra[pane.pane_id] })) };
+    const seqs = new Map([["a", 1], ["b", 2], ["c", 3], ["d", 4]]);
+    const split = agentRoster([local], { order: "importance", seqs: () => seqs, status: (_id, pane) => pane.agent_status, pinned: [], now });
+    expect(split.rest.map(({ entry }) => entry.pane.pane_id)).toEqual(["b", "c", "d", "a"]);
+  });
+
+  it("reads a pane's wait only from a clock stamped for its current status", () => {
+    expect(paneWaitMs({ agent_status: "idle", wait: { since: 1000, status: "idle" } }, 61_000)).toBe(60_000);
+    expect(paneWaitMs({ agent_status: "working", wait: { since: 1000, status: "idle" } }, 61_000)).toBe(0);
+    expect(paneWaitMs({ agent_status: "idle" }, 61_000)).toBeUndefined();
+    expect(paneWaitMs({ agent_status: "idle", wait: { since: 99_000, status: "idle" } }, 61_000)).toBe(0);
   });
 });

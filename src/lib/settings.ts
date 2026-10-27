@@ -23,8 +23,22 @@ export type { ResolvedTheme, ThemeSetting };
 export type Density = "compact" | "comfortable";
 /** One line names the workspace; two lines say what its pane is doing, with the workspace under it. */
 export type SidebarRows = "one" | "two";
-/** the Agents list's order: herdr's workspace order; a waiting agent first and then the latest change; or the one waiting longest first */
-export type AgentOrder = "workspace" | "activity" | "waiting";
+/**
+ * the Agents list's order: herdr's workspace order; a waiting agent first and then the latest change; the one waiting
+ * longest first; or Longest wait's groups ordered by importance with aging (lib/sidebarOrder.ts importanceOrder)
+ */
+export type AgentOrder = "workspace" | "activity" | "waiting" | "importance";
+export const AGENT_ORDERS: readonly AgentOrder[] = ["workspace", "activity", "waiting", "importance"];
+/**
+ * Importance order's aging: minutes a P1, P2 or P3 agent waits before it goes first in its band, and how many times
+ * that wait lifts it into its group's most urgent band. P0 has no wait to serve: it goes by longest wait at once.
+ */
+export interface ImportanceAging { p1: number; p2: number; p3: number; factor: number }
+export const DEFAULT_IMPORTANCE_AGING: ImportanceAging = { p1: 15, p2: 30, p3: 60, factor: 4 };
+export const IMPORTANCE_AGING_MINUTES: readonly number[] = [5, 10, 15, 20, 30, 45, 60, 90, 120, 240];
+export const IMPORTANCE_AGING_FACTORS: readonly number[] = [2, 3, 4, 6, 8];
+const IMPORTANCE_AGING_MAX_MINUTES = 24 * 60;
+const IMPORTANCE_AGING_MAX_FACTOR = 20;
 /** what an agent row is named by: its agent's title, or its tab's name when the tab was renamed (the title then goes under it) */
 export type AgentRowTitle = "agent" | "tab";
 /** where the Agents list sits in the sidebar: docked above the footer, or straight after the last workspace in one scroll with it */
@@ -88,6 +102,8 @@ export interface Settings {
   sidebarRows: SidebarRows;
   /** The Agents list's order. Activity is display-only: herdr's own order never changes. */
   agentOrder: AgentOrder;
+  /** Importance order's aging thresholds and promotion factor, shared by every browser of this server */
+  importanceAging: ImportanceAging;
   /** What an agent row and the header name a pane by: Tab name puts a renamed tab's name first, the agent's title under it */
   agentRowTitle: AgentRowTitle;
   /** The Agents list's place: docked above the footer, or under the workspaces in the same scroll */
@@ -218,7 +234,7 @@ export type DiffStyle = (typeof DIFF_STYLES)[number];
 type TelemetrySourceSettings = Omit<Settings,
   "keyBarExtras" | "keyBarItems" | "shortcutOverrides" | "terminalFontFamily" | "chatFontFamily" | "uiFontFamily"
   | "quickReplies" | "usageOrder" | "usageHidden" | "fileOpen" | "webLinks" | "claudeLaunchMode" | "codexLaunchMode"
-  | "followHerdrFocus" | "composerNewTabButton" | "agentRowTitle" | "compactTerminalInput" | "compactKeyBarShown" | "agentsPlacement" | "agentsDrawerFold" | "terminalMirrorWrap">;
+  | "followHerdrFocus" | "composerNewTabButton" | "agentRowTitle" | "compactTerminalInput" | "compactKeyBarShown" | "agentsPlacement" | "agentsDrawerFold" | "terminalMirrorWrap" | "importanceAging">;
 
 /** Compare structured custom settings by content against this app's built-in defaults. */
 function differsFromDefault(value: unknown, defaultValue: unknown): boolean {
@@ -232,8 +248,8 @@ export function telemetrySettingsSnapshot(settings: Settings): TelemetrySettings
     theme: settings.theme,
     density: settings.density,
     sidebarRows: settings.sidebarRows,
-    // the deployed telemetry schema knows only these two: Longest wait counts as the other order by recency
-    agentOrder: settings.agentOrder === "waiting" ? "activity" : settings.agentOrder,
+    // the deployed telemetry schema knows only these two: Longest wait and Importance count as the other order by recency
+    agentOrder: settings.agentOrder === "waiting" || settings.agentOrder === "importance" ? "activity" : settings.agentOrder,
     agentMarks: settings.agentMarks,
     statusIndicators: settings.statusIndicators,
     palette: settings.palette,
@@ -290,7 +306,7 @@ export function telemetrySettingsSnapshot(settings: Settings): TelemetrySettings
  */
 export const SETTING_SCOPE = {
   theme: "shared", palette: "shared", darkTheme: "shared", lightTheme: "shared", language: "shared", sidebarRows: "shared", agentOrder: "shared",
-  agentRowTitle: "shared", agentsPlacement: "shared", agentsDrawerFold: "shared",
+  importanceAging: "shared", agentRowTitle: "shared", agentsPlacement: "shared", agentsDrawerFold: "shared",
   agentMarks: "shared", autoSendQueued: "shared", showThinking: "shared", quickReplies: "shared",
   showQuickReplies: "shared", showUsage: "shared", usageCount: "shared",
   usageGlance: "shared", usageOrder: "shared", usageHidden: "shared", defaultView: "device", suggestionChip: "device",
@@ -329,6 +345,7 @@ export const DEFAULT_SETTINGS: Settings = {
   density: "comfortable",
   sidebarRows: "one",
   agentOrder: "workspace",
+  importanceAging: DEFAULT_IMPORTANCE_AGING,
   agentRowTitle: "agent",
   agentsPlacement: "bottom",
   agentsDrawerFold: "folded",
@@ -484,6 +501,19 @@ export function chatLaneWidth(paneWidth: number, rootFontPx: number = ROOT_FONT_
   return Math.min(Math.max(CHAT_LANE_MIN, CHAT_LANE_MAX_REM * root), chatLaneFollow(paneWidth));
 }
 
+/** Whole minutes for each band, capped at a day, and a factor capped at 20; a value under 1 or not a number takes the default. */
+export function sanitizeImportanceAging(raw: unknown): ImportanceAging {
+  const record = typeof raw === "object" && raw !== null && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
+  const within = (value: unknown, max: number, fallback: number): number =>
+    typeof value === "number" && Number.isFinite(value) && value >= 1 ? Math.min(max, Math.round(value)) : fallback;
+  return {
+    p1: within(record["p1"], IMPORTANCE_AGING_MAX_MINUTES, DEFAULT_IMPORTANCE_AGING.p1),
+    p2: within(record["p2"], IMPORTANCE_AGING_MAX_MINUTES, DEFAULT_IMPORTANCE_AGING.p2),
+    p3: within(record["p3"], IMPORTANCE_AGING_MAX_MINUTES, DEFAULT_IMPORTANCE_AGING.p3),
+    factor: within(record["factor"], IMPORTANCE_AGING_MAX_FACTOR, DEFAULT_IMPORTANCE_AGING.factor),
+  };
+}
+
 /** Only known keys with the right type survive: a stale or hand-edited record never breaks the UI. */
 export function sanitizeSettings(raw: unknown): Settings {
   const record = typeof raw === "object" && raw !== null ? (raw as Record<string, unknown>) : {};
@@ -506,7 +536,8 @@ export function sanitizeSettings(raw: unknown): Settings {
     theme,
     density: density === "compact" || density === "comfortable" ? density : DEFAULT_SETTINGS.density,
     sidebarRows: record["sidebarRows"] === "one" || record["sidebarRows"] === "two" ? record["sidebarRows"] : DEFAULT_SETTINGS.sidebarRows,
-    agentOrder: record["agentOrder"] === "workspace" || record["agentOrder"] === "activity" || record["agentOrder"] === "waiting" ? record["agentOrder"] : DEFAULT_SETTINGS.agentOrder,
+    agentOrder: AGENT_ORDERS.find((order) => order === record["agentOrder"]) ?? DEFAULT_SETTINGS.agentOrder,
+    importanceAging: sanitizeImportanceAging(record["importanceAging"]),
     agentRowTitle: record["agentRowTitle"] === "agent" || record["agentRowTitle"] === "tab" ? record["agentRowTitle"] : DEFAULT_SETTINGS.agentRowTitle,
     agentsPlacement: AGENTS_PLACEMENTS.find((placement) => placement === record["agentsPlacement"]) ?? DEFAULT_SETTINGS.agentsPlacement,
     agentsDrawerFold: AGENTS_DRAWER_FOLDS.find((fold) => fold === record["agentsDrawerFold"]) ?? DEFAULT_SETTINGS.agentsDrawerFold,

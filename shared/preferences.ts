@@ -7,7 +7,7 @@
  * which the server lays over what it holds, so a setting nobody changed stays each device's own.
  */
 export const SHARED_SETTING_KEYS = [
-  "theme", "palette", "darkTheme", "lightTheme", "language", "sidebarRows", "agentOrder", "agentRowTitle", "agentsPlacement", "agentsDrawerFold",
+  "theme", "palette", "darkTheme", "lightTheme", "language", "sidebarRows", "agentOrder", "importanceAging", "agentRowTitle", "agentsPlacement", "agentsDrawerFold",
   "agentMarks", "autoSendQueued", "showThinking", "quickReplies", "showQuickReplies", "showUsage", "usageCount",
   "usageGlance", "usageOrder", "usageHidden", "claudeLaunchMode", "codexLaunchMode",
 ] as const;
