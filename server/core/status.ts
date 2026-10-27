@@ -28,7 +28,7 @@ import type { PreferenceStore } from "../preferences.ts";
 import { promptWaitEnded, type OpenCodePromptState } from "../prompt.ts";
 import { type AlertTiming, createPushService, defaultStateDir } from "../push.ts";
 import { SessionPlans } from "../session-plan.ts";
-import { memoryEndpoint, SessionImportance, WaitClocks, type MemoryEndpoint } from "../session-importance.ts";
+import { memoryEndpoint, SessionImportance, WaitClocks, withImportance, type MemoryEndpoint } from "../session-importance.ts";
 import type { Telemetry } from "../telemetry.ts";
 import type { UsageLoginService } from "../usage-login.ts";
 import type { UsageService } from "../usage.ts";
@@ -171,20 +171,9 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
         return background > 0 || waiting || plan !== null ? { ...pane, ...(background > 0 ? { background_tasks: background } : {}), ...(waiting ? { background_wait: true as const } : {}), ...(plan !== null ? { plan } : {}) } : pane;
       }),
     }, completions);
-    const ranked = withImportance(settled);
+    const ranked = withImportance(settled, waitClocks, importance);
     return order ? { ...ranked, ...order } : ranked;
   };
-  /** Each pane's wait clock and its session's importance, as the Agents list's Importance order reads them. */
-  function withImportance(snapshot: SessionSnapshot): SessionSnapshot {
-    const seqs = new Map(snapshot.agents.map((agent) => [agent.pane_id, agent.state_change_seq]));
-    const waits = waitClocks.stamp(snapshot.panes, (paneId) => seqs.get(paneId) ?? undefined);
-    importance.refresh(snapshot.panes);
-    return { ...snapshot, panes: snapshot.panes.map((pane) => {
-      const wait = waits.get(pane.pane_id);
-      const level = importance.of(pane);
-      return wait || level ? { ...pane, ...(wait ? { wait } : {}), ...(level ? { importance: level } : {}) } : pane;
-    }) };
-  }
   /**
    * A browser visit for the daily active message: the call is made now so the visit's day is the
    * trigger's, the panes are read after. Nothing is read while telemetry cannot send; a socket open

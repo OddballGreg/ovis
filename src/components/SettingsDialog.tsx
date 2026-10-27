@@ -366,15 +366,15 @@ function AppearancePage() {
       </SettingsRow>
       {settings.agentOrder === "importance" && <>
         {(["p1", "p2", "p3"] as const).map((band) => (
-          <SettingsRow key={band} label={t("{band} ages after", { band: band.toUpperCase() })} description={band === "p1" ? t("An agent that waits longer than this goes first in its band, longest wait first. P0 never needs to age") : undefined} htmlFor={`settings-importance-${band}`}>
+          <SettingsRow key={band} label={t("{band} wait limit", { band: band.toUpperCase() })} description={band === "p1" ? t("An agent that waits longer than this goes first in its band, longest wait first. A P0 has no limit and goes by longest wait at once") : undefined} htmlFor={`settings-importance-${band}`}>
             <SettingsSelect id={`settings-importance-${band}`} value={String(settings.importanceAging[band])} onChange={(event) => update({ importanceAging: { ...settings.importanceAging, [band]: Number(event.target.value) } })}>
               {agingChoices(IMPORTANCE_AGING_MINUTES, settings.importanceAging[band]).map((minutes) => <option key={minutes} value={minutes}>{t("{minutes} min", { minutes })}</option>)}
             </SettingsSelect>
           </SettingsRow>
         ))}
-        <SettingsRow label={t("Moves up after")} description={t("An agent that waits this many times its band's age competes with its group's most urgent band, so none waits forever")} htmlFor="settings-importance-factor">
+        <SettingsRow label={t("Joins the top band after")} description={t("An agent that waits this many times its band's limit is ordered with the most urgent band of its group, so none waits forever")} htmlFor="settings-importance-factor">
           <SettingsSelect id="settings-importance-factor" value={String(settings.importanceAging.factor)} onChange={(event) => update({ importanceAging: { ...settings.importanceAging, factor: Number(event.target.value) } })}>
-            {agingChoices(IMPORTANCE_AGING_FACTORS, settings.importanceAging.factor).map((factor) => <option key={factor} value={factor}>{t("{factor}× its age", { factor })}</option>)}
+            {agingChoices(IMPORTANCE_AGING_FACTORS, settings.importanceAging.factor).map((factor) => <option key={factor} value={factor}>{t("{factor}× its limit", { factor })}</option>)}
           </SettingsSelect>
         </SettingsRow>
       </>}

@@ -2,8 +2,9 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { HerdrPane } from "../shared/protocol.ts";
-import { memoryEndpoint, paneSessionId, SessionImportance, unwrapToolResult, WaitClocks, type MemoryEndpoint } from "./session-importance.ts";
+import type { HerdrPane, SessionSnapshot } from "../shared/protocol.ts";
+import { memoryEndpoint, paneSessionId, SessionImportance, unwrapToolResult, WaitClocks, withImportance, type MemoryEndpoint } from "./session-importance.ts";
+import { handleImportanceRequest } from "./importance-routes.ts";
 
 const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
@@ -128,6 +129,9 @@ describe("session importance provider", () => {
     expect(local?.url).toBe("http://127.0.0.1:9824");
     expect(local?.key()).toBe(ENV_KEY);
     expect(memoryEndpoint({ OVIS_MEMORY_URL: "http://memory.lan:9824", OPENCODE_MEMORY_API_KEY: ENV_KEY })?.key()).toBeNull();
+    // a name that only starts like a loopback address is another host
+    for (const url of ["http://127.example.net:9824", "http://127.0.0.1.nip.io:9824"]) expect(memoryEndpoint({ OVIS_MEMORY_URL: url, OPENCODE_MEMORY_API_KEY: ENV_KEY })?.key()).toBeNull();
+    expect(memoryEndpoint({ OVIS_MEMORY_URL: "http://127.0.0.2:9824", OPENCODE_MEMORY_API_KEY: ENV_KEY })?.key()).toBe(ENV_KEY);
     expect(memoryEndpoint({ OVIS_MEMORY_URL: "https://memory.example", OPENCODE_MEMORY_API_KEY: ENV_KEY })?.key()).toBe(ENV_KEY);
     const off = new SessionImportance({ endpoint: null, active: () => true, onChange: () => {} });
     off.refresh([pane("p1", "ses_a")]);
@@ -168,6 +172,62 @@ describe("session importance provider", () => {
     const { importance } = provider(memory.fetch);
     importance.refresh([pane("p1", "ses_a")]);
     expect(await importance.set("p1", null)).toMatchObject({ ok: false, code: "memory_unsupported" });
+  });
+
+  it("takes a tool's own error, which memory also answers as 404 Unknown tool, for a refusal, not a missing tool", async () => {
+    let now = 0;
+    const memory = fakeMemory((call) => call.url.endsWith("/session_importance_set")
+      ? json({ error: "Unknown tool", message: "level must be P0..P3" }, 404)
+      : json({ error: "Unknown tool", message: "session_ids must be a list" }, 404));
+    const { importance, lines } = provider(memory.fetch, { now: () => now });
+    importance.refresh([pane("p1", "ses_a")]);
+    expect(await importance.set("p1", "P1")).toMatchObject({ ok: false, code: "memory_refused", message: expect.stringContaining("level must be P0..P3") });
+    // the poll that failed backs off as an ordinary failure (45 s), not as a missing tool (10 min)
+    expect(lines.at(-1)).toContain("session_ids must be a list");
+    const asked = memory.calls.length;
+    now += 46_000;
+    await importance.poll();
+    expect(memory.calls.length).toBe(asked + 1);
+  });
+
+  it("tells an unreachable memory and an answer that says no apart from a refusal and a set", async () => {
+    const down = provider(fakeMemory(() => { throw new TypeError("connection refused"); }).fetch);
+    down.importance.refresh([pane("p1", "ses_a")]);
+    expect(await down.importance.set("p1", "P1")).toMatchObject({ ok: false, code: "memory_unreachable", message: "opencode-memory did not set it (not reachable)" });
+    const no = provider(fakeMemory((call) => call.url.endsWith("_set") ? json({ ok: false, message: "session not found" }) : json({ sessions: {} })).fetch);
+    no.importance.refresh([pane("p1", "ses_a")]);
+    expect(await no.importance.set("p1", "P1")).toMatchObject({ ok: false, code: "memory_refused", message: "opencode-memory refused: session not found" });
+  });
+
+  it("puts each pane's wait clock and its session's importance on the snapshot clients get", async () => {
+    const memory = fakeMemory(() => json({ sessions: { ses_a: { level: "P0", source: "queue", reason: "!1 P0" } } }));
+    const { importance } = provider(memory.fetch);
+    let now = 100;
+    const clocks = new WaitClocks(null, () => now);
+    const snapshot = { panes: [pane("p1", "ses_a"), pane("p2", null, "working")], agents: [{ pane_id: "p1", state_change_seq: 3 }, { pane_id: "p2", state_change_seq: 4 }] } as unknown as SessionSnapshot;
+    const first = withImportance(snapshot, clocks, importance);
+    expect(first.panes.map((p) => [p.pane_id, p.wait, p.importance])).toEqual([["p1", { since: 100, status: "idle" }, undefined], ["p2", { since: 100, status: "working" }, undefined]]);
+    await importance.poll();
+    now = 900;
+    const second = withImportance(snapshot, clocks, importance);
+    expect(second.panes[0]).toMatchObject({ wait: { since: 100, status: "idle" }, importance: { level: "P0", reason: "!1 P0" } });
+    expect(second.panes[1]).not.toHaveProperty("importance");
+    expect(second.panes[1]!.wait).toEqual({ since: 100, status: "working" });
+  });
+
+  it("answers the route with ok after a set and with memory's refusal as a 502 envelope", async () => {
+    const memory = fakeMemory((call) => {
+      if (!call.url.endsWith("_set")) return json({ sessions: {} });
+      return (call.body as { level: string | null }).level === "P3" ? json({ error: "override refused" }) : json({ ok: true });
+    });
+    const { importance } = provider(memory.fetch);
+    importance.refresh([pane("p1", "ses_a")]);
+    const route = (body: unknown) => handleImportanceRequest(new Request("http://127.0.0.1/api/agent/importance", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }), "/api/agent/importance", importance);
+    const ok = (await route({ pane_id: "p1", level: "P1", ttl_hours: 4 }))!;
+    expect([ok.status, await ok.json()]).toEqual([200, { ok: true }]);
+    const refused = (await route({ pane_id: "p1", level: "P3" }))!;
+    expect([refused.status, await refused.json()]).toEqual([502, { error: { code: "memory_refused", message: "opencode-memory refused: override refused" } }]);
+    expect(await handleImportanceRequest(new Request("http://127.0.0.1/api/other"), "/api/other", importance)).toBeNull();
   });
 
   it("finds a pane's OpenCode session id only in an id-kind ses_ session", () => {

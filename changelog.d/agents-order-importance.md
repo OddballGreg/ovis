@@ -1,11 +1,14 @@
 ### Added
-- **Settings → Appearance → Agents order → Importance** keeps Longest wait's groups (blocked,
-  unread finishes, ready, working) and orders each by the band opencode-memory gives the pane's
-  OpenCode session, P0 first. An agent that waits past its band's age (P1 15 min, P2 30 min, P3
-  60 min, set in Settings) goes first in its band, and one that waits 4 times that competes with
-  its group's most urgent band, so none waits forever. Each row shows its band, with memory's
-  reason as its tooltip, and the row menu sets it by hand (Importance: Auto, P0 to P3) through
-  this server. While opencode-memory is down or has no `session_importance` tool, every agent is
-  P2 and the order is Longest wait's. The server asks memory at `OVIS_MEMORY_URL` (default
-  `http://127.0.0.1:9824`, `off` to turn it off) with `OPENCODE_MEMORY_API_KEY` or memory's own
-  key file, and keeps each pane's wait clock in `wait-clocks.json` beside the shared preferences.
+- **Settings → Appearance → Agents order → Importance** orders the agents by how much their work
+  matters. It keeps Longest wait's groups: blocked, unread finishes, ready, then working. Within
+  each group, the band that opencode-memory gives the pane's OpenCode session comes first, P0 to P3.
+  Other agents count as P2. An agent that waits past its band's limit goes first in its band. The
+  limits are 15 minutes for P1, 30 for P2 and 60 for P3, and you can change them in Settings. An
+  agent that waits 4 times its limit is ordered with its group's most urgent band.
+- In Importance order, each OpenCode agent row shows its band, with memory's reason as the
+  tooltip. The row menu sets the band by hand: Importance: Auto, or P0 to P3. If memory refuses,
+  the Agents list says why.
+- The server asks opencode-memory at `OVIS_MEMORY_URL` (default `http://127.0.0.1:9824`, `off`
+  turns it off). It uses `OPENCODE_MEMORY_API_KEY`, or memory's own key file. While memory is
+  down or has no `session_importance` tool, every agent is P2. Each pane's wait clock is kept in
+  `wait-clocks.json` beside the shared preferences, so a restart keeps it.

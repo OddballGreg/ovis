@@ -122,8 +122,9 @@ export function createCore({ options, devices, preferences, usage, usageLogin, T
       clearInterval(waitTimer);
       plans.stop();
       importance.stop();
-      waitClocks.save();
       machines?.stop();
+      // after the PC roster's reads stop, so none stamps a clock after the last save
+      waitClocks.save();
       beforeTerminals();
       for (const client of clients) killWatches(client);
       for (const paneId of [...attachments.keys()]) closeAttachment(paneId);

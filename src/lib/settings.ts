@@ -31,7 +31,7 @@ export type AgentOrder = "workspace" | "activity" | "waiting" | "importance";
 export const AGENT_ORDERS: readonly AgentOrder[] = ["workspace", "activity", "waiting", "importance"];
 /**
  * Importance order's aging: minutes a P1, P2 or P3 agent waits before it goes first in its band, and how many times
- * that wait lifts it into its group's most urgent band. P0 never needs aging.
+ * that wait lifts it into its group's most urgent band. P0 has no wait to serve: it goes by longest wait at once.
  */
 export interface ImportanceAging { p1: number; p2: number; p3: number; factor: number }
 export const DEFAULT_IMPORTANCE_AGING: ImportanceAging = { p1: 15, p2: 30, p3: 60, factor: 4 };
@@ -501,7 +501,7 @@ export function chatLaneWidth(paneWidth: number, rootFontPx: number = ROOT_FONT_
   return Math.min(Math.max(CHAT_LANE_MIN, CHAT_LANE_MAX_REM * root), chatLaneFollow(paneWidth));
 }
 
-/** Whole minutes from 1 to a day for each band, and a factor from 1 to 20; anything else falls back to the default for it. */
+/** Whole minutes for each band, capped at a day, and a factor capped at 20; a value under 1 or not a number takes the default. */
 export function sanitizeImportanceAging(raw: unknown): ImportanceAging {
   const record = typeof raw === "object" && raw !== null && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
   const within = (value: unknown, max: number, fallback: number): number =>

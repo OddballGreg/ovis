@@ -13,7 +13,7 @@ import { sidebarPinKey, splitPinnedRows } from "./sidebarPins.ts";
 export interface AgentRow { machine: Machine; entry: SidebarAgent }
 
 export interface AgentRosterOptions {
-  /** Settings → Agents order: Activity and Longest wait sort each PC's rows by that PC's own counters */
+  /** Settings → Agents order: Activity, Longest wait and Importance sort each PC's rows by that PC's own counters */
   order: AgentOrder;
   /** a PC's state-change counters, as lib/sidebarActivity.tsx keeps them */
   seqs(machineId: string): ReadonlyMap<string, number>;

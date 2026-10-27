@@ -198,9 +198,11 @@ describe("Importance order", () => {
     expect(importanceFacts("P2", 29 * MIN, DEFAULT_IMPORTANCE_AGING, 0).aged).toBe(false);
     expect(importanceFacts("P3", 59 * MIN, DEFAULT_IMPORTANCE_AGING, 0).aged).toBe(false);
     expect(importanceFacts("P3", 61 * MIN, DEFAULT_IMPORTANCE_AGING, 0).aged).toBe(true);
-    // P0 is first already: it never ages and is never promoted
-    expect(agingThresholdMs(0, DEFAULT_IMPORTANCE_AGING)).toBe(Infinity);
-    expect(importanceFacts("P0", 10_000 * MIN, DEFAULT_IMPORTANCE_AGING, 0)).toMatchObject({ aged: false, promoted: false, effectiveBand: 0 });
+    // P0 has no wait to serve: any known wait counts as aged, and it is never promoted
+    expect(agingThresholdMs(0, DEFAULT_IMPORTANCE_AGING)).toBe(0);
+    expect(importanceFacts("P0", 10_000 * MIN, DEFAULT_IMPORTANCE_AGING, 0)).toMatchObject({ aged: true, promoted: false, effectiveBand: 0 });
+    expect(importanceFacts("P0", 0, DEFAULT_IMPORTANCE_AGING, 0).aged).toBe(false);
+    expect(importanceFacts("P0", undefined, DEFAULT_IMPORTANCE_AGING, 0).aged).toBe(false);
   });
 
   it("does not let an aged row jump a more urgent band before it starves", () => {
@@ -220,6 +222,14 @@ describe("Importance order", () => {
     ])).toEqual(["p3-starved", "p0-fresh", "p1-fresh"]);
     expect(importanceFacts("P3", 241 * MIN, DEFAULT_IMPORTANCE_AGING, 0)).toMatchObject({ promoted: true, effectiveBand: 0 });
     expect(importanceFacts("P3", 239 * MIN, DEFAULT_IMPORTANCE_AGING, 0)).toMatchObject({ promoted: false, effectiveBand: 3 });
+  });
+
+  it("orders a P0 and a row lifted into its band by longest wait, so a long-waiting P0 is not passed", () => {
+    expect(order([
+      { id: "p3-starved", status: "blocked", level: "P3", wait: 241, seq: 1 },
+      { id: "p0-long", status: "blocked", level: "P0", wait: 300, seq: 2 },
+      { id: "p0-fresh", status: "blocked", level: "P0", wait: 2, seq: 3 },
+    ])).toEqual(["p0-long", "p3-starved", "p0-fresh"]);
   });
 
   it("promotes only to the top band of the row's own status group", () => {

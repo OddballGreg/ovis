@@ -9,7 +9,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { isImportanceLevel, type AgentStatus, type HerdrPane, type ImportanceLevel, type PaneImportance, type PaneWait } from "../shared/protocol.ts";
+import { isImportanceLevel, type AgentStatus, type HerdrPane, type ImportanceLevel, type PaneImportance, type PaneWait, type SessionSnapshot } from "../shared/protocol.ts";
 import { readStateDocument, writeStateDocument } from "./state-document.ts";
 
 export const POLL_MS = 45_000;
@@ -19,6 +19,8 @@ const MISSING_TOOL_BACKOFF_MS = 10 * 60_000;
 const MAX_BACKOFF_MS = 15 * 60_000;
 const MAX_SESSIONS = 200;
 const MAX_REASON = 300;
+/** a session_importance answer for MAX_SESSIONS is a few tens of KiB; anything much larger is not one */
+const MAX_ANSWER_CHARS = 1024 * 1024;
 const DEFAULT_MEMORY_URL = "http://127.0.0.1:9824";
 
 export interface MemoryEndpoint {
@@ -27,7 +29,8 @@ export interface MemoryEndpoint {
   key: () => string | null;
 }
 
-const loopback = (host: string): boolean => host === "localhost" || host === "[::1]" || host === "::1" || /^127\./.test(host);
+/** a loopback address itself, never a name that merely starts like one (127.example.net) */
+const loopback = (host: string): boolean => host === "localhost" || host === "[::1]" || host === "::1" || /^127(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}$/.test(host);
 
 /** The memory key file opencode-memory itself reads (http_server.py `_api_key_file`). */
 export function memoryKeyFile(env: NodeJS.ProcessEnv = process.env): string {
@@ -104,7 +107,7 @@ function readImportance(raw: unknown): PaneImportance | null {
     source: typeof record["source"] === "string" ? record["source"].slice(0, 40) : "unknown",
     reason: typeof record["reason"] === "string" ? record["reason"].slice(0, MAX_REASON) : "",
     ...(overrideRecord && isImportanceLevel(overrideRecord["level"])
-      ? { override: { level: overrideRecord["level"], expires_at: typeof overrideRecord["expires_at"] === "string" ? overrideRecord["expires_at"] : null } }
+      ? { override: { level: overrideRecord["level"], expires_at: typeof overrideRecord["expires_at"] === "string" ? overrideRecord["expires_at"].slice(0, 40) : null } }
       : {}),
   };
 }
@@ -148,7 +151,8 @@ export class SessionImportance {
 
   start(): void {
     if (this.timer !== null || !this.enabled) return;
-    this.timer = setInterval(() => void this.poll(), this.pollMs);
+    // a snapshot read may have asked a moment ago (refresh below): the timer then waits for the next round
+    this.timer = setInterval(() => { if (this.now() - this.lastPoll >= this.pollMs) void this.poll(); }, this.pollMs);
     this.timer.unref?.();
   }
 
@@ -218,7 +222,7 @@ export class SessionImportance {
   private fail(backoffMs: number, why: string): void {
     this.failures = Math.min(this.failures + 1, 10);
     this.retryAt = this.now() + backoffMs;
-    if (this.down !== why) this.deps.log?.(`importance: every agent is neutral (P2) while opencode-memory does not answer: ${why}`);
+    if (this.down !== why) this.deps.log?.(`importance: every agent is neutral (P2) until opencode-memory gives importance again: ${why}`);
     this.down = why;
   }
 
@@ -237,11 +241,16 @@ export class SessionImportance {
     const sessionId = this.sessionOf(paneId);
     if (sessionId === null) return { ok: false, status: 404, code: "no_session", message: "This agent has no OpenCode session id, so it has no importance to set" };
     const answer = await this.call("session_importance_set", { session_id: sessionId, level, ...(ttlHours === undefined ? {} : { ttl_hours: ttlHours }) });
-    if (!answer.ok) return { ok: false, status: 502, code: answer.missing ? "memory_unsupported" : "memory_refused", message: answer.missing ? "opencode-memory does not offer session_importance_set yet" : `opencode-memory refused: ${answer.why}` };
+    if (!answer.ok) {
+      if (answer.missing) return { ok: false, status: 502, code: "memory_unsupported", message: "opencode-memory does not offer session_importance_set yet" };
+      if (answer.answered) return { ok: false, status: 502, code: "memory_refused", message: `opencode-memory refused: ${answer.why}` };
+      return { ok: false, status: 502, code: "memory_unreachable", message: `opencode-memory did not set it (${answer.why})` };
+    }
     const value = answer.value;
-    if (typeof value === "object" && value !== null && "error" in value) {
-      const error = (value as Record<string, unknown>)["error"];
-      return { ok: false, status: 502, code: "memory_refused", message: `opencode-memory refused: ${typeof error === "string" ? error.slice(0, MAX_REASON) : "error"}` };
+    const record = typeof value === "object" && value !== null ? value as Record<string, unknown> : null;
+    if (record !== null && ("error" in record || record["ok"] === false)) {
+      const error = record["error"] ?? record["message"];
+      return { ok: false, status: 502, code: "memory_refused", message: `opencode-memory refused: ${typeof error === "string" ? error.slice(0, MAX_REASON) : "no reason given"}` };
     }
     this.retryAt = 0;
     // an ask already on its way may have left before the set: ask once more after it
@@ -250,7 +259,12 @@ export class SessionImportance {
     return { ok: true };
   }
 
-  private async call(tool: string, body: unknown): Promise<{ ok: true; value: unknown } | { ok: false; missing: boolean; why: string }> {
+  /**
+   * One /tools call. `missing`: memory has no such tool (its bridge answers any ValueError a tool
+   * raises as a 404 "Unknown tool" too, so only its own "Unknown tool: <name>" words count).
+   * `answered`: memory answered with an error, as against no answer at all.
+   */
+  private async call(tool: string, body: unknown): Promise<{ ok: true; value: unknown } | { ok: false; missing: boolean; answered: boolean; why: string }> {
     const endpoint = this.deps.endpoint!;
     const key = endpoint.key();
     let response: Response;
@@ -262,20 +276,22 @@ export class SessionImportance {
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
     } catch (error) {
-      return { ok: false, missing: false, why: error instanceof Error && error.name === "TimeoutError" ? "no answer in time" : "not reachable" };
+      return { ok: false, missing: false, answered: false, why: error instanceof Error && error.name === "TimeoutError" ? "no answer in time" : "not reachable" };
     }
+    const text = await response.text().catch(() => "");
+    if (text.length > MAX_ANSWER_CHARS) return { ok: false, missing: false, answered: true, why: "memory's answer was too large" };
     let parsed: unknown = null;
-    try { parsed = await response.json(); } catch { parsed = null; }
+    try { parsed = text === "" ? null : JSON.parse(text); } catch { parsed = null; }
     if (!response.ok) {
       const record = typeof parsed === "object" && parsed !== null ? parsed as Record<string, unknown> : {};
-      const missing = response.status === 404 && (record["error"] === "Unknown tool" || parsed === null);
-      const message = typeof record["message"] === "string" ? record["message"].slice(0, MAX_REASON) : typeof record["error"] === "string" ? record["error"] : "";
-      return { ok: false, missing, why: `HTTP ${response.status}${message ? ` (${message})` : ""}` };
+      const message = typeof record["message"] === "string" ? record["message"] : "";
+      const missing = response.status === 404 && (parsed === null || (record["error"] === "Unknown tool" && (message === "" || message.startsWith("Unknown tool:"))));
+      const words = (message || (typeof record["error"] === "string" ? record["error"] : "")).slice(0, MAX_REASON);
+      return { ok: false, missing, answered: true, why: `HTTP ${response.status}${words ? ` (${words})` : ""}` };
     }
     const value = unwrapToolResult(parsed);
-    if (typeof value === "object" && value !== null && /unknown action|unknown tool/i.test(String((value as Record<string, unknown>)["error"] ?? ""))) {
-      return { ok: false, missing: true, why: String((value as Record<string, unknown>)["error"]).slice(0, MAX_REASON) };
-    }
+    const error = typeof value === "object" && value !== null ? (value as Record<string, unknown>)["error"] : undefined;
+    if (typeof error === "string" && /^unknown (?:action|tool)\b/i.test(error)) return { ok: false, missing: true, answered: true, why: error.slice(0, MAX_REASON) };
     return { ok: true, value };
   }
 }
@@ -349,4 +365,19 @@ export class WaitClocks {
     try { writeStateDocument(this.path, JSON.stringify({ version: 1, panes: Object.fromEntries(this.clocks) }), false); }
     catch (error) { console.error(`importance: the wait clocks were not saved (${error instanceof Error ? error.message : String(error)})`); }
   }
+}
+
+/**
+ * The snapshot clients get, with each pane's wait clock and its session's importance, as the
+ * Agents list's Importance order reads them; the panes are handed to `importance` as the ones to ask about.
+ */
+export function withImportance(snapshot: SessionSnapshot, clocks: WaitClocks, importance: SessionImportance): SessionSnapshot {
+  const seqs = new Map(snapshot.agents.map((agent) => [agent.pane_id, agent.state_change_seq]));
+  const waits = clocks.stamp(snapshot.panes, (paneId) => seqs.get(paneId) ?? undefined);
+  importance.refresh(snapshot.panes);
+  return { ...snapshot, panes: snapshot.panes.map((pane) => {
+    const wait = waits.get(pane.pane_id);
+    const level = importance.of(pane);
+    return wait || level ? { ...pane, ...(wait ? { wait } : {}), ...(level ? { importance: level } : {}) } : pane;
+  }) };
 }

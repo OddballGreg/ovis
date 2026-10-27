@@ -54,7 +54,8 @@ interface AgentRowBodyProps {
 function AgentRowBody({ mark, markKind, title, name, context, tokens, backgroundTasks, plan, status, note = null, muted, importance }: AgentRowBodyProps) {
   const t = useT();
   const level = importance === undefined ? null : importance?.level ?? "P2";
-  const levelWords = importance === undefined ? "" : importance === null ? t("No importance from opencode-memory, so it counts as P2") : importance.reason || importance.source;
+  // the tooltip says why; the row's name for a screen reader says only the band, so a long reason does not run on in it
+  const levelWords = importance === undefined ? "" : importance === null || (importance.source === "neutral" && !importance.reason) ? t("No importance from opencode-memory, so it counts as P2") : importance.reason || importance.source;
   return <>
     <span className="sidebar-mark" aria-hidden="true">{mark !== null ? <AgentMark agent={mark} size={18} /> : <Terminal />}</span>
     <span className="agent-copy">
@@ -75,7 +76,7 @@ function AgentRowBody({ mark, markKind, title, name, context, tokens, background
     <span className="agent-row-status">
       {note !== null && <span className="sidebar-filter-note">{note}</span>}<BackgroundBadge count={backgroundTasks} /><PlanBadge plan={plan} />
       {level !== null && <span className={`agent-importance is-${level.toLowerCase()}${importance === null || importance?.source === "neutral" ? " is-neutral" : ""}`} title={levelWords} data-testid="agent-importance">
-        <span aria-hidden="true">{level}</span><span className="visually-hidden">{t("Importance {level}: {reason}", { level, reason: levelWords })}</span>
+        <span aria-hidden="true">{level}</span><span className="visually-hidden">{t("Importance {level}", { level })}</span>
       </span>}
       {muted && <span className="agent-muted" title={t("Alerts muted")} data-testid="alerts-muted"><BellOff aria-hidden="true" /><span className="visually-hidden">{t("Alerts muted")}</span></span>}
     </span>
@@ -145,7 +146,7 @@ export function AgentSidebar({ machines, selectedMachineId, selectedPaneId, stat
   // which `$name` tokens herdr's own sidebar draws, from this server's herdr config (server/herdr-sidebar.ts)
   const rowTokens = useSyncExternalStore(subscribeAgentRowTokens, currentAgentRowTokens, currentAgentRowTokens);
   const activity = useSidebarActivity();
-  // Settings → Agents order: herdr's order, or Activity or Longest wait within each PC (each herdr counts its own
+  // Settings → Agents order: herdr's order, or Activity, Longest wait or Importance within each PC (each herdr counts its own
   // changes); the pinned rows stand first, in the order they were pinned (lib/agentRoster.ts)
   const order = settings.agentOrder;
   const aging = settings.importanceAging;
