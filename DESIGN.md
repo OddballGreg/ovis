@@ -1157,8 +1157,8 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
   `state_change_seq` ascending (`agent.view.set`), with two differences: an opened finish counts
   as ready, and BG (waiting) counts as working. Activity puts the newest change first.
 - **Importance**, the fourth Agents order, keeps Longest wait's groups and, within each, puts
-  first the band opencode-memory gives the pane's OpenCode session (P0 to P3; a pane memory says
-  nothing of, or any pane while memory is away, counts as P2). Within a band an agent that has
+  first the band opencode-memory gives the pane's OpenCode session, P0 to P3. A pane memory says
+  nothing of counts as P2, as does every pane while memory is away. Within a band an agent that has
   waited past its band's limit (P1 15, P2 30, P3 60 minutes by default, set in Settings under the
   order) goes first, longest wait first; a P0 has no limit and goes by longest wait at once. An
   agent that has waited 4 times its limit is ordered with the most urgent band of its group. The
