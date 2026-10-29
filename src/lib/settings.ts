@@ -232,8 +232,8 @@ export type DiffStyle = (typeof DIFF_STYLES)[number];
 /** Raw custom text, key combinations and account keys are never copied. Requiring every other
  * Settings field in the projection makes a new field require an explicit collection decision.
  * fileOpen, webLinks, the launch modes, followHerdrFocus, composerNewTabButton, agentRowTitle, the
- * compact input line, the Agents list's placement and drawer fold, terminalMirrorWrap, sidebarFilter and the
- * interface font are not collected: the telemetry schema (shared/telemetry.ts) does not carry them. */
+ * compact input line, the Agents list's placement and drawer fold, the importance wait limits, terminalMirrorWrap,
+ * sidebarFilter and the interface font are not collected: the telemetry schema (shared/telemetry.ts) does not carry them. */
 type TelemetrySourceSettings = Omit<Settings,
   "keyBarExtras" | "keyBarItems" | "shortcutOverrides" | "terminalFontFamily" | "chatFontFamily" | "uiFontFamily"
   | "quickReplies" | "usageOrder" | "usageHidden" | "fileOpen" | "webLinks" | "claudeLaunchMode" | "codexLaunchMode"

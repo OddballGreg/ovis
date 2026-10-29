@@ -717,7 +717,7 @@ async function readKnownPrompt(
 
     let title = field.title && field.title !== field.description ? field.title : (form.title || own("Question"));
     // OpenCode 1.x names each question with a short header, which the steps show; the card says where it stands
-    if (formTransport === "plugin" && form.fields.length > 1) title = `Question ${stepIndex + 1} of ${form.fields.length}`;
+    if (formTransport === "plugin" && form.fields.length > 1) title = own("Question {n} of {total}", { n: stepIndex + 1, total: form.fields.length });
     const question = field.description || field.title || form.title || "";
     const steps = form.fields.length > 1
       ? form.fields.map((f, i) => ({

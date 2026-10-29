@@ -1,5 +1,5 @@
 /**
- * Purpose: verify sidebar spacing when PC groups fold in a real browser, which box scrolls for each
+ * Purpose: verify, in a real browser, sidebar spacing when PC groups fold, which box scrolls for each
  * Settings → Agents list placement, and that picking an agent of a folded PC
  * keeps its fold. The demo's roster is rewritten into two PCs (the Host "Laptop" and "Work PC"): a lone Host is
  * drawn without its header and has no fold (MachineSidebar.tsx).
