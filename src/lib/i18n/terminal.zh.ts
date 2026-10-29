@@ -12,6 +12,7 @@ export const TERMINAL_ZH: Record<string, string> = {
   "Waiting for terminal input…": "正在准备终端输入…",
   "Paused while you use another window": "使用其他窗口时已暂停",
   "View only while you use another window · click to type": "使用其他窗口时仅查看 · 点击即可输入",
+  "View only while you are not typing here · type or click to type": "未输入时仅查看 · 输入或点击即可输入",
   "Drop on the left": "放到左侧",
   "Drop on the right": "放到右侧",
   "Live terminal is coming to Windows PCs: herdr cannot attach a terminal there yet. The chat lens works now.": "Windows PC 的实时终端即将推出：herdr 目前还不能在 Windows 上附加终端。聊天视图现在即可使用。",
@@ -83,7 +84,6 @@ export const TERMINAL_ZH: Record<string, string> = {
   "New terminal": "新建终端",
   "New terminal failed: {reason}": "新建终端失败：{reason}",
   "Tab {n}": "标签页 {n}",
-  "Rename tab": "重命名标签页",
   "Close tab": "关闭标签页",
   "Actions for {tab}": "{tab} 的操作",
   "Close tab {name}?": "关闭标签页 {name}？",
@@ -117,4 +117,7 @@ export const TERMINAL_ZH: Record<string, string> = {
   "Too long for the message draft": "内容过长，无法加入消息草稿",
   "Tap Input line to paste.": "要粘贴，请先点按输入框键。",
   "Paste into the input line": "粘贴到输入行",
+  "Show keyboard": "显示键盘",
+  "Hide keyboard": "隐藏键盘",
+  "Recover unsent text": "恢复未发送的文本",
 };

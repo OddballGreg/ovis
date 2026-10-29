@@ -23,6 +23,8 @@ import { PALETTE_JA } from "./i18n/palette.ja.ts";
  * in English. Placeholders in braces keep their English names.
  */
 const BASE: Record<string, string> = {
+  "Goal": "目標",
+  "Waiting for your answer": "回答待ち",
   "Back": "戻る",
   "Scroll pane up": "ペインを上にスクロール",
   "Scroll pane down": "ペインを下にスクロール",
@@ -40,6 +42,7 @@ const BASE: Record<string, string> = {
   "Chat": "チャット",
   "Agent default": "エージェントの既定",
   "Phone & devices": "スマートフォンとデバイス",
+  "Access token": "アクセストークン",
   "Install app": "アプリをインストール",
 
   // ---- shortcuts (lib/shortcuts.ts labels) ----
@@ -122,6 +125,7 @@ const BASE: Record<string, string> = {
   "Rename failed: {reason}": "名前を変更できませんでした: {reason}",
 
   // ---- PCs sidebar ----
+  "Filter workspaces and agents": "ワークスペースとエージェントを絞り込む",
   "Connecting…": "接続しています…",
   "Connected": "接続済み",
   "Reconnecting…": "再接続しています…",
@@ -222,6 +226,14 @@ const BASE: Record<string, string> = {
   "…": "…",
   "Alerts": "通知",
   "Sending…": "送信中…",
+  // the alerts health notice over the pane and Settings → Alerts say these alike (lib/pushHealth.ts)
+  "This device's push subscription is missing. Turn alerts on again.": "このデバイスのプッシュ通知の登録がありません。通知をもう一度オンにしてください。",
+  "The push service retired this device's subscription. Turn alerts on again to make a new one.": "プッシュサービスがこのデバイスの登録を無効にしました。通知をもう一度オンにすると新しく登録します。",
+  "Turn alerts on again": "通知をもう一度オンにする",
+  "Turning alerts on…": "通知をオンにしています…",
+  "This device's push subscription was made for another server key. Turn alerts on again to make a new one.": "このデバイスのプッシュ通知の登録は別のサーバーキーで作られています。通知をもう一度オンにすると新しく登録します。",
+  "The push service refused the last alert to this device. Send a test to check whether it still does.": "プッシュサービスがこのデバイスへの最後の通知を拒否しました。テストを送って、今も拒否されるか確認してください。",
+  "This device can only watch.": "この端末は閲覧のみできます。",
   "Needs input": "入力が必要",
   "Finished": "完了",
   "Open pane": "ペインを開く",
@@ -242,6 +254,7 @@ const BASE: Record<string, string> = {
   "Try again": "再試行",
   // tabs: the strip over the pane, and the New tab dialog
   "New tab": "新しいタブ",
+  "Rename tab": "タブの名前を変更",
   "Zoom pane": "ペインをズーム",
   "Unzoom pane": "ズームを解除",
   "This PC's bridge does not offer this yet": "このPCのブリッジはまだこの機能に対応していません。",
@@ -283,6 +296,15 @@ const BASE: Record<string, string> = {
   "A dialog was left open in OpenCode.": "OpenCode でダイアログが開いたままです。",
   "Couldn't switch the model in OpenCode. Choose it in the terminal with ctrl+x m.": "OpenCode でモデルを切り替えられませんでした。ターミナルで ctrl+x m を押して選んでください。",
   "Model": "モデル",
+  // Recover unsent text (components/UnsentText.tsx)
+  "Unsent text": "未送信のテキスト",
+  "Text you had not sent when herdr restarted. A new herdr gives pane IDs out again, so it waits here rather than in a pane it was not written for. Nothing here is sent.": "herdr が再起動したときに送信していなかったテキストです。新しい herdr はペイン ID を再び割り当てるため、別のペインに出ないようここに保管しています。ここからは何も送信されません。",
+  "Put in message box": "入力欄に入れる",
+  "Adds the text to this pane's message box. Nothing is sent.": "このペインの入力欄にテキストを追加します。送信はしません。",
+  "Message box": "入力欄",
+  "Terminal line": "ターミナルの入力行",
+  "Held message": "保留中のメッセージ",
+  "Held input": "保持した入力",
 };
 
 /** The parts JA is made of; src/lib/i18n.test.ts fails when a key is in two parts, since a spread keeps only the last. */

@@ -58,11 +58,38 @@ describe("keepsArrowsForText", () => {
 
   it("leaves Home and End to a field with text too, and only selection keys", () => {
     const draft = { tagName: "TEXTAREA", value: "draft", classList: classes("composer-text") };
-    expect(keepsKeyForText({ key: "Home", target: draft })).toBe(true);
-    expect(keepsKeyForText({ key: "End", target: draft })).toBe(true);
-    expect(keepsKeyForText({ key: "ArrowUp", target: draft })).toBe(true);
-    expect(keepsKeyForText({ key: "k", target: draft })).toBe(false);
-    expect(keepsKeyForText({ key: "Home", target: { tagName: "TEXTAREA", classList: classes("xterm-helper-textarea") } })).toBe(false);
+    expect(keepsKeyForText({ key: "Home", target: draft }, "previous-pane")).toBe(true);
+    expect(keepsKeyForText({ key: "End", target: draft }, "next-pane")).toBe(true);
+    expect(keepsKeyForText({ key: "ArrowUp", target: draft }, "previous-pane")).toBe(true);
+    expect(keepsKeyForText({ key: "k", target: draft }, "palette")).toBe(false);
+    expect(keepsKeyForText({ key: "Home", target: { tagName: "TEXTAREA", classList: classes("xterm-helper-textarea") } }, "previous-pane")).toBe(false);
+  });
+
+  it("lets the binding go where the field has no text left that way, so a draft never stops a pane switch", () => {
+    const draft = (selectionStart: number, selectionEnd: number, selectionDirection = "none") =>
+      ({ tagName: "TEXTAREA", value: "draft", selectionStart, selectionEnd, selectionDirection, classList: classes("composer-text") });
+    // the caret at the end: down has nothing left to select, up still does
+    expect(keepsKeyForText({ key: "ArrowDown", target: draft(5, 5) }, "next-pane")).toBe(false);
+    expect(keepsKeyForText({ key: "End", target: draft(5, 5) }, "next-pane")).toBe(false);
+    expect(keepsKeyForText({ key: "ArrowUp", target: draft(5, 5) }, "previous-pane")).toBe(true);
+    // up once selected to the start (its moving end): the next up switches
+    expect(keepsKeyForText({ key: "ArrowUp", target: draft(0, 5, "backward") }, "previous-pane")).toBe(false);
+    expect(keepsKeyForText({ key: "ArrowDown", target: draft(0, 5, "backward") }, "next-pane")).toBe(true);
+    // a selection made forward from the start still moves its end back
+    expect(keepsKeyForText({ key: "ArrowUp", target: draft(0, 5, "forward") }, "previous-pane")).toBe(true);
+    expect(keepsKeyForText({ key: "ArrowDown", target: draft(0, 5, "forward") }, "next-pane")).toBe(false);
+    // the caret inside the text: both ways still select
+    expect(keepsKeyForText({ key: "ArrowUp", target: draft(2, 2) }, "previous-pane")).toBe(true);
+    expect(keepsKeyForText({ key: "ArrowDown", target: draft(2, 2) }, "next-pane")).toBe(true);
+  });
+
+  it("gives a draft's edge only to the pane steps: another binding on those keys stays with the text", () => {
+    const atStart = { tagName: "TEXTAREA", value: "draft", selectionStart: 0, selectionEnd: 0, selectionDirection: "none", classList: classes("composer-text") };
+    const event = { key: "Home", code: "Home", ctrlKey: false, metaKey: true, shiftKey: true, altKey: false, target: atStart };
+    const shortcut = matchShortcut(event, true, { palette: "Home" });
+    expect(shortcut).toBe("palette");
+    expect(keepsKeyForText(event, shortcut!)).toBe(true);
+    expect(keepsKeyForText(event, "previous-pane")).toBe(false);
   });
 });
 
@@ -211,13 +238,15 @@ it("pages the selected pane with fixed Mod+Shift bindings, remapping and disabli
 
 describe("new tab and split pane", () => {
   it("have no key until one is chosen in Settings, and then work like any other binding", () => {
-    for (const id of ["new-tab", "split-right", "split-down"] as const) {
+    for (const id of ["new-tab", "rename-tab", "split-right", "split-down"] as const) {
       expect(shortcutKeys(id, {})).toEqual([]);
       expect(shortcutDisplayKeys(id, {})).toEqual([]);
     }
     expect(matchShortcut(keyEvent("t", { ctrlKey: true }), false)).toBeNull();
-    const overrides = sanitizeShortcutOverrides({ "new-tab": "y", "split-right": "l", "split-down": "h" });
-    expect(overrides).toEqual({ "new-tab": "y", "split-right": "l", "split-down": "h" });
+    const overrides = sanitizeShortcutOverrides({ "new-tab": "y", "rename-tab": "r", "split-right": "l", "split-down": "h" });
+    expect(overrides).toEqual({ "new-tab": "y", "rename-tab": "r", "split-right": "l", "split-down": "h" });
+    expect(matchShortcut(keyEvent("R", { ctrlKey: true }), false, overrides)).toBe("rename-tab");
+    expect(shortcutDisplayKeys("rename-tab", overrides)).toEqual(["Mod", "Shift", "R"]);
     expect(matchShortcut(keyEvent("Y", { ctrlKey: true }), false, overrides)).toBe("new-tab");
     expect(matchShortcut(keyEvent("l", { metaKey: true }), true, overrides)).toBe("split-right");
     expect(matchShortcut(keyEvent("h", { ctrlKey: true }), false, overrides)).toBe("split-down");

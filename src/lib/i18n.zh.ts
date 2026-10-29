@@ -25,6 +25,8 @@ import { PALETTE_ZH } from "./i18n/palette.zh.ts";
  * Placeholders in braces keep their English names.
  */
 const BASE: Record<string, string> = {
+  "Goal": "目标",
+  "Waiting for your answer": "等待你的回答",
   "Back": "返回",
   "Scroll pane up": "向上滚动面板",
   "Scroll pane down": "向下滚动面板",
@@ -42,6 +44,7 @@ const BASE: Record<string, string> = {
   "Chat": "聊天",
   "Agent default": "代理默认",
   "Phone & devices": "手机和设备",
+  "Access token": "访问 Token",
   "Install app": "安装应用",
 
   // ---- shortcuts (lib/shortcuts.ts labels) ----
@@ -124,6 +127,7 @@ const BASE: Record<string, string> = {
   "Rename failed: {reason}": "重命名失败：{reason}",
 
   // ---- PCs sidebar ----
+  "Filter workspaces and agents": "筛选工作区和代理",
   "Connecting…": "正在连接…",
   "Connected": "已连接",
   "Reconnecting…": "正在重连…",
@@ -224,6 +228,14 @@ const BASE: Record<string, string> = {
   "…": "…",
   "Alerts": "提醒",
   "Sending…": "正在发送…",
+  // the alerts health notice over the pane and Settings → Alerts say these alike (lib/pushHealth.ts)
+  "This device's push subscription is missing. Turn alerts on again.": "此设备的推送订阅不存在。请重新开启提醒。",
+  "The push service retired this device's subscription. Turn alerts on again to make a new one.": "推送服务已停用此设备的订阅。重新开启提醒即可创建新的订阅。",
+  "Turn alerts on again": "重新开启提醒",
+  "Turning alerts on…": "正在开启提醒…",
+  "This device's push subscription was made for another server key. Turn alerts on again to make a new one.": "此设备的推送订阅是用另一个服务器密钥创建的。请重新开启提醒以创建新的订阅。",
+  "The push service refused the last alert to this device. Send a test to check whether it still does.": "推送服务拒绝了发往此设备的上一条提醒。请发送测试，看看是否仍被拒绝。",
+  "This device can only watch.": "此设备只能查看。",
   "Needs input": "需要输入",
   "Finished": "已完成",
   "Open pane": "打开窗格",
@@ -244,6 +256,7 @@ const BASE: Record<string, string> = {
   "Try again": "重试",
   // tabs: the strip over the pane, and the New tab dialog
   "New tab": "新建标签页",
+  "Rename tab": "重命名标签页",
   "Zoom pane": "放大窗格",
   "Unzoom pane": "取消放大",
   "This PC's bridge does not offer this yet": "此电脑的桥接尚未提供此功能。",
@@ -285,6 +298,15 @@ const BASE: Record<string, string> = {
   "A dialog was left open in OpenCode.": "OpenCode 中仍有一个对话框处于打开状态。",
   "Couldn't switch the model in OpenCode. Choose it in the terminal with ctrl+x m.": "无法在 OpenCode 中切换模型。请在终端中按 ctrl+x m 选择。",
   "Model": "模型",
+  // Recover unsent text (components/UnsentText.tsx)
+  "Unsent text": "未发送的文本",
+  "Text you had not sent when herdr restarted. A new herdr gives pane IDs out again, so it waits here rather than in a pane it was not written for. Nothing here is sent.": "herdr 重启时尚未发送的文本。新的 herdr 会重新分配面板 ID，因此这些文本保存在这里，而不会出现在不属于它的面板中。这里不会发送任何内容。",
+  "Put in message box": "放入输入框",
+  "Adds the text to this pane's message box. Nothing is sent.": "将文本添加到此面板的输入框中。不会发送。",
+  "Message box": "输入框",
+  "Terminal line": "终端输入行",
+  "Held message": "保留的消息",
+  "Held input": "保留的输入",
 };
 
 /** The parts ZH is made of; src/lib/i18n.test.ts fails when a key is in two parts, since a spread keeps only the last. */
