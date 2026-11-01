@@ -126,7 +126,7 @@ export const SETTINGS_ZH: Record<string, string> = {
   "At the bottom": "底部",
   "Under the workspaces": "工作区下方",
   "Agents on a phone": "手机上的代理",
-  "How the Agents list starts in the phone's sidebar; a wider screen always starts it unfolded": "代理列表在手机侧边栏中初始的样子；更宽的屏幕上总是展开显示",
+  "How the Agents list starts in the phone's sidebar; a wider screen starts it unfolded unless you folded it there": "代理列表在手机侧边栏中初始的样子；更宽的屏幕上会展开显示，除非你在那里将其折叠",
   "Folded": "折叠",
   "Unfolded": "展开",
   "Agent logos": "代理标志",

@@ -1147,7 +1147,7 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
   at the bottom. **Agents on a phone** is **Folded** by default; **Unfolded** starts the list open
   in the drawer. A wider screen starts it open unless the reader folded it there. Both choices are
   shared with the other browsers of the server; the fold the user makes afterwards is kept on
-  this device until **Agents on a phone** changes, which forgets it.
+  this device, and on a phone until **Agents on a phone** changes, which forgets it.
 - A PC's header is the head of its workspaces, and the caret beside its `+` is the one fold over
   them. The roster has no label or fold of its own.
 - When the sidebar shows one PC and it is the Host (the only PC, or the others hidden on this device), its group

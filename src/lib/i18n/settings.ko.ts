@@ -126,7 +126,7 @@ export const SETTINGS_KO: Record<string, string> = {
   "At the bottom": "맨 아래",
   "Under the workspaces": "워크스페이스 아래",
   "Agents on a phone": "휴대폰의 에이전트",
-  "How the Agents list starts in the phone's sidebar; a wider screen always starts it unfolded": "휴대폰 사이드바에서 에이전트 목록이 처음 어떻게 보일지 정합니다. 더 넓은 화면에서는 항상 펼쳐진 채로 시작합니다",
+  "How the Agents list starts in the phone's sidebar; a wider screen starts it unfolded unless you folded it there": "휴대폰 사이드바에서 에이전트 목록이 처음 어떻게 보일지 정합니다. 더 넓은 화면에서는 그곳에서 접어 두지 않았다면 펼쳐진 채로 시작합니다",
   "Folded": "접힘",
   "Unfolded": "펼침",
   "Agent logos": "에이전트 로고",

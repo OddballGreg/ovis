@@ -148,9 +148,9 @@ export function AgentSidebar({ machines, selectedMachineId, selectedPaneId, stat
     // the effect also runs again with the same value (a hidden <Activity> shown again, Fast Refresh): only a new one refolds
     if (foldSetting.current === drawerFold) return;
     foldSetting.current = drawerFold;
+    if (!inDrawer()) return;
     // a new setting is the reader's newer choice: the fold kept from before would override it on the next launch
     try { window.localStorage.removeItem(FOLD_KEY); } catch { /* no storage: nothing kept */ }
-    if (!inDrawer()) return;
     setCollapsed(drawerFold === "folded");
   }, [drawerFold]);
   // shared with the other browsers of this server (lib/preferencesSync.ts)

@@ -397,7 +397,7 @@ function AppearancePage() {
       <SettingsRow label={t("Agents list")} description={t("“At the bottom” docks the list above the footer; “Under the workspaces” puts it after the last workspace, to scroll with them")} wide>
         <Segmented label={t("Agents list")} value={settings.agentsPlacement} onChange={(agentsPlacement) => update({ agentsPlacement })} options={[{ value: "bottom", label: t("At the bottom") }, { value: "below", label: t("Under the workspaces") }]} />
       </SettingsRow>
-      <SettingsRow label={t("Agents on a phone")} description={t("How the Agents list starts in the phone's sidebar; a wider screen always starts it unfolded")} wide>
+      <SettingsRow label={t("Agents on a phone")} description={t("How the Agents list starts in the phone's sidebar; a wider screen starts it unfolded unless you folded it there")} wide>
         <Segmented label={t("Agents on a phone")} value={settings.agentsDrawerFold} onChange={(agentsDrawerFold) => update({ agentsDrawerFold })} options={[{ value: "folded", label: t("Folded") }, { value: "open", label: t("Unfolded") }]} />
       </SettingsRow>
       <SettingsRow label={t("Agent logos")} description={t("Draw each agent's logo in its brand colors, or without color")} wide>

@@ -126,7 +126,7 @@ export const SETTINGS_JA: Record<string, string> = {
   "At the bottom": "一番下",
   "Under the workspaces": "ワークスペースの下",
   "Agents on a phone": "スマートフォンのエージェント",
-  "How the Agents list starts in the phone's sidebar; a wider screen always starts it unfolded": "スマートフォンのサイドバーでエージェント一覧を最初にどう表示するかを選びます。広い画面では常に展開した状態で始まります",
+  "How the Agents list starts in the phone's sidebar; a wider screen starts it unfolded unless you folded it there": "スマートフォンのサイドバーでエージェント一覧を最初にどう表示するかを選びます。広い画面では、そこで折りたたんでいない限り展開した状態で始まります",
   "Folded": "折りたたむ",
   "Unfolded": "展開",
   "Agent logos": "エージェントのロゴ",

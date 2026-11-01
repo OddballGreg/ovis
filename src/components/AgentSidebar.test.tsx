@@ -304,6 +304,18 @@ describe("AgentSidebar fold memory", () => {
     expect((await sidebar.remount()).expanded()).toBe(false);
   });
 
+  it("keeps a desktop's fold when Agents on a phone changes, since the setting is the drawer's", async () => {
+    // Given a desktop whose reader folded the list.
+    stored.set(FOLD_KEY, "1");
+    const sidebar = await mount();
+    expect(sidebar.expanded()).toBe(false);
+    // When Agents on a phone changes from another browser.
+    await act(async () => { updateSettings?.({ agentsDrawerFold: "open" }); });
+    // Then the desktop's kept fold stays, also after a reload.
+    expect(stored.get(FOLD_KEY)).toBe("1");
+    expect((await sidebar.remount()).expanded()).toBe(false);
+  });
+
   it("never writes the filter's temporary fold", async () => {
     // Given a filter that keeps no agent rows.
     const sidebar = await mount({ query: "nothing", active: true, machines: new Map(), matches: 0 });
