@@ -2,7 +2,7 @@
  * Simplified Chinese for the keys only the chat files use:
  * components/ChatView.tsx, components/Markdown.tsx, components/MermaidLightbox.tsx,
  * components/ChatMinimap.tsx, components/ImageLightbox.tsx, components/BackgroundTasks.tsx,
- * components/BackgroundAgentDetail.tsx, components/MarkdownLinkMenu.tsx,
+ * components/BackgroundAgentDetail.tsx, components/Artifacts.tsx, components/MarkdownLinkMenu.tsx,
  * lib/workBlocks.ts (with CATEGORY_LABEL), lib/toolVerbs.ts (with VERB_LABEL), lib/outcomeChip.ts,
  * lib/chatTimestamp.ts, lib/chatReadDeadline.ts.
  * Register and fixed terms follow ../i18n.zh.ts; a key another feature also uses goes there.
@@ -27,6 +27,7 @@ export const CHAT_ZH: Record<string, string> = {
   "Show all {n} lines": "显示全部 {n} 行",
   "Empty task": "空任务",
   "Couldn't copy. Select the text and copy it manually.": "无法复制。请选中文本并手动复制。",
+  "Input": "输入",
   "Output": "输出",
   "Arguments omitted (too large)": "参数过大，已省略",
   "thinking": "思考",
@@ -144,6 +145,9 @@ export const CHAT_ZH: Record<string, string> = {
   "{n} tool calls": "{n} 次工具调用",
   "{n} tokens": "{n} 个 token",
   "Background tasks": "后台任务",
+  "Artifacts": "Artifact",
+  "{n} artifact": "{n} 个 Artifact",
+  "{n} artifacts": "{n} 个 Artifact",
   "Couldn't load the background tasks": "无法加载后台任务",
   "No background tasks to show yet": "暂时没有可显示的后台任务",
   "Running": "运行中",
@@ -203,4 +207,5 @@ export const CHAT_ZH: Record<string, string> = {
   "Show full message": "显示完整消息",
   "Open link": "打开链接",
   "Share link": "分享链接",
+  "Sent · waiting for the agent's next turn": "已发送 · 等待 agent 的下一轮",
 };

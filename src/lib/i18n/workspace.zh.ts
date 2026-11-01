@@ -59,6 +59,9 @@ export const WORKSPACE_ZH: Record<string, string> = {
   "One model name, without spaces.": "填写一个不含空格的模型名称。",
   "Effort": "推理强度",
   "Levels depend on the model.": "可选的级别取决于模型。",
+  "Ultracode": "Ultracode",
+  "Claude Code 2.1.284 or later": "Claude Code 2.1.284 或更高版本",
+  "Dynamic workflows at any effort level. Needs Claude Code 2.1.284 or later.": "在任意推理强度下运行动态工作流。需要 Claude Code 2.1.284 或更高版本。",
   "First message": "第一条消息",
   "Optional": "可选",
   "Sent to {agent} as it starts.": "随 {agent} 启动一起发送。",
@@ -87,4 +90,7 @@ export const WORKSPACE_ZH: Record<string, string> = {
   "The folder could not be made.": "无法创建文件夹。",
   "Tab name (optional)": "标签页名称（可选）",
   "Uses the workspace's folder": "直接使用工作区的文件夹",
+  "Add another agent…": "添加其他代理…",
+  "It is installed, but this PC does not offer it here yet. Restart Ovis on the PC, or start it in a terminal tab.": "已经安装，但这台电脑还没有在这里提供它。请在电脑上重启 Ovis，或在终端标签页中启动它。",
+  "It is installed. Waiting for this PC to offer it here…": "已安装。正在等待这台电脑在这里提供它…",
 };

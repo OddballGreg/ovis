@@ -152,6 +152,8 @@ export interface Settings {
   chatFontSize: number | null;
   /** fonts tried before the UI font in the chat's prose (code stays mono), as a CSS font-family list; "" keeps the UI font */
   chatFontFamily: string;
+  /** prompts per history page in the chat; older turns load a page at a time as the reader scrolls up */
+  historyPrompts: number;
   /** the interface's body size in px (--fs-md; every other --fs-* scales with it as --ui-scale); null follows the density.
    *  The chat follows it until it has a size of its own; the terminal keeps terminalFontSize */
   uiFontSize: number | null;
@@ -168,6 +170,9 @@ export interface Settings {
   /** a New tab with an agent… button in the chat's composer, in a mouse-driven window; off until chosen, so the
    *  composer's row stays minimal: the tab menu opens the same dialog either way */
   composerNewTabButton: boolean;
+  /** the Artifacts chip in a Claude Code pane's composer, listing the pages its session published; off until chosen,
+   *  so the composer's row stays minimal */
+  composerArtifacts: boolean;
   /** on a touch screen, a chip above the message box offers the prompt the agent suggests next.
    * Not `showSuggestionChip`: that key was on by default until 0.4.9 and is still stored on phones */
   suggestionChip: boolean;
@@ -231,13 +236,13 @@ export type DiffStyle = (typeof DIFF_STYLES)[number];
 
 /** Raw custom text, key combinations and account keys are never copied. Requiring every other
  * Settings field in the projection makes a new field require an explicit collection decision.
- * fileOpen, webLinks, the launch modes, followHerdrFocus, composerNewTabButton, agentRowTitle, the
+ * fileOpen, webLinks, the launch modes, followHerdrFocus, composerNewTabButton, composerArtifacts, agentRowTitle, the
  * compact input line, the Agents list's placement and drawer fold, the importance wait limits, terminalMirrorWrap,
- * sidebarFilter and the interface font are not collected: the telemetry schema (shared/telemetry.ts) does not carry them. */
+ * sidebarFilter, the interface font and the chat's history page size are not collected: the telemetry schema (shared/telemetry.ts) does not carry them. */
 type TelemetrySourceSettings = Omit<Settings,
   "keyBarExtras" | "keyBarItems" | "shortcutOverrides" | "terminalFontFamily" | "chatFontFamily" | "uiFontFamily"
   | "quickReplies" | "usageOrder" | "usageHidden" | "fileOpen" | "webLinks" | "claudeLaunchMode" | "codexLaunchMode"
-  | "followHerdrFocus" | "composerNewTabButton" | "agentRowTitle" | "compactTerminalInput" | "compactKeyBarShown" | "agentsPlacement" | "agentsDrawerFold" | "terminalMirrorWrap" | "importanceAging" | "sidebarFilter">;
+  | "followHerdrFocus" | "composerNewTabButton" | "composerArtifacts" | "agentRowTitle" | "compactTerminalInput" | "compactKeyBarShown" | "agentsPlacement" | "agentsDrawerFold" | "terminalMirrorWrap" | "importanceAging" | "sidebarFilter" | "historyPrompts">;
 
 /** Compare structured custom settings by content against this app's built-in defaults. */
 function differsFromDefault(value: unknown, defaultValue: unknown): boolean {
@@ -320,9 +325,11 @@ export const SETTING_SCOPE = {
   terminalMirrorWrap: "device",
   // a desk that follows herdr's focus must not move a phone open on another pane
   followHerdrFocus: "device",
-  chatFontSize: "device", chatFontFamily: "device", uiFontSize: "device", uiFontFamily: "device", chatWidth: "device", enterSends: "device",
+  chatFontSize: "device", chatFontFamily: "device", historyPrompts: "device", uiFontSize: "device", uiFontFamily: "device", chatWidth: "device", enterSends: "device",
   // a desk's composer button: a phone never shows it
   composerNewTabButton: "device",
+  // the composer's row is this screen's: a phone may keep it bare while a desk shows the chip
+  composerArtifacts: "device",
   // a desk with a keyboard may do without the field a phone keeps, as with the PCs it shows (lib/hiddenMachines.ts)
   sidebarFilter: "device",
   keepScreenOn: "device", alertsOn: "device", alertInput: "device", alertDone: "device", alertInApp: "device", alertSound: "device",
@@ -370,6 +377,7 @@ export const DEFAULT_SETTINGS: Settings = {
   releasePaneAway: false,
   followHerdrFocus: false,
   chatFontSize: null,
+  historyPrompts: 10,
   chatFontFamily: "",
   uiFontSize: null,
   uiFontFamily: "",
@@ -377,6 +385,7 @@ export const DEFAULT_SETTINGS: Settings = {
   enterSends: true,
   autoSendQueued: true,
   composerNewTabButton: false,
+  composerArtifacts: false,
   suggestionChip: false,
   showThinking: false,
   keepScreenOn: false,
@@ -448,6 +457,9 @@ export const TERMINAL_WHEEL_SPEED_MIN = 1;
 export const TERMINAL_WHEEL_SPEED_MAX = 10;
 
 export const CHAT_FONT_MIN = 11;
+/** The chat's history page sizes, in prompts (one user turn and its answer each). */
+export const HISTORY_PROMPTS = [10, 25, 50] as const;
+
 export const CHAT_FONT_MAX = 24;
 /** each density's body size, --fs-md in src/styles.css: the interface's size when none is chosen, and through it the chat's */
 const BODY_FONT: Record<Density, number> = { comfortable: 14, compact: 13 };
@@ -562,6 +574,9 @@ export function sanitizeSettings(raw: unknown): Settings {
     chatFontSize: typeof chatFont === "number" && Number.isFinite(chatFont)
       ? Math.min(CHAT_FONT_MAX, Math.max(CHAT_FONT_MIN, Math.round(chatFont)))
       : DEFAULT_SETTINGS.chatFontSize,
+    historyPrompts: HISTORY_PROMPTS.includes(record["historyPrompts"] as (typeof HISTORY_PROMPTS)[number])
+      ? (record["historyPrompts"] as number)
+      : DEFAULT_SETTINGS.historyPrompts,
     terminalFontFamily: sanitizeFontFamily(record["terminalFontFamily"]),
     uiFontSize: sanitizeUiFontSize(record["uiFontSize"]),
     uiFontFamily: sanitizeFontFamily(record["uiFontFamily"]),
@@ -574,6 +589,7 @@ export function sanitizeSettings(raw: unknown): Settings {
     enterSends: typeof record["enterSends"] === "boolean" ? record["enterSends"] : DEFAULT_SETTINGS.enterSends,
     autoSendQueued: typeof record["autoSendQueued"] === "boolean" ? record["autoSendQueued"] : DEFAULT_SETTINGS.autoSendQueued,
     composerNewTabButton: typeof record["composerNewTabButton"] === "boolean" ? record["composerNewTabButton"] : DEFAULT_SETTINGS.composerNewTabButton,
+    composerArtifacts: typeof record["composerArtifacts"] === "boolean" ? record["composerArtifacts"] : DEFAULT_SETTINGS.composerArtifacts,
     suggestionChip: typeof record["suggestionChip"] === "boolean" ? record["suggestionChip"] : DEFAULT_SETTINGS.suggestionChip,
     showThinking: typeof record["showThinking"] === "boolean" ? record["showThinking"] : DEFAULT_SETTINGS.showThinking,
     keepScreenOn: typeof record["keepScreenOn"] === "boolean" ? record["keepScreenOn"] : DEFAULT_SETTINGS.keepScreenOn,
@@ -650,12 +666,37 @@ function readSidebarFilter(): boolean {
   }
 }
 
+/** Settings → Chat → History page size, kept in a key of its own for the same reason: an old tab's save drops a field it does not know. */
+export const HISTORY_PROMPTS_STORAGE_KEY = "ovis:history-prompts";
+
+function readHistoryPrompts(): number {
+  try {
+    const raw = window.localStorage.getItem(HISTORY_PROMPTS_STORAGE_KEY);
+    return sanitizeSettings({ historyPrompts: raw === null ? null : JSON.parse(raw) }).historyPrompts;
+  } catch {
+    return DEFAULT_SETTINGS.historyPrompts;
+  }
+}
+
+/** Settings > Chat > Composer > Artifacts chip, kept in a key of its own for the same reason: off until chosen. */
+export const COMPOSER_ARTIFACTS_STORAGE_KEY = "ovis:composer-artifacts";
+
+function readComposerArtifacts(): boolean {
+  try {
+    const raw = window.localStorage.getItem(COMPOSER_ARTIFACTS_STORAGE_KEY);
+    const value: unknown = raw === null ? null : JSON.parse(raw);
+    return typeof value === "boolean" ? value : DEFAULT_SETTINGS.composerArtifacts;
+  } catch {
+    return DEFAULT_SETTINGS.composerArtifacts;
+  }
+}
+
 export function loadSettings(): Settings {
   // read as the page's boot script reads them (themeBoot.ts), so React starts on the row the first frame showed
   const stored = readStoredAppearance(() => window.localStorage);
   const settings = stored.main === null ? DEFAULT_SETTINGS : sanitizeSettings(stored.main.value);
   const merged = stored.themes === null ? settings : sanitizeSettings({ ...settings, ...stored.themes });
-  return { ...merged, uiFontFamily: readUiFontFamily(), terminalMirrorWrap: readMirrorWrap(), sidebarFilter: readSidebarFilter() };
+  return { ...merged, uiFontFamily: readUiFontFamily(), terminalMirrorWrap: readMirrorWrap(), sidebarFilter: readSidebarFilter(), historyPrompts: readHistoryPrompts(), composerArtifacts: readComposerArtifacts() };
 }
 
 export function saveSettings(settings: Settings): void {
@@ -665,10 +706,12 @@ export function saveSettings(settings: Settings): void {
       darkTheme: mirrored.darkTheme, lightTheme: mirrored.lightTheme,
       mirror: { palette: mirrored.palette, paletteDark: mirrored.paletteDark, paletteLight: mirrored.paletteLight },
     }));
-    const { uiFontFamily, terminalMirrorWrap, sidebarFilter, ...main } = mirrored;
+    const { uiFontFamily, terminalMirrorWrap, sidebarFilter, historyPrompts, composerArtifacts, ...main } = mirrored;
     window.localStorage.setItem(UI_FONT_STORAGE_KEY, JSON.stringify(uiFontFamily));
     window.localStorage.setItem(MIRROR_WRAP_STORAGE_KEY, JSON.stringify(terminalMirrorWrap));
     window.localStorage.setItem(SIDEBAR_FILTER_STORAGE_KEY, JSON.stringify(sidebarFilter));
+    window.localStorage.setItem(HISTORY_PROMPTS_STORAGE_KEY, JSON.stringify(historyPrompts));
+    window.localStorage.setItem(COMPOSER_ARTIFACTS_STORAGE_KEY, JSON.stringify(composerArtifacts));
     window.localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(main));
   } catch {
     /* private mode: preferences last for the session */

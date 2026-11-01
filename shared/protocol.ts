@@ -143,7 +143,8 @@ export type { DevicePairedEvent, Machine, MachineEvent, MachineRoster, PaneTarge
  *         Unsupported methods/actions get 405 method_not_allowed; a watch-only device gets
  *         403 read_only. Startup holds HTTP/WS requests until leftover Portal cleanup completes;
  *         unreadable saved state or unverifiable cleanup fails closed with 500 internal_error.
- *  GET    /api/updates                   -> UpdateStatus (shared/update.ts), no-store
+ *  GET    /api/updates                   -> UpdateStatus (shared/update.ts), no-store; to the bridge
+ *         token (which cannot read /api/access) also `port` and `serving_url`, where it answers
  *  POST   /api/updates/check             -> 202 { accepted: true }
  *  POST   /api/updates/install           -> 202 { accepted: true }; UpdateInstallRequest JSON body
  *         (at most 1 KiB): 400 invalid_update_install for a missing or malformed revision,
@@ -165,6 +166,28 @@ export type { DevicePairedEvent, Machine, MachineEvent, MachineRoster, PaneTarge
  *         kinds `agent.start` accepts, plus omo and gjc when they are on this server's PATH,
  *         each with `installed`: whether its command is on this server's PATH; for the
  *         new-session dialog)
+ *  GET    /api/agent-catalog             -> AgentCatalogResponse (shared/agent-catalog.ts: every agent
+ *         Ovis can install, with this PC's platform's official commands and whether each is
+ *         installed here, at which version, read from its version flag's stdout when the flag exits
+ *         0 (5 s limit, longer where the entry sets detect.version_timeout_ms; kept until the
+ *         executable file changes; a flag that fails, version_error "failed", or hangs, "timeout", is
+ *         asked again after a minute, and such an agent does not run: agentRuns). Read only,
+ *         no-store; a watch device may read it. A remote PC
+ *         from before the endpoint answers 404 through /api/machines/<id>/agent-catalog)
+ *  POST   /api/agent-catalog/install { agent, alternative? } -> { pane_id, workspace_id, command,
+ *         shell } (opens a tab and types that agent's official command for this PC's platform into its
+ *         shell: the catalog's primary, or alternatives[alternative]; the request never carries a
+ *         command. 400 unknown_agent / invalid_alternative / unknown_field (any other field); 409
+ *         no_install_command, command_refused, shell_mismatch (Windows: the method's shell is not the
+ *         tab's), shell_unknown (Windows: herdr names no PowerShell or cmd.exe in the tab within 10 s);
+ *         both type nothing and close the tab, as any failure after the tab opened does;
+ *         install_running (one install per agent per PC while its installer runs in its tab: until
+ *         the tab is back at its shell, the tab closes, no installer was seen within 2 min, or 30
+ *         min pass; finding the agent installed does not end it), platform_unsupported)
+ *  POST   /api/agent-catalog/sign-in { agent } -> the same (a tab running the agent's own sign-in
+ *         command, or the agent itself when it signs in inside; 400 unknown_field; 409 no_sign_in,
+ *         not_installed, shell_unknown). Both
+ *         are mutations: a watch device gets 403 read_only; another PC's go through the PC proxy
  *  GET    /api/integrations              -> IntegrationsResponse (herdr's `integration.list`, in
  *         herdr's order; read only: nothing here installs or removes one, Settings shows the
  *         `herdr integration install` command instead)
@@ -222,6 +245,9 @@ export type { DevicePairedEvent, Machine, MachineEvent, MachineRoster, PaneTarge
  *         source:"scrollback" when the pane has no recognized, readable store; source:"opencode-http"
  *         for an OpenCode 1.x session read from OpenCode's own server (OVIS_OPENCODE_URL or
  *         OVIS_OPENCODE_SERVE=1), else its store is read as "opencode-transcript".
+ *         Copilot page reads that fail while fresh ownership, file generation and the requested
+ *         history_id (or bound cursor) still match answer 503 conversation_read_pending:
+ *         retain the displayed view and retry, not fallback. A mismatched history_id answers 409.
  *         Grok requires exact live process/session evidence, Agy live process/session evidence;
  *         rewinds invalidate cursors.
  *         Grok/Agy optional activity describes the latest native turn, independently of pane status.)
@@ -269,6 +295,9 @@ export type { DevicePairedEvent, Machine, MachineEvent, MachineRoster, PaneTarge
  *         pane's OmO session started, or a Claude Code pane's subagents (no workflows): running ones, then
  *         those that ended in the last day; empty for any other pane or one whose session is not
  *         known yet. server_time: that PC's clock, which the times are on)
+ *  GET    /api/pane/artifacts?pane_id= -> { artifacts: ClaudeArtifact[] } (the pages a Claude Code
+ *         pane's session published with its Artifact tool, newest first; empty for any other pane or
+ *         one whose session is not known yet)
  *  GET    /api/pane/plan?pane_id=       -> PanePlan (the plan the pane's Claude Code, Codex or OmO session
  *         keeps: its task list or checklist, read from the transcript; null when it keeps none)
  *  GET    /api/pane/opencode-models?pane_id= -> OpencodeModelCatalog (the models an OpenCode 1.x pane can
@@ -406,7 +435,7 @@ export interface ApiError {
 
 export type { PaneFindMatch, PaneFindRequest, PaneFindResponse } from "./find.ts";
 
-export type { UsageProviderId, UsageWindow, UsageProblem, ProviderUsage, UsageReport } from "./usage.ts";
+export type { UsageProviderId, UsageWindow, UsageProblem, ProviderUsage, UsageReport, StatuslineState } from "./usage.ts";
 
 export type { CLIProxyStatus, CLIProxyProvider, CLIProxyLogin, CLIProxyLoginStatus } from "./cliproxy.ts";
 
@@ -502,6 +531,9 @@ export type ConversationPart =
   /** a message the agent's runtime put in the user's seat (gjc's background-job result): it starts a turn, nobody typed it.
    * `source`: the runtime's name for it (pi's customType, e.g. "async-result", "irc:incoming", "omo-model-profile:unavailable") */
   | { kind: "notice"; text: string; source?: string }
+  /** a shell command the user ran without the model (Claude Code's `!` bash mode), and what it printed: no stdout or
+   * stderr until the agent records them */
+  | { kind: "shell"; command: string; stdout?: string; stderr?: string }
   /** OmO's background tasks that ended, as OmO reported them back to the agent, or a Claude Code subagent that ended (its task notification): it starts a turn, nobody typed it */
   | { kind: "task_result"; tasks: OmoTaskResult[] };
 
@@ -590,6 +622,13 @@ export type OpencodeModelFailure =
   | "unavailable" | "not_opencode" | "busy" | "dialog_open" | "not_ready" | "aborted" | "unknown_model" | "ambiguous_model"
   | "pane_error" | "dialog_not_opened" | "model_not_found" | "not_confirmed" | "timeout";
 
+/** One page a Claude Code session published with its Artifact tool: its claude.ai URL, the title of its latest publish (else the published file's name) and when that was. */
+export interface ClaudeArtifact {
+  url: string;
+  title: string | null;
+  at: string | null;
+}
+
 /** How far a pane's plan has got, for the sidebar: `current` names the step in progress. */
 export interface PlanSummary {
   done: number;
@@ -597,13 +636,16 @@ export interface PlanSummary {
   current: string | null;
 }
 
-/** GET /api/pane/conversation: native conversation with settings, or scrollback fallback. */
+/**
+ * GET /api/pane/conversation: native conversation with settings, or scrollback fallback.
+ * A refresh may echo history_id as a query parameter to identify the view it would retain on failure.
+ */
 export interface ConversationResponse {
   /** Grok/Agy latest native turn; display feedback only, never input-delivery authority. */
   activity?: "thinking" | "working" | "idle";
   /** Stable across appends; changes on transcript replacement or native context clear. */
   history_id?: string;
-  source: "copilot-transcript" | "grok-transcript" | "agy-transcript" | "muse-transcript" | "claude-transcript" | "omp-transcript" | "omo-transcript" | "gjc-transcript" | "pi-transcript" | "cmd-transcript" | "codex-transcript" | "devin-transcript" | "opencode-transcript" | "opencode-http" | "hermes-transcript" | "scrollback";
+  source: "copilot-transcript" | "grok-transcript" | "agy-transcript" | "muse-transcript" | "letta-transcript" | "claude-transcript" | "omp-transcript" | "omo-transcript" | "gjc-transcript" | "pi-transcript" | "cmd-transcript" | "codex-transcript" | "devin-transcript" | "opencode-transcript" | "opencode-http" | "hermes-transcript" | "scrollback";
   turns: ConversationTurn[];
   metadata?: ConversationMetadata;
   /**
@@ -766,8 +808,15 @@ export interface InteractivePrompt {
   body: string | null;
   options: InteractivePromptOption[];
   multi_select: boolean;
+  /** `markdown`: the question and the options' labels and descriptions are the agent's own Markdown
+   * (omp's open ask call, once the screen's menu proves it is that call). Absent: plain text, as drawn */
+  text_format?: "markdown";
   /** Native OpenCode question explicitly marked required: false; an empty answer skips it. */
   optional?: true;
+  /** A multi-select whose typed answer goes with its checks in one answer (pi-ask's ask_user; OpenCode's native form says so by its agent). */
+  checks_with_text?: true;
+  /** Moving between steps saves the step's unsent edits on the server (pi-ask's ask_user): a step button never waits for them. */
+  drafts_saved?: true;
   /** index of the "type your own answer" option, when the menu has one */
   custom_option_index: number | null;
   /** a question in Codex's queue while Codex keeps working: only the card answers it. Collapsed,
@@ -793,6 +842,14 @@ export interface InteractivePrompt {
   fallback?: true;
   /** Claude's plan file behind a plan card, whose whole text is then the body: opened in the file viewer */
   plan_file?: string;
+  /**
+   * Claude's own words drawn over its question on the pane's screen, paragraphs parted by a blank line;
+   * lines the pane wrapped are joined back only between plain prose, every other break kept as drawn. Claude Code (2.1.311) writes them to its session file only
+   * with the answer, so until then the card shows them, as read off the screen. Absent when the
+   * screen shows no words of Claude's right over the question, or not where they start; not part
+   * of the card's id.
+   */
+  screen_words?: string;
   /**
    * The card's own words, which the bridge wrote rather than read off the agent's screen (an Esc
    * offered as Close, a fallback card's title): for each such field above, its English as a key with
@@ -893,6 +950,8 @@ export interface PendingMessage {
   state: "queued" | "sending" | "held" | "uncertain";
   created_at: string;
   error?: { code: string; message: string };
+  /** its submit was `agent_only`: a resend of a saved copy says so again */
+  agent_only?: true;
 }
 
 export type ClientMessage =
@@ -942,8 +1001,12 @@ export type ClientMessage =
    * `pending_uncertain`, including other generations of the same stable ID.
    * Not with `send_anyway`:
    * that combination returns invalid_delivery before reserving or replaying an ID. No `clear_draft`.
-   * Older peers ignore it. */
-  | { type: "submit"; id: number; pane_id: string; text: string; payload: string; typed?: boolean; delivery?: "immediate" | "queue" | "hold"; clear_draft?: string; send_anyway?: true; resend_id?: string; resend_generation?: number }
+   * Older peers ignore it.
+   * `agent_only` (feature "agent-only"): the message is for an agent alone (a chat message carrying comments on
+   * a reply, #511, whose `> quote` lines a shell would read as redirects). The server refuses it with
+   * agent_not_ready, typing nothing, when no agent is in front of the pane as it would type it; a queued or held
+   * one keeps the rule until it is typed. Not with `typed`; anything but true is invalid_delivery. */
+  | { type: "submit"; id: number; pane_id: string; text: string; payload: string; typed?: boolean; delivery?: "immediate" | "queue" | "hold"; clear_draft?: string; send_anyway?: true; resend_id?: string; resend_generation?: number; agent_only?: true }
   /** `withdrawal_only`: Edit's discard may withdraw only queued/held input; uncertain text stays
    * with its owner and returns pending_uncertain, rather than being dismissed. Older servers ignore
    * this optional field and retain their existing discard behaviour, without this protection.
@@ -1016,10 +1079,15 @@ export interface ClientConnectionTrace {
   events: ClientConnectionEvent[];
 }
 
-/** What a server supports beyond the base protocol, listed in its first snapshot; older bridges list nothing. */
-export type ServerFeature = "submit" | "pending-input" | "pending-hold" | "secret-input" | "input-ready" | "take-over" | "watch" | "conversation-watch" | "ping" | "terminal-insert";
+/** What a server supports beyond the base protocol, listed in its `features` frame and its first snapshot; older bridges list nothing. */
+export type ServerFeature = "submit" | "pending-input" | "pending-hold" | "secret-input" | "input-ready" | "take-over" | "watch" | "conversation-watch" | "ping" | "terminal-insert" | "agent-only";
 
 export type ServerMessage =
+  /** the first frame of a connection, before the snapshot that can wait seconds on herdr: what this server
+   * supports and this socket's `connection` id (the snapshot names the same), and the herdr it reads now
+   * (`herdr_lifetime` as a snapshot names it; absent when unproven). A page acts on it before the snapshot only
+   * when that herdr is the one it already knows. Older bridges never send it: their features come with the snapshot */
+  | { type: "features"; features: ServerFeature[]; connection: string; herdr_lifetime?: string }
   /** `connection`: this socket's id on the PC, for a create request's `first_message_connection`; older bridges send none */
   | { type: "snapshot"; snapshot: SessionSnapshot; features?: ServerFeature[]; connection?: string }
   /** raw PTY bytes: append to the terminal, never repaint over it. A mirrored pane (HerdrIdentity.terminal_mirror) sends whole screens the same way. */

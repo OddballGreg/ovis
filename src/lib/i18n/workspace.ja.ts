@@ -59,6 +59,9 @@ export const WORKSPACE_JA: Record<string, string> = {
   "One model name, without spaces.": "空白を含まないモデル名を一つ指定してください。",
   "Effort": "推論レベル",
   "Levels depend on the model.": "選べるレベルはモデルによって異なります。",
+  "Ultracode": "Ultracode",
+  "Claude Code 2.1.284 or later": "Claude Code 2.1.284 以降",
+  "Dynamic workflows at any effort level. Needs Claude Code 2.1.284 or later.": "どの推論レベルでも動的ワークフローを実行します。Claude Code 2.1.284 以降が必要です。",
   "First message": "最初のメッセージ",
   "Optional": "任意",
   "Sent to {agent} as it starts.": "{agent} の起動時に一緒に送ります。",
@@ -87,4 +90,7 @@ export const WORKSPACE_JA: Record<string, string> = {
   "The folder could not be made.": "フォルダーを作成できませんでした。",
   "Tab name (optional)": "タブ名 (任意)",
   "Uses the workspace's folder": "ワークスペースのフォルダーをそのまま使います",
+  "Add another agent…": "別のエージェントを追加…",
+  "It is installed, but this PC does not offer it here yet. Restart Ovis on the PC, or start it in a terminal tab.": "インストールは済みましたが、このPCではまだここで選べません。PCでOvisを再起動するか、ターミナルタブで起動してください。",
+  "It is installed. Waiting for this PC to offer it here…": "インストールしました。このPCでここから選べるようになるのを待っています…",
 };

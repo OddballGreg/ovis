@@ -165,18 +165,32 @@ describe("paneCommands", () => {
     expect(commands).toContainEqual(expect.objectContaining({ name: "team:review", description: "Review this project thoroughly", source: "project" }));
   });
 
-  it("falls back to USERPROFILE when HOME is not set in default home resolution", () => {
+  it("stops the project walk at the home it is given, not the server's own", () => {
+    const root = temp("commands-given-home-");
+    const home = join(root, "home");
+    const cwd = join(home, "work");
+    mkdirSync(cwd, { recursive: true });
+    mkdirSync(join(root, ".git"));
+    mkdirSync(join(root, ".claude", "commands"), { recursive: true });
+    writeFileSync(join(root, ".claude", "commands", "above-home.md"), "Above the home\n");
+    expect(paneCommands("claude", cwd, home).map((command) => command.name)).not.toContain("above-home");
+  });
+
+  it("falls back to USERPROFILE when HOME is not set in default home resolution, on Windows", () => {
     const userProfile = temp("commands-userprofile-");
     const previousHome = process.env.HOME;
     const previousUserProfile = process.env.USERPROFILE;
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
     delete process.env.HOME;
     process.env.USERPROFILE = userProfile;
+    Object.defineProperty(process, "platform", { value: "win32" });
     try {
       mkdirSync(join(userProfile, ".agents", "skills", "win-skill"), { recursive: true });
       writeFileSync(join(userProfile, ".agents", "skills", "win-skill", "SKILL.md"), "---\nname: win-skill\ndescription: Discovered via USERPROFILE\n---\n");
       const commands = paneCommands("omo", null);
       expect(commands.some((command) => command.name === "skill:win-skill")).toBeTrue();
     } finally {
+      Object.defineProperty(process, "platform", platform);
       if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome;
       if (previousUserProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = previousUserProfile;
     }

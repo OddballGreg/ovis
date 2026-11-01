@@ -14,7 +14,7 @@ import { skillSyntax } from "../../shared/skill-syntax.ts";
 import { knownStatus, STATUS_WORD } from "./status.ts";
 import { t, type Vars } from "./i18n.ts";
 import type { ActiveTrigger } from "./mentions.ts";
-import { submitNotTyped } from "../../shared/submit-outcome.ts";
+import { NO_AGENT_MESSAGE, submitNotTyped } from "../../shared/submit-outcome.ts";
 export { submitNotTyped } from "../../shared/submit-outcome.ts";
 
 /** This cap keeps one composer message inside a single WS frame. */
@@ -91,6 +91,17 @@ export function submitRefusal(code: string, message: string, draft?: string, box
   return submitNote(code, message, agent);
 }
 
+/**
+ * The note after Send it, which sends the terminal's draft as the message, did not go. A refusal over another
+ * draft offers that draft's buttons. Any other names the draft on a line under its reason: the server may have
+ * cleared it from the terminal before the send failed (submit_partial), and the Chat box never held it.
+ */
+export function draftSendNote(result: string | DraftRefusal, draft: string): string | DraftRefusal {
+  if (typeof result !== "string" && "draft" in result) return result;
+  const note = typeof result === "string" ? result : "plain" in result && result.plain === true ? result.note : submitNote("input_draft", result.note);
+  return `${note}\n${t("Draft: “{draft}”", { draft })}`;
+}
+
 /** The same message as typed, however a terminal wrapped or indented it: equal once all whitespace is gone. */
 export function sameMessage(a: string, b: string): boolean {
   const bare = (text: string): string => text.replace(/[\s\u00a0]+/gu, "");
@@ -124,6 +135,8 @@ export function submitNote(code: string, message: string, agent?: string | null)
   const opencode = openCodeRefusalNote(code, message);
   if (opencode !== null) return opencode;
   if (code === "submit_partial") return t("Not confirmed: the terminal draft was cleared or may have changed. Your message stayed here. Check the terminal before sending again.");
+  // #511: pasted for an agent that left before its Enter: the text may sit in the input line
+  if (code === "pasted_not_sent") return t("Not sent: the message is in the terminal's input line. Clear it there, or press Enter there to send it.");
   if (code === "agent_blocked") return t("Not sent: the agent is waiting for an answer in the terminal. Answer it first.");
   if (code === "read_only") return t("Not sent: this view only watches the pane.");
   if (code === "held_input") return t("Not sent: send or discard the held input first.");
@@ -131,6 +144,10 @@ export function submitNote(code: string, message: string, agent?: string | null)
   if (code === "input_draft") return t("Not sent: Claude Code's input box in the terminal is not empty. Send or clear it there, then send this message.");
   if (code === "rewind_dialog_open") return t("Not sent: Claude Code's rewind dialog is open in the terminal. Finish or close it there (Esc), then send this message.");
   if (code === "pending_input_unsupported") return t("Update this PC to send messages in the next turn. Your draft stayed here.");
+  // #511: a message with comments on a reply goes only to an agent
+  if (code === "agent_only_unsupported") return t("Update this PC to send comments on a reply. Your message and comments stayed here.");
+  // the same code also says an agent's input state is unknown: that keeps the bridge's own words
+  if (code === "agent_not_ready" && message === NO_AGENT_MESSAGE) return t("Not sent: no agent is running in this pane. Your message stayed here.");
   if (code === "submit_timeout") return t("Not sent: it waited too long behind an earlier message, and nothing was typed. Send it again.");
   if (code === "not_transmitted") return t("Not sent: the connection dropped before this message left. Send it again.");
   if (code === "capabilities_unknown") return t("Not sent: this PC has not said yet what it supports. Send it again.");
@@ -271,6 +288,34 @@ export function composerSendShown(state: { working: boolean; text: string }): bo
 /** While an agent works, Send accepts a follow-up for its next turn. A shell sends immediately. */
 export function composerDelivery(agent: string | null, status?: AgentStatus): "queue" | "immediate" {
   return agent !== null && status === "working" ? "queue" : "immediate";
+}
+
+/**
+ * Whether Claude can take a message now, whatever herdr reports. herdr's Claude manifest reads a
+ * braille spinner in the window title (osc_title_working, 1100) and "Waiting for N background agents
+ * to finish" (background_agents_working, 965) as working, both above the idle prompt box
+ * (live_prompt_box, 950): a main agent that ended its turn while a subagent it started still runs is
+ * reported as working, and the composer holds the message. Override only on positive evidence:
+ * an empty input box and the waiting line, with no running-turn marker anywhere above the box.
+ * `lines` must be logical screen lines (lib/inputRow.ts readScreenLines), not physical rows.
+ */
+export function claudeMainAtRest(row: string | null, lines: readonly string[]): boolean {
+  if (row !== "ready") return false;
+  const rule = (line: string): boolean => /^[─━]{8,}$|^─{2,}\s.*─$/u.test(line.trim());
+  let lower = lines.length - 1;
+  while (lower >= 0 && !rule(lines[lower]!)) lower--;
+  if (lower < 0) return false;
+  let upper = lower - 1;
+  while (upper >= 0 && !rule(lines[upper]!)) upper--;
+  if (upper < 0) return false;
+  const above = lines.slice(0, upper);
+  if (!above.some((line) => /^\s*Waiting for [1-9]\d* background agents? to finish\s*$/u.test(line))) return false;
+  for (const line of above) {
+    if (/esc to (?:interrupt|cancel)/i.test(line)) return false;
+    if (/^\s*(?:[*·✢✳✶✻✽●◐◓◑◒]\s+)?Compacting\b/iu.test(line)) return false;
+    if (/^\s*[*·✢✳✶✻✽●◐◓◑◒]\s+\S.*(?:…|\.{3}|\(\d+(?:\.\d+)?[smh](?:\s|[)·]))/u.test(line)) return false;
+  }
+  return true;
 }
 
 /**

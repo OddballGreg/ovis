@@ -5,10 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "./index.ts";
 import { herdrRpc, paneProcessInfo, sessionSnapshot, workspaceClose, workspaceCreate } from "./herdr/client.ts";
-import { forgetTranscriptState } from "./conversation.ts";
+import { forgetTranscriptState, paneConversation } from "./conversation.ts";
 import { copilotHandoffSession, copilotProcessSession } from "./copilot-store.ts";
 import { processEnviron } from "./omo.ts";
-import * as processStart from "./process-start.ts";
+import * as processOwner from "./process-owner.ts";
 
 const id = "12aa83d8-48bc-41f2-a498-7055c5c44a01";
 const other = "12aa83d8-48bc-41f2-a498-7055c5c44a02";
@@ -25,10 +25,15 @@ let app: ReturnType<typeof createServer>;
 let workspace: string;
 let pane: string;
 
+/** The stand-in for this session in front of a pane, by its own process: herdr's agent label can outlast one that quit. */
+async function fixtureInFront(pane: string, session: string): Promise<number | undefined> {
+  return (await paneProcessInfo(pane))?.foreground_processes?.find((process) => process.argv?.includes(executable) && process.argv.includes(session))?.pid;
+}
+
 async function startFixture(pane: string, session: string, flags = "") {
   await herdrRpc("pane.send_text", { pane_id: pane, text: `COPILOT_HOME=${home} node ${executable} ${session}${flags ? ` ${flags}` : ""}\n` });
   for (const deadline = Date.now() + 10_000;;) {
-    if ((await sessionSnapshot()).panes.find((p) => p.pane_id === pane)?.agent === "copilot") return;
+    if ((await sessionSnapshot()).panes.find((p) => p.pane_id === pane)?.agent === "copilot" && await fixtureInFront(pane, session) !== undefined) return;
     if (Date.now() > deadline) throw new Error(`isolated Copilot stand-in not detected in ${pane}`);
     await Bun.sleep(50);
   }
@@ -173,8 +178,8 @@ const handoffTest = async () => {
     const ancestry = spyOn(fs, "readFileSync").mockImplementation(alteredStat);
     try { expect(handoff()).toBeNull(); } finally { ancestry.mockRestore(); }
     expect(handoff()?.sessionId).toBe(handoffId);
-    const realStarted = processStart.processStartedAt;
-    const unavailableStart = spyOn(processStart, "processStartedAt").mockImplementation((pid) => pid === parent ? null : realStarted(pid));
+    const realBirth = processOwner.readProcessBirth;
+    const unavailableStart = spyOn(processOwner, "readProcessBirth").mockImplementation((pid) => pid === parent ? { state: "unknown" } : realBirth(pid));
     try {
       writeFileSync(parentLog, new Date().toISOString() + " [INFO] Registering foreground session: " + other + "\n");
       expect(copilotProcessSession(processEnviron(parent), parentProcess.argv, parent, "unregistered")).toBeNull();
@@ -195,6 +200,9 @@ const handoffTest = async () => {
       await startFixture(duplicate.root_pane.pane_id, handoffId);
       await herdrRpc("pane.report_agent_session", { pane_id: duplicate.root_pane.pane_id, agent: "copilot",
         source: "herdr:copilot", seq: Date.now() * 1000 + 1, agent_session_id: handoffId });
+      await expect(paneConversation(current)).rejects.toMatchObject({
+        message: "no_session_path", diagnostic: "copilot_peer_conflict",
+      });
       expect((await read()).source).toBe("scrollback");
     } finally { await workspaceClose(duplicate.workspace.workspace_id); }
     expect((await read()).turns[0]?.parts[0]?.text).toBe("handoff history");
@@ -311,10 +319,24 @@ it.skipIf(process.platform !== "linux")("binds only the reported UUID to the for
   expect((await read()).source).toBe("scrollback");
   expect((await fetch(`${url}&from=${encodeURIComponent(first.cursor!)}`)).status).toBe(409);
   expect((await fetch(toolUrl(completedRef))).status).toBe(404);
+  // the stand-in quits. Its process leaving the pane is the exit; herdr must also forget the Copilot
+  // session reported for it, or herdr 0.9.3 ignores the next stand-in's report: the session this test
+  // reported is released, as Copilot's own hook would at its exit, rather than left to herdr's detection
+  const quitting = await fixtureInFront(pane, id);
+  if (quitting === undefined) throw new Error(`the stand-in for ${id} is not in front of ${pane}: ${JSON.stringify((await paneProcessInfo(pane))?.foreground_processes)}`);
   await herdrRpc("pane.send_text", { pane_id: pane, text: ":quit\n" });
-  for (const deadline = Date.now() + 10_000;;) {
-    if ((await sessionSnapshot()).panes.find((p) => p.pane_id === pane)?.agent !== "copilot") break;
-    if (Date.now() > deadline) throw new Error("isolated fixture did not exit");
+  const quitState = async () => {
+    const label = (await sessionSnapshot()).panes.find((p) => p.pane_id === pane);
+    const state = (() => { try { return fs.readFileSync(`/proc/${quitting}/stat`, "utf8").split(") ")[1]?.split(" ")[0] ?? "?"; } catch { return "gone"; } })();
+    return JSON.stringify({ pid: quitting, state, front: (await paneProcessInfo(pane))?.foreground_processes?.map((process) => [process.pid, process.argv]), agent: label?.agent, status: label?.agent_status, session: label?.agent_session });
+  };
+  for (const deadline = Date.now() + 10_000; (await paneProcessInfo(pane))?.foreground_processes?.some((process) => process.pid === quitting);) {
+    if (Date.now() > deadline) throw new Error(`isolated fixture did not exit: ${await quitState()}`);
+    await Bun.sleep(50);
+  }
+  await herdrRpc("pane.release_agent", { pane_id: pane, source: "herdr:copilot", agent: "copilot" });
+  for (const deadline = Date.now() + 10_000; (await sessionSnapshot()).panes.find((p) => p.pane_id === pane)?.agent === "copilot";) {
+    if (Date.now() > deadline) throw new Error(`herdr still names the quit stand-in: ${await quitState()}`);
     await Bun.sleep(50);
   }
   await startFixture(pane, other);
@@ -327,6 +349,144 @@ it.skipIf(process.platform !== "linux")("binds only the reported UUID to the for
   expect((await read()).source).toBe("scrollback");
   symlinkSync(file(id), file(other));
   expect((await read()).source).toBe("scrollback");
+}, 20_000);
+
+it.skipIf(process.platform !== "linux")("retries failed Copilot page reads only while fresh ownership and file generation still agree", async () => {
+  const session = "12aa83d8-48bc-41f2-a498-7055c5c44a07";
+  const switched = "12aa83d8-48bc-41f2-a498-7055c5c44a08";
+  for (const id of [session, switched]) {
+    mkdirSync(join(home, "session-state", id), { recursive: true });
+    writeFileSync(file(id), fixture(id, "retained history")
+      + Array.from({ length: 55 }, (_, i) => event("user.message", { content: `prompt ${i}` })).join(""));
+  }
+  const created = await workspaceCreate({ cwd: root, label: "herdr-web-ui-test-copilot-read-retry" });
+  const current = created.root_pane.pane_id;
+  const realRead = fs.readSync;
+  let failingFile = file(session);
+  let fail = false;
+  let onFailure = () => {};
+  function failedRead(fd: number, buffer: NodeJS.ArrayBufferView, offset: number, length: number, position: fs.ReadPosition | null): number;
+  function failedRead(fd: number, buffer: NodeJS.ArrayBufferView, options?: fs.ReadSyncOptions): number;
+  function failedRead(fd: number, buffer: NodeJS.ArrayBufferView, offset?: number | fs.ReadSyncOptions, length?: number, position?: fs.ReadPosition | null): number {
+    // Leave the bounded header/identity checks real; fail only a transcript page read.
+    if (fail && (length ?? 0) > 64 * 1024 && fs.readlinkSync(`/proc/self/fd/${fd}`) === failingFile) {
+      fail = false;
+      onFailure();
+      throw Object.assign(new Error("synthetic private path must not escape"), { code: "EIO" });
+    }
+    return typeof offset === "number" ? realRead(fd, buffer, offset, length!, position ?? null) : realRead(fd, buffer, offset);
+  }
+  let reads: ReturnType<typeof spyOn<typeof fs, "readSync">> | undefined;
+  const append = () => appendFileSync(failingFile, event("assistant.message", { content: "fixture ".repeat(10_000) }));
+  try {
+    await startFixture(current, session, "--lifecycle");
+    const info = await paneProcessInfo(current);
+    const pid = info?.foreground_processes?.find((process) => process.argv?.includes(executable))?.pid;
+    expect(pid).toBeDefined();
+    const log = join(home, "logs", `process-100-${pid}.log`);
+    const lifecycle = (id: string, action = "Registering") =>
+      appendFileSync(log, `${new Date().toISOString()} [INFO] ${action} foreground session: ${id}\n`);
+    const url = `http://127.0.0.1:${app.port}/api/pane/conversation?pane_id=${encodeURIComponent(current)}`;
+    reads = spyOn(fs, "readSync").mockImplementation(failedRead);
+    // CI once read no cursor here for a reason its log did not keep: each answer waited past is
+    // printed, so a run that waits says what it saw
+    const readCursor = async () => {
+      for (const deadline = Date.now() + 5000;;) {
+        const response = await fetch(url);
+        const body = await response.json() as { cursor?: string; history_id?: string };
+        if (response.status === 200 && typeof body.cursor === "string") return body as { cursor: string; history_id: string };
+        console.warn(`Copilot cursor not ready yet: ${response.status} ${JSON.stringify(body).slice(0, 300)}`);
+        if (Date.now() > deadline) throw new Error(`Copilot cursor was not ready: ${response.status} ${JSON.stringify(body)}`);
+        await Bun.sleep(50);
+      }
+    };
+    const initial = await readCursor();
+    expect(initial.cursor).toBeString();
+    append(); fail = true;
+    const legacyFailure = await fetch(url);
+    expect(legacyFailure.status).toBe(200);
+    expect(await legacyFailure.json()).toEqual({ source: "scrollback", turns: [] });
+    expect(fail).toBe(false);
+    for (const query of [`&history_id=${encodeURIComponent(initial.history_id)}`, `&from=${encodeURIComponent(initial.cursor)}`, `&before=${encodeURIComponent(initial.cursor)}`]) {
+      append(); fail = true;
+      const failed = await fetch(url + query, { headers: { "if-none-match": '"old-answer"' } });
+      expect(failed.status).toBe(503);
+      expect(failed.headers.get("etag")).toBeNull();
+      expect(failed.headers.get("cache-control")).toBe("no-store");
+      expect(await failed.json()).toEqual({ error: {
+        code: "conversation_read_pending", message: "The conversation could not be read; try again shortly.",
+      } });
+      expect(fail).toBe(false);
+      const recovered = await fetch(url);
+      expect(recovered.status).toBe(200);
+      expect((await recovered.json()).history_id).toBe(initial.history_id);
+    }
+    lifecycle(switched);
+    failingFile = file(switched);
+    append(); fail = true;
+    const switchedBeforeRead = await fetch(`${url}&history_id=${encodeURIComponent(initial.history_id)}`);
+    expect(fail).toBe(false);
+    expect(switchedBeforeRead.status).toBe(409);
+    expect((await (await fetch(url)).json()).history_id).not.toBe(initial.history_id);
+    failingFile = file(session);
+    lifecycle(session);
+    appendFileSync(file(session), "malformed complete record\n");
+    expect((await (await fetch(url)).json()).source).toBe("scrollback");
+    writeFileSync(file(session), fixture(session, "recovered history")
+      + Array.from({ length: 55 }, (_, i) => event("user.message", { content: `recovered prompt ${i}` })).join(""));
+    for (const selector of ["", "from", "before"]) {
+      lifecycle(session);
+      const before = await readCursor();
+      expect(before.cursor).toBeString();
+      append(); fail = true; onFailure = () => lifecycle(session, "Unregistering");
+      const revoked = await fetch(url + (selector ? `&${selector}=${encodeURIComponent(before.cursor)}` : ""));
+      expect(fail).toBe(false);
+      expect(revoked.status).toBe(selector ? 409 : 200);
+      if (!selector) expect(await revoked.json()).toEqual({ source: "scrollback", turns: [] });
+    }
+    for (const paged of [false, true]) {
+      lifecycle(session);
+      const before = await readCursor();
+      expect(before.cursor).toBeString();
+      append(); fail = true; onFailure = () => lifecycle(switched);
+      const changed = await fetch(url + (paged ? `&from=${encodeURIComponent(before.cursor)}` : ""));
+      expect(fail).toBe(false);
+      expect(changed.status).toBe(paged ? 409 : 200);
+      if (!paged) expect(await changed.json()).toEqual({ source: "scrollback", turns: [] });
+    }
+    lifecycle(session);
+    await fetch(url);
+    append(); fail = true; onFailure = () => {
+      rmSync(file(session));
+      writeFileSync(file(session), fixture(session, "replacement file"));
+    };
+    const replaced = await fetch(url);
+    expect(fail).toBe(false);
+    expect(replaced.status).toBe(200);
+    expect(await replaced.json()).toEqual({ source: "scrollback", turns: [] });
+    onFailure = () => {};
+    const displayed = await (await fetch(url)).json() as { history_id: string };
+    expect(displayed.history_id).toBeString();
+    fs.renameSync(file(session), `${file(session)}.replaced`);
+    writeFileSync(file(session), fixture(session, "replaced before the next refresh"));
+    append(); fail = true;
+    const replacedBeforeRead = await fetch(`${url}&history_id=${encodeURIComponent(displayed.history_id)}`);
+    expect(fail).toBe(false);
+    expect(replacedBeforeRead.status).toBe(409);
+    expect((await (await fetch(url)).json()).history_id).not.toBe(displayed.history_id);
+    for (const selector of ["from", "before"]) {
+      writeFileSync(file(session), fixture(session, "file removed during the read")
+        + Array.from({ length: 55 }, (_, i) => event("user.message", { content: `prompt ${i}` })).join(""));
+      lifecycle(session);
+      const before = await readCursor();
+      expect(before.cursor).toBeString();
+      append(); fail = true; onFailure = () => rmSync(file(session));
+      const missing = await fetch(`${url}&${selector}=${encodeURIComponent(before.cursor)}`);
+      expect(fail).toBe(false);
+      expect(missing.status).toBe(409);
+      expect((await missing.json()).error.code).toBe("history_changed");
+    }
+  } finally { reads?.mockRestore(); await workspaceClose(created.workspace.workspace_id); }
 }, 20_000);
 
 it.skipIf(process.platform !== "linux")("reads a resumed CLI without marker or report and follows foreground switches rather than stale reports", async () => {
@@ -343,10 +503,28 @@ it.skipIf(process.platform !== "linux")("reads a resumed CLI without marker or r
   try {
     await startFixture(current, resumed, `--resume=${resumed} --lifecycle`);
     const url = `http://127.0.0.1:${app.port}/api/pane/conversation?pane_id=${encodeURIComponent(current)}`;
-    const read = async () => (await fetch(url)).json() as Promise<{
-      source: string; turns: { parts: { text?: string; output_ref?: string }[] }[]; cursor?: string; history_id?: string;
-    }>;
-    const initial = await read();
+    let lastResponse = "";
+    const read = async () => {
+      const response = await fetch(url);
+      const body = await response.json();
+      lastResponse = `${response.status} ${JSON.stringify(body)}`;
+      if (response.status !== 200) return null;
+      return body as {
+        source: string; turns: { parts: { text?: string; output_ref?: string }[] }[]; cursor?: string; history_id?: string;
+      };
+    };
+    // A switch may answer scrollback, or 409 if ownership changes during the read.
+    // Neither is the transcript this waits for; keep the response for timeout diagnostics.
+    const waitForTranscript = async (text: string, previousHistory?: string) => {
+      for (const deadline = Date.now() + 5000;;) {
+        const body = await read();
+        if (body?.source === "copilot-transcript" && body.turns[0]?.parts[0]?.text === text
+          && (previousHistory === undefined || body.history_id !== previousHistory)) return body;
+        if (Date.now() > deadline) throw new Error(`Copilot transcript ${text} was not selected: ${lastResponse}`);
+        await Bun.sleep(50);
+      }
+    };
+    const initial = await waitForTranscript(resumed);
     expect(initial.source).toBe("copilot-transcript");
     expect(initial.turns[0]?.parts[0]?.text).toBe(resumed);
     expect(initial.history_id).not.toStartWith("unwritten:");
@@ -362,29 +540,28 @@ it.skipIf(process.platform !== "linux")("reads a resumed CLI without marker or r
     try {
       const peer = duplicate.root_pane.pane_id;
       await startFixture(peer, resumed, `--resume=${resumed} --lifecycle`);
-      expect((await read()).source).toBe("scrollback");
+      // herdr names the peer before it logs its Registering line: until then the first pane still owns the log
       const peerUrl = `http://127.0.0.1:${app.port}/api/pane/conversation?pane_id=${encodeURIComponent(peer)}`;
-      expect((await (await fetch(peerUrl)).json()).source).toBe("scrollback");
+      for (const [who, target] of [["the first pane", url], ["the peer", peerUrl]] as const) {
+        for (const deadline = Date.now() + 5000;;) {
+          const response = await fetch(target);
+          const body = await response.json() as { source?: string };
+          if (response.status === 200 && body.source === "scrollback") break;
+          if (Date.now() > deadline) throw new Error(`${who} did not fail closed for a shared log: ${response.status} ${JSON.stringify(body)}`);
+          await Bun.sleep(50);
+        }
+      }
     } finally { await workspaceClose(duplicate.workspace.workspace_id); }
-    expect((await read()).source).toBe("copilot-transcript");
+    await waitForTranscript(resumed);
     await herdrRpc("pane.report_agent_session", { pane_id: current, agent: "copilot", source: "herdr:copilot",
       seq: Date.now() * 1000, agent_session_id: resumed });
     await herdrRpc("pane.send_text", { pane_id: current, text: `:hold ${resumed}\n:hold ${forked}\n:switch ${forked}\n` });
-    for (const deadline = Date.now() + 5000;;) {
-      if ((await read()).turns[0]?.parts[0]?.text === forked) break;
-      if (Date.now() > deadline) throw new Error("logged fork was not selected");
-      await Bun.sleep(50);
-    }
+    await waitForTranscript(forked);
     expect((await fetch(`${url}&from=${encodeURIComponent(initial.cursor ?? initial.history_id!)}`)).status).toBe(409);
     const staleTool = new URLSearchParams({ pane_id: current, ref: `call-${resumed}` });
     expect((await fetch(`http://127.0.0.1:${app.port}/api/pane/conversation/tool-output?${staleTool}`)).status).toBe(404);
     await herdrRpc("pane.send_text", { pane_id: current, text: `:switch ${resumed}\n` });
-    for (const deadline = Date.now() + 5000;;) {
-      if ((await read()).turns[0]?.parts[0]?.text === resumed) break;
-      if (Date.now() > deadline) throw new Error("switch-back was not selected");
-      await Bun.sleep(50);
-    }
-    const returned = await read();
+    const returned = await waitForTranscript(resumed);
     expect(returned.history_id).not.toBe(initial.history_id);
     expect((await fetch(`${url}&from=${encodeURIComponent(oldCursor)}`)).status).toBe(409);
     expect((await fetch(`${url}&before=${encodeURIComponent(oldCursor)}`)).status).toBe(409);
@@ -395,19 +572,13 @@ it.skipIf(process.platform !== "linux")("reads a resumed CLI without marker or r
     expect((await fetch(outputUrl(newRef!))).status).toBe(200);
     expect((await fetch(`${url}&before=${encodeURIComponent(returned.cursor!)}`)).status).toBe(200);
     await herdrRpc("pane.send_text", { pane_id: current, text: `:switch ${forked}\n:switch ${resumed}\n` });
-    let unobserved = await read();
-    for (const deadline = Date.now() + 5000; unobserved.history_id === returned.history_id;) {
-      if (Date.now() > deadline) throw new Error("unobserved switch-back did not advance binding");
-      await Bun.sleep(50);
-      unobserved = await read();
-    }
-    expect(unobserved.turns[0]?.parts[0]?.text).toBe(resumed);
+    const unobserved = await waitForTranscript(resumed, returned.history_id);
     expect((await fetch(`${url}&before=${encodeURIComponent(returned.cursor!)}`)).status).toBe(409);
     expect((await fetch(outputUrl(newRef!))).status).toBe(404);
     await herdrRpc("pane.send_text", { pane_id: current, text: ":unregister\n" });
     for (const deadline = Date.now() + 5000;;) {
-      if ((await read()).source === "scrollback") break;
-      if (Date.now() > deadline) throw new Error("unregistered foreground did not fail closed");
+      if ((await read())?.source === "scrollback") break;
+      if (Date.now() > deadline) throw new Error(`unregistered foreground did not fail closed: ${lastResponse}`);
       await Bun.sleep(50);
     }
     expect((await fetch(`${url}&from=${encodeURIComponent(unobserved.cursor!)}`)).status).toBe(409);
@@ -415,11 +586,7 @@ it.skipIf(process.platform !== "linux")("reads a resumed CLI without marker or r
     expect(latestRef).toBeDefined();
     expect((await fetch(outputUrl(latestRef!))).status).toBe(404);
     await herdrRpc("pane.send_text", { pane_id: current, text: `:register ${forked}\n` });
-    for (const deadline = Date.now() + 5000;;) {
-      if ((await read()).turns[0]?.parts[0]?.text === forked) break;
-      if (Date.now() > deadline) throw new Error("new registration was not selected after unregistration");
-      await Bun.sleep(50);
-    }
+    await waitForTranscript(forked);
   } finally {
     await workspaceClose(created.workspace.workspace_id);
   }

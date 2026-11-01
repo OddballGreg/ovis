@@ -7,6 +7,9 @@ import { hostname, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { ConversationMonitor } from "./conversation-monitor.ts";
 import { createServer } from "./index.ts";
+import { AgentDetector, catalogLocator } from "./agent-catalog-detect.ts";
+import * as appModule from "./index.ts";
+import * as herdrClient from "./herdr/client.ts";
 import type { AgentKind, AgentStatus, ApiError, HealthAuth, IntegrationsResponse, LanExposure, PortalStatus, SecuritySummary, PushKey, RemoteAccess, SessionSnapshot, TabMoved, TabMovedToWorkspace, PaneFindResponse, PaneReadResult, UsageReport, WorkspaceCreated, WorktreeListing, WorktreeOpened, WorktreeRemoved } from "../shared/protocol.ts";
 import { SUPPORTED_AGENT_KINDS } from "../shared/supported-agents.ts";
 import { HerdrUpdater } from "./herdr-update.ts";
@@ -496,6 +499,48 @@ describe("native tool call id and state on GET /api/pane/conversation", () => {
   }, 20_000);
 });
 
+describe("a Claude bash-mode command on GET /api/pane/conversation", () => {
+  it("answers it as one shell part, and leaves out the streams Claude Code has not recorded yet", async () => {
+    const root = mkdtempSync(join(tmpdir(), "herdr-web-ui-bash-mode-contract-"));
+    const cwd = realpathSync(root);
+    const originalHome = process.env["HOME"];
+    const id = "3b7e9c2a-5d14-4f8b-9a63-0c2e7f1d8b45";
+    const file = join(cwd, ".claude", "projects", claudeProjectDir(cwd), `${id}.jsonl`);
+    mkdirSync(join(file, ".."), { recursive: true });
+    const user = (content: string, second: number) => `${JSON.stringify({ type: "user", timestamp: `2026-10-27T03:00:0${second}.000Z`, message: { role: "user", content } })}\n`;
+    writeFileSync(file, user('<bash-input>echo "Hello"</bash-input>', 0) + user("<bash-stdout>Hello</bash-stdout><bash-stderr></bash-stderr>", 1)
+      + user("<bash-input>ls missing</bash-input>", 2) + user("<bash-stdout></bash-stdout><bash-stderr>ls: missing: No such file or directory</bash-stderr>", 3)
+      + user("<bash-input>sleep 60</bash-input>", 4));
+    let app: ReturnType<typeof createServer> | undefined;
+    let workspace: string | undefined;
+    try {
+      process.env["HOME"] = cwd;
+      forgetTranscriptState();
+      const created = await workspaceCreate({ cwd, label: "herdr-web-ui-test-bash-mode" });
+      workspace = created.workspace.workspace_id;
+      const paneId = created.root_pane.pane_id;
+      await herdrRpc("pane.report_agent", { pane_id: paneId, source: "manual", agent: "claude", state: "idle" });
+      await herdrRpc("pane.report_agent_session", { pane_id: paneId, source: "herdr:claude", agent: "claude", seq: Date.now() * 1000, agent_session_id: id });
+      app = createServer({ port: 0, hostname: "127.0.0.1", token: "", stateDir: join(cwd, "state") });
+      const response = await fetch(`http://127.0.0.1:${app.port}/api/pane/conversation?pane_id=${encodeURIComponent(paneId)}`);
+      expect(response.status).toBe(200);
+      const body = await response.json() as { source: string; turns: { role: string; parts: unknown[] }[] };
+      expect(body.source).toBe("claude-transcript");
+      expect(body.turns.map((turn) => [turn.role, turn.parts])).toEqual([
+        ["user", [{ kind: "shell", command: 'echo "Hello"', stdout: "Hello", stderr: "" }]],
+        ["user", [{ kind: "shell", command: "ls missing", stdout: "", stderr: "ls: missing: No such file or directory" }]],
+        // no output entry yet: the JSON has neither stream, not empty ones
+        ["user", [{ kind: "shell", command: "sleep 60" }]],
+      ]);
+    } finally {
+      app?.stop();
+      if (workspace !== undefined) await workspaceClose(workspace);
+      if (originalHome === undefined) delete process.env["HOME"]; else process.env["HOME"] = originalHome;
+      forgetTranscriptState(); rmSync(root, { recursive: true, force: true });
+    }
+  }, 20_000);
+});
+
 describe("usage API", () => {
   it("returns OpenCode Go windows without exposing its credential", async () => {
     const usageState = mkdtempSync(join(tmpdir(), "herdr-opencode-contract-"));
@@ -745,6 +790,14 @@ describe("update API", () => {
     });
     try {
       expect(await (await call("/api/updates", `Bearer ${bridge}`)).json()).toMatchObject({ managed: true, available: true, latest_revision: offered });
+      // where it answers comes with the status, to the bridge token only: /api/access stays its own token's (#2191)
+      const told = await (await call("/api/updates", `Bearer ${bridge}`)).json() as UpdateStatus;
+      expect(told.port).toBe(own.port);
+      expect(told.serving_url === null || typeof told.serving_url === "string").toBe(true);
+      expect((await call("/api/access", `Bearer ${bridge}`)).status).toBe(401);
+      const owner = await (await call("/api/updates", "Bearer own-token")).json() as UpdateStatus;
+      expect(owner).toMatchObject({ managed: true, latest_revision: offered });
+      expect("port" in owner || "serving_url" in owner).toBe(false);
       // the install still names the offer, as from the app's own controls
       expect((await call("/api/updates/install", `Bearer ${bridge}`, "{}")).status).toBe(400);
       expect(requests).toEqual([]);
@@ -753,6 +806,15 @@ describe("update API", () => {
       // a wrong bridge token is refused like any other, and the token opens no other update route
       expect((await call("/api/updates", `Bearer ${"c".repeat(64)}`)).status).toBe(401);
       for (const path of ["/api/updates/notes", "/api/updates/installed", "/api/updates/check", "/api/herdr/update"]) expect((await call(path, `Bearer ${bridge}`)).status).toBe(401);
+      // only the read and the install it grants, each by its own method and with no query (#2054)
+      const send = (method: string, path: string, body?: string) => fetch(`http://127.0.0.1:${own.port}${path}`, {
+        method, ...(body === undefined ? {} : { body }), headers: { authorization: `Bearer ${bridge}`, "x-herdr-update": "1", "content-type": "application/json" },
+      });
+      const install = JSON.stringify({ expected_revision: offered });
+      for (const [method, path, body] of [["GET", "/api/updates?anything=1"], ["HEAD", "/api/updates"], ["POST", "/api/updates", install], ["DELETE", "/api/updates"],
+        ["GET", "/api/updates/install"], ["PUT", "/api/updates/install", install], ["POST", "/api/updates/install?anything=1", install]] as const) {
+        expect({ method, path, status: (await send(method, path, body)).status }).toEqual({ method, path, status: 401 });
+      }
       expect(requests).toHaveLength(1);
     } finally { own.stop(); rmSync(ownState, { recursive: true, force: true }); }
   });
@@ -1682,7 +1744,7 @@ describe("workspace and discovery endpoints", () => {
     }
   });
 
-  it.skipIf(process.platform === "win32")("offers a shell agent found only on its login shell's PATH, starts that same executable, and keeps hits and misses until the next run", async () => {
+  it.skipIf(process.platform === "win32")("offers a shell agent found only on its login shell's PATH, starts that same executable, keeps its hits until the next run, and finds a missed one put back on the PATH that run read", async () => {
     // a service PATH without gjc, and a test-owned login shell whose -l run puts it on PATH: no dotfile is read
     const root = mkdtempSync(join(tmpdir(), "ovis-login-path-"));
     const home = join(root, "home"), serviceBin = join(root, "service bin"), loginBin = join(root, "login bin");
@@ -1703,7 +1765,9 @@ describe("workspace and discovery endpoints", () => {
     let clock = 0;
     const shellAgents = new ShellAgentLocator({ servicePath: () => serviceBin, probe, now: () => clock });
     const state = mkdtempSync(join(tmpdir(), "ovis-login-path-state-"));
-    const app = createServer({ port: 0, hostname: "127.0.0.1", token: "", stateDir: state, shellAgents });
+    // installers' folders are looked up under the test's home, never the user's
+    const agentDetector = new AgentDetector({ home, locate: catalogLocator({ probe: null, servicePath: () => serviceBin }) });
+    const app = createServer({ port: 0, hostname: "127.0.0.1", token: "", stateDir: state, shellAgents, agentDetector });
     const url = `http://127.0.0.1:${app.port}`;
     const kinds = async () => ((await (await fetch(`${url}/api/agents`)).json()) as { agents: AgentKind[] }).agents;
     const owned = await workspaceCreate({ cwd: tmpdir(), label: "ovis-test-login-path" });
@@ -1757,12 +1821,10 @@ describe("workspace and discovery endpoints", () => {
       expect((await kinds()).map((agent) => agent.kind)).not.toContain("gjc");
       clock += 60_000;
       expect((await kinds()).map((agent) => agent.kind)).not.toContain("gjc");
-      // back again: the kept miss holds until a read after the answer is a minute old runs the next one
+      // back again on the PATH the last run read: found at once, with no new login shell, as a just-installed agent is
       writeGjc();
-      expect((await kinds()).map((agent) => agent.kind)).not.toContain("gjc");
-      clock += 60_000;
       expect(await kinds()).toContainEqual({ kind: "gjc", label: "Gajae Code", installed: true });
-      expect(runs).toBe(3);
+      expect(runs).toBe(2);
 
       // released, the fixture agent ends: nothing of it outlives the test
       releaseFixture();
@@ -4639,6 +4701,202 @@ describe("repository diff of a pane's folder", () => {
 });
 
 describe("GET /api/sessions/history", () => {
+  const line = (value: unknown) => `${JSON.stringify(value)}\n`;
+
+  /** Own all setup and cleanup, including failures before a server or workspace is returned. */
+  async function withPiHistoryFixture(root: string, run: (fixture: { file: string; initial: string; url: string }) => Promise<void>, piSessionDeadlineMs?: number): Promise<void> {
+    const previous = process.env["PI_CODING_AGENT_SESSION_DIR"];
+    let created: Awaited<ReturnType<typeof workspaceCreate>> | undefined;
+    let app: ReturnType<typeof createServer> | undefined;
+    try {
+      const project = join(root, "project");
+      mkdirSync(project);
+      const cwd = realpathSync(project);
+      const store = join(root, "sessions");
+      const { piSessionFolder } = await import("./session-history.ts");
+      const folder = join(store, piSessionFolder(cwd));
+      mkdirSync(folder, { recursive: true });
+      const file = join(folder, "fixture.jsonl");
+      const initial = line({ type: "session", version: 3, id: "pi-history-fixture", cwd })
+        + line({ type: "message", message: { role: "system", content: "s".repeat(100 * 1024) } })
+        + line({ type: "message", message: { role: "user", content: [{ type: "text", text: "Late" }, { type: "text", text: "prompt" }] } })
+        + line({ type: "session_info", name: " Late name " });
+      writeFileSync(file, initial);
+      process.env["PI_CODING_AGENT_SESSION_DIR"] = store;
+      created = await workspaceCreate({ cwd, label: "ovis-test-pi-history" });
+      app = createServer({ port: 0, hostname: "127.0.0.1", stateDir: join(root, "state"), piSessionDeadlineMs });
+      const url = `http://127.0.0.1:${app.port}/api/sessions/history?workspace_id=${encodeURIComponent(created.workspace.workspace_id)}&agent=pi`;
+      await run({ file, initial, url });
+    } finally {
+      try { app?.stop(); }
+      finally {
+        if (previous === undefined) delete process.env["PI_CODING_AGENT_SESSION_DIR"]; else process.env["PI_CODING_AGENT_SESSION_DIR"] = previous;
+        try { if (created) await workspaceClose(created.workspace.workspace_id); }
+        finally { rmSync(root, { recursive: true, force: true }); }
+      }
+    }
+  }
+
+  it("streams Pi labels past the old head bound and follows appended renames/clears without changing resume IDs", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ovis-pi-history-contract-"));
+    await withPiHistoryFixture(root, async ({ file, initial, url }) => {
+      const listing = async () => {
+        const response = await fetch(url);
+        expect(response.status).toBe(200);
+        expect(response.headers.get("cache-control")).toBe("no-store");
+        return ((await response.json()) as SessionHistoryResponse).sessions;
+      };
+      expect(await listing()).toMatchObject([{ title: "Late name", firstMessage: "Late prompt", resume: { argv: ["pi", "--session", "pi-history-fixture"] } }]);
+      writeFileSync(file, initial + line({ type: "session_info", name: "Renamed" }));
+      expect((await listing())[0]?.title).toBe("Renamed");
+      writeFileSync(file, initial + line({ type: "session_info", name: " " }));
+      expect((await listing())[0]).toMatchObject({ title: null, firstMessage: "Late prompt" });
+      // A fresh streaming read has no old 16 MiB per-turn cutoff.
+      const block = line({ type: "message", message: { role: "system", content: "s".repeat(1024 * 1024) } });
+      for (let n = 0; n < 17; n++) appendFileSync(file, block);
+      appendFileSync(file, line({ type: "session_info", name: "After bounded scan" }));
+      expect((await listing())[0]).toMatchObject({ title: "After bounded scan", firstMessage: "Late prompt" });
+      // A full header queue still refuses the listing even after a real first row.
+      const older = join(dirname(file), "older.jsonl");
+      writeFileSync(older, initial.replace("pi-history-fixture", "pi-history-older"));
+      utimesSync(older, 1, 1);
+      const { PiSessionReader, PiMetadataBusy, PiMetadataDeadline } = await import("./pi-session-metadata.ts");
+      const originalRead = PiSessionReader.prototype.read;
+      let firstComplete = false;
+      const refusedRead = spyOn(PiSessionReader.prototype, "read").mockImplementationOnce(function (this: InstanceType<typeof PiSessionReader>, ...args: Parameters<typeof originalRead>) {
+        return originalRead.apply(this, args).then((label) => { firstComplete = label?.header?.id === "pi-history-fixture"; return label; });
+      }).mockRejectedValueOnce(new PiMetadataBusy("queue"));
+      try {
+        const busy = await fetch(url);
+        expect(firstComplete).toBe(true);
+        expect(refusedRead).toHaveBeenCalledTimes(2);
+        expect(busy.status).toBe(503);
+        expect(busy.headers.get("retry-after")).toBe("1");
+        expect(busy.headers.get("cache-control")).toBe("no-store");
+        const body = await busy.json();
+        expect(body).toMatchObject({ error: { code: "session_history_busy" } });
+        expect(body).not.toHaveProperty("sessions");
+      } finally { refusedRead.mockRestore(); }
+      for (const failure of [new PiMetadataDeadline(null), new PiMetadataBusy()]) {
+        const failedLabel = spyOn(PiSessionReader.prototype, "read").mockImplementation(function (this: InstanceType<typeof PiSessionReader>, ...args: Parameters<typeof originalRead>) {
+          if (args[3] !== "header" && args[2]?.path === realpathSync(older)) return Promise.reject(failure);
+          return originalRead.apply(this, args);
+        });
+        try {
+          const partial = await fetch(url);
+          expect(partial.status).toBe(200);
+          expect(partial.headers.get("cache-control")).toBe("no-store");
+          expect(partial.headers.get("retry-after")).toBeNull();
+          expect(((await partial.json()) as SessionHistoryResponse).sessions).toMatchObject([
+            { id: "pi-history-fixture", title: "After bounded scan" },
+            { id: "pi-history-older", title: null, firstMessage: null, resume: { argv: ["pi", "--session", "pi-history-older"] } },
+          ]);
+        } finally { failedLabel.mockRestore(); }
+      }
+      expect((await listing())[1]).toMatchObject({ id: "pi-history-older", title: "Late name", firstMessage: "Late prompt" });
+    }, 120_000);
+  }, 20_000);
+
+  it("lists a 202-session Pi store with 50 long transcripts through the real API", async () => {
+    // the rows, titles and a later rename are the claim, not how fast this runner reads the store: a busy
+    // CI runner hit the two-second listing deadline (503), so the deadline is set past the test's own timeout
+    const root = mkdtempSync(join(tmpdir(), "ovis-pi-large-history-contract-"));
+    await withPiHistoryFixture(root, async ({ file, url }) => {
+      const cwd = realpathSync(join(root, "project"));
+      const block = line({ type: "custom", data: "synthetic extension state ".repeat(45000) });
+      utimesSync(file, 1_790_000_000, 1_790_000_000);
+      for (let n = 1; n < 202; n++) {
+        const path = join(dirname(file), `${n}.jsonl`);
+        const body = line({ type: "session", version: 3, id: `long-${n}`, cwd })
+          + (n < 152 ? "" : block + line({ type: "message", message: { role: "user", content: `Synthetic prompt ${n}` } })
+            + line({ type: "session_info", name: `Synthetic session ${n}` }) + block.repeat(3));
+        writeFileSync(path, body);
+        utimesSync(path, 1_790_000_000 + n, 1_790_000_000 + n);
+      }
+      const listing = async () => {
+        const response = await fetch(url);
+        expect(response.status).toBe(200);
+        expect(response.headers.get("cache-control")).toBe("no-store");
+        return ((await response.json()) as SessionHistoryResponse).sessions;
+      };
+      const rows = await listing();
+      expect(rows.map((row) => row.id)).toEqual(Array.from({ length: 50 }, (_, n) => `long-${201 - n}`));
+      expect(rows.every((row, n) => row.title === `Synthetic session ${201 - n}` && row.firstMessage === `Synthetic prompt ${201 - n}`)).toBe(true);
+      // Reopening must scan again and notice a later name, not reuse the completed answer.
+      const renamed = join(dirname(file), "201.jsonl");
+      appendFileSync(renamed, line({ type: "session_info", name: "Freshly renamed" }));
+      utimesSync(renamed, 1_790_000_202, 1_790_000_202);
+      expect((await listing())[0]).toMatchObject({ id: "long-201", title: "Freshly renamed", resume: { argv: ["pi", "--session", "long-201"] } });
+    }, 120_000);
+  }, 60_000);
+
+  for (const phase of ["workspace creation", "server creation", "server stop", "workspace close"] as const) {
+    it(`cleans up the Pi history fixture when ${phase} fails`, async () => {
+      const root = mkdtempSync(join(tmpdir(), "ovis-pi-history-failure-"));
+      const previous = process.env["PI_CODING_AGENT_SESSION_DIR"];
+      const failure = new Error(`synthetic ${phase} failure`);
+      const createWorkspace = herdrClient.workspaceCreate;
+      const createApp = appModule.createServer;
+      const closeWorkspace = herdrClient.workspaceClose;
+      const restores: Array<() => void> = [];
+      let workspaceId: string | undefined;
+      let stop: (() => void) | undefined;
+      let stopped = false;
+      let closed = false;
+      try {
+        const creating = spyOn(herdrClient, "workspaceCreate").mockImplementation(async (...args) => {
+          if (phase === "workspace creation") throw failure;
+          const created = await createWorkspace(...args);
+          workspaceId = created.workspace.workspace_id;
+          return created;
+        });
+        restores.push(() => creating.mockRestore());
+        const starting = spyOn(appModule, "createServer").mockImplementation((...args) => {
+          if (phase === "server creation") throw failure;
+          const app = createApp(...args);
+          stop = app.stop;
+          const stopping = spyOn(app, "stop").mockImplementation(() => {
+            stop!();
+            stopped = true;
+            if (phase === "server stop") throw failure;
+          });
+          restores.push(() => stopping.mockRestore());
+          return app;
+        });
+        restores.push(() => starting.mockRestore());
+        const closing = spyOn(herdrClient, "workspaceClose").mockImplementation(async (...args) => {
+          if (phase === "workspace close") throw failure;
+          await closeWorkspace(...args);
+          closed = true;
+        });
+        restores.push(() => closing.mockRestore());
+
+        await expect(withPiHistoryFixture(root, async () => {})).rejects.toBe(failure);
+        expect(process.env["PI_CODING_AGENT_SESSION_DIR"]).toBe(previous);
+        expect(existsSync(root)).toBe(false);
+        expect(starting).toHaveBeenCalledTimes(phase === "workspace creation" ? 0 : 1);
+        if (stop) expect(stopped).toBe(true);
+        if (workspaceId) {
+          expect(closing).toHaveBeenCalledWith(workspaceId);
+          expect(closed).toBe(phase !== "workspace close");
+          expect((await sessionSnapshot()).workspaces.some((workspace) => workspace.workspace_id === workspaceId)).toBe(phase === "workspace close");
+        }
+      } finally {
+        for (const restore of restores.reverse()) restore();
+        // The injected close failure deliberately leaves our own isolated workspace alive;
+        // recover it here even if a cleanup assertion above failed.
+        try { if (stop && !stopped) stop(); }
+        finally {
+          try { if (workspaceId && !closed) await closeWorkspace(workspaceId); }
+          finally {
+            if (previous === undefined) delete process.env["PI_CODING_AGENT_SESSION_DIR"]; else process.env["PI_CODING_AGENT_SESSION_DIR"] = previous;
+            rmSync(root, { recursive: true, force: true });
+          }
+        }
+      }
+    }, 20_000);
+  }
+
   it("lists a workspace folder's Codex sessions from the server's store, newest first, and none a link puts outside it", async () => {
     const root = mkdtempSync(join(tmpdir(), "ovis-session-history-contract-"));
     const project = join(root, "project");

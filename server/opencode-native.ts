@@ -49,14 +49,18 @@ const PANE_VERIFIED_MS = 5_000;
  * service with its session there. A pane's end, its agent changing, or a verification that now fails
  * releases it; the stream closes when no verified pane uses its service.
  */
-const verifiedPanes = new Map<string, { sessionID: string; key: string; until: number }>();
+const verifiedPanes = new Map<string, { sessionID: string; key: string; until: number; generation: number }>();
+let verificationGeneration = 0;
+/** A collector snapshot can release only ownership verified before its read began. */
+export function openCodeVerificationCheckpoint(): number { return verificationGeneration; }
 /**
  * The verifications still in flight: all of them (a reset cancels every one), and per pane (its
  * release cancels that pane's). A cancelled verification opens no stream and caches nothing. Each
  * set holds only verifications in flight, and a pane's entry goes when its last one finishes, so
  * nothing is evicted and no cancellation can be undone.
  */
-type Verification = { cancelled: boolean };
+/** `started`: the verification counter when it began, so a snapshot read before it cannot cancel it */
+type Verification = { cancelled: boolean; started: number };
 const inFlight = new Set<Verification>();
 const inFlightByPane = new Map<string, Set<Verification>>();
 /** the status collectors that end a pane: a verified pane is tracked so its close reaches releaseOpenCodePane */
@@ -162,8 +166,32 @@ function ensureStream(service: OpenCodeService): Stream {
   return next;
 }
 
-/** A global reset: closes the stream, forgets every pane and watch, and cancels verifications in flight. */
+/**
+ * The servers running in this process (createServer holds, its stop releases): the stream, the verified
+ * panes and the watches are shared by all of them, so a server that stops resets them only when no other
+ * still runs. After the last release a verification still on its way opens no stream (`released`).
+ */
+let holders = 0;
+let released = false;
+
+/** Held by a running server; the release (idempotent) of the last holder resets everything (closeOpenCodeNative). */
+export function holdOpenCodeNative(): () => void {
+  holders += 1;
+  released = false;
+  let held = true;
+  return () => {
+    if (!held) return;
+    held = false;
+    holders -= 1;
+    if (holders > 0) return;
+    closeOpenCodeNative();
+    released = true;
+  };
+}
+
+/** A global reset: closes the stream, forgets every pane and watch, and cancels verifications in flight. What follows starts over. */
 export function closeOpenCodeNative(): void {
+  released = false;
   for (const verification of inFlight) verification.cancelled = true;
   inFlight.clear();
   inFlightByPane.clear();
@@ -179,8 +207,12 @@ export function closeOpenCodeNative(): void {
  * A pane ended, or is no longer OpenCode v2 (server/core/status.ts calls this from the same pane-end
  * and agent-change paths that forget its other state): its watches and its hold on the stream go, a
  * verification of it still in flight is cancelled, and the stream closes once no verified pane uses it.
+ * A snapshot supplies its starting checkpoint: verification since then is newer evidence and stays.
  */
-export function releaseOpenCodePane(paneId: string): void {
+export function releaseOpenCodePane(paneId: string, checkpoint = Infinity): void {
+  if ((verifiedPanes.get(paneId)?.generation ?? 0) > checkpoint) return;
+  // a verification begun since the snapshot's read is newer evidence too: it settles the pane itself
+  for (const verification of inFlightByPane.get(paneId) ?? []) if (verification.started > checkpoint) return;
   for (const verification of inFlightByPane.get(paneId) ?? []) { verification.cancelled = true; inFlight.delete(verification); }
   inFlightByPane.delete(paneId);
   for (const handed of paneTrackers.values()) handed.delete(paneId);
@@ -203,7 +235,7 @@ export async function openCodePaneService(pane: Pick<HerdrPane, "agent" | "agent
   if (label !== "opencode") return null;
   const paneId = pane.pane_id;
   // registered before the first wait (the process roots too), so a release or reset meanwhile cancels it
-  const verification: Verification = { cancelled: false };
+  const verification: Verification = { cancelled: false, started: ++verificationGeneration };
   inFlight.add(verification);
   if (paneId !== undefined) {
     const own = inFlightByPane.get(paneId) ?? new Set<Verification>();
@@ -227,8 +259,8 @@ export async function openCodePaneService(pane: Pick<HerdrPane, "agent" | "agent
     own?.delete(verification);
     if (own?.size === 0) inFlightByPane.delete(paneId!);
   }
-  // a reset or the pane's release while this was asked: nothing it found is used or kept
-  if (verification.cancelled) return null;
+  // a reset or the pane's release while this was asked, or the last server stopped: nothing it found is used or kept
+  if (verification.cancelled || released) return null;
   if (!held) {
     // no longer an OpenCode v2 pane on a verified service: it holds the stream no more
     if (paneId !== undefined && verifiedPanes.has(paneId)) releaseOpenCodePane(paneId);
@@ -238,7 +270,7 @@ export async function openCodePaneService(pane: Pick<HerdrPane, "agent" | "agent
   // a verified OpenCode v2 pane keeps its service's event stream open, so a later send's events are not missed
   const live = ensureStream(service!);
   verifiedPanes.delete(paneId);
-  verifiedPanes.set(paneId, { sessionID, key: live.key, until: Date.now() + PANE_VERIFIED_MS });
+  verifiedPanes.set(paneId, { sessionID, key: live.key, until: Date.now() + PANE_VERIFIED_MS, generation: ++verificationGeneration });
   // a pane closed without an exit frame ends only if its collector tracks it
   for (const [track, handed] of paneTrackers) handOver(track, handed, paneId);
   return { service: service!, sessionID };

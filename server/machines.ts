@@ -11,6 +11,7 @@ import { alertStatus } from "../shared/notify-policy.ts";
 import type { BridgeDescriptor } from "./bridge.ts";
 import { HerdrError, sessionSnapshot } from "./herdr/client.ts";
 import { ConnectionDiagnostics, transportFailureCode } from "./connection-diagnostics.ts";
+import { FinishEpochLedger } from "./finish-epoch-ledger.ts";
 import { labelOmoPanes } from "./conversation.ts";
 import type { CompletionTracker } from "./completion.ts";
 import { HerdrProfileState, herdrMachineId } from "./herdr-profile-state.ts";
@@ -22,6 +23,7 @@ import { detectHost, HERDR_INSTALL_CMD, installLockOwner, type RemoteHost } from
 import { REVISION, type UpdateStatus } from "../shared/update.ts";
 import { discard, readCappedJson, REMOTE_LIMITS } from "./remote-json.ts";
 import { SshConnection, sshClient } from "./ssh.ts";
+import { WAITING_FOR_WINDOWS_LOGIN } from "./windows-herdr-start.ts";
 
 interface StoredMachine { id: string; name: string; target: SshTarget; enabled: boolean; snapshot?: SessionSnapshot | null }
 interface Runtime {
@@ -45,6 +47,8 @@ interface Runtime {
   acceptedEpoch?: string;
   /** a full snapshot of another epoch than the proven one, held back until health says which server answers */
   candidate?: SessionSnapshot;
+  /** the held snapshot's finish epoch as its server read it, before any status was laid over it */
+  candidateRun?: string;
   /** this PC's one health call in flight (sourceCheck) */
   verification?: SourceCheck;
   /** the user cancelled this PC's bridge update: it is not started again on its own until the PC connects */
@@ -61,10 +65,15 @@ interface Runtime {
    * app's bridge), kept off the PC until that setup connects there, when the PC takes it with that address (setup).
    * Ends with the connection (disconnect): a cancelled, failed or superseded setup leaves the PC as it was (#2075).
    */
-  move?: { herdr?: Machine["herdr"]; snapshot?: SessionSnapshot; ownOvisAt?: SshTarget | null };
+  move?: { herdr?: Machine["herdr"]; snapshot?: SessionSnapshot; snapshotServer?: string; ownOvisAt?: SshTarget | null };
+  /** which of the PC's herdr runs this server knows have ended (finishEnded) */
+  finishes: FinishEpochLedger;
 }
 interface JobState {
   update: boolean;
+  /** Explicit consent for the next Windows cold-start attempt only. Never persisted. */
+  headlessStart?: boolean;
+  timedOut?: boolean;
   installationApproved?: boolean;
   /** started by the server for a PC whose bridge is out of date: key-only SSH, approval already given */
   auto: boolean;
@@ -245,6 +254,7 @@ export class MachineManager {
   private localBusy = false;
   private localRefreshQueued = false;
   private localRevision = 0;
+  private localTimeouts = 0;
   /** each local pane's agent as herdr last named it to the status collector */
   private heardAgents = new AgentNews();
   private localTimer: ReturnType<typeof setInterval>;
@@ -257,6 +267,7 @@ export class MachineManager {
   private setAside: string[] = [];
   private sshDir: string;
   private local: Machine = { id: LOCAL_MACHINE, name: hostname(), kind: "local", enabled: true, state: "connecting", error: null, snapshot: null };
+  private localFinishes = new FinishEpochLedger();
   private localDiagnostics = new ConnectionDiagnostics("machine.local");
   private remoteDiagnostics = new ConnectionDiagnostics("machine.remote");
   private discoveryTimer?: ReturnType<typeof setTimeout>;
@@ -269,6 +280,8 @@ export class MachineManager {
   private emitTimer?: ReturnType<typeof setTimeout>;
   /** this server's own boot id: the local PC's proof, without asking anyone */
   private bootId?: string;
+  /** this server's own finish epoch now (server/finishes.ts), when it reads its own herdr (finishEnded) */
+  private localFinishEpoch?: () => string;
   /** a monotonic clock for the health calls' start interval; tests pass their own */
   private now: () => number;
   private sourceToken = 0;
@@ -280,8 +293,9 @@ export class MachineManager {
   private ownUpdateCheckMs: number;
 
   constructor(readonly stateDir: string, private push: PushService, private completions: CompletionTracker, private readLocal: () => Promise<SessionSnapshot> = () => this.completions.readSnapshot(sessionSnapshot, labelOmoPanes),
-    options: { bootId?: string; now?: () => number; ownUpdate?: { pollMs?: number; startMs?: number; checkMs?: number } } = {}) {
+    options: { bootId?: string; localFinishEpoch?: () => string; now?: () => number; ownUpdate?: { pollMs?: number; startMs?: number; checkMs?: number } } = {}) {
     this.bootId = options.bootId;
+    this.localFinishEpoch = options.localFinishEpoch;
     this.ownUpdatePollMs = options.ownUpdate?.pollMs ?? OWN_UPDATE_POLL_MS;
     this.ownUpdateStartMs = options.ownUpdate?.startMs ?? OWN_UPDATE_START_MS;
     this.ownUpdateCheckMs = options.ownUpdate?.checkMs ?? OWN_CHECK_WAIT_MS;
@@ -425,10 +439,24 @@ export class MachineManager {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
   }
-  private runtime(machine: Machine): Runtime { return { machine, attempts: 0, generation: 0, refreshing: false, refreshQueued: false, snapshotRevision: 0, terminals: new Set() }; }
+  private runtime(machine: Machine): Runtime { return { machine, attempts: 0, generation: 0, refreshing: false, refreshQueued: false, snapshotRevision: 0, terminals: new Set(), finishes: new FinishEpochLedger(machine.snapshot) }; }
   list(): Machine[] { return [this.local, ...[...this.machines.values()].map((r) => r.machine)]; }
   /** whether some browser listens to the PCs' events now */
   watched(): boolean { return this.listeners.size > 0; }
+  /**
+   * Whether this server knows a PC's herdr run (finish epoch) has ended (server/seen.ts). This server's own PC is in
+   * the run its Finishes names now; every other one, an earlier process's included, is over. A remote PC's ledger
+   * says (FinishEpochLedger): the epoch its snapshot names is not enough, as a snapshot restored from machines.json
+   * can name a run the PC has since left (#1468), and a late read one this server already saw end (#2206). Either
+   * would drop the read finishes of the run the PC is in. A PC this server does not hold has no run known to be over.
+   */
+  finishEnded(pc: string, epoch: string): boolean {
+    if (pc === LOCAL_MACHINE) {
+      const current = this.localFinishEpoch?.() ?? this.local.snapshot?.finish_epoch;
+      return current !== undefined && current !== epoch;
+    }
+    return this.machines.get(pc)?.finishes.ended(epoch) ?? false;
+  }
   subscribe(listener: (event: MachineEvent) => void): () => void {
     this.listeners.add(listener);
     listener({ type: "machines", machines: this.list() });
@@ -439,6 +467,8 @@ export class MachineManager {
     for (const listener of this.listeners) listener(event ?? { type: "machines", machines: this.list() });
   }
   localMessage(message: ServerMessage): void {
+    // a status of a herdr run already seen to end is older than the read that showed it ended: not told, not kept
+    if (message.type === "pane-status" && this.localFinishes.stale(message.finish_epoch)) return;
     // Structural invalidations queue a follow-up below without discarding the
     // active read: continuous layout changes must not starve roster publication.
     // Status/exit patches still outrank any snapshot asked for before them.
@@ -451,6 +481,7 @@ export class MachineManager {
     if (message.type === "pane-exited") this.heardAgents.forget(message.pane_id);
     if (message.type === "pane-status" && this.local.snapshot) {
       this.local.snapshot = snapshotAfterStatus(this.local.snapshot, message);
+      this.localFinishes.hold(message.finish_epoch, this.bootId);
     }
     if (message.type === "session-changed" || message.type === "pane-exited") void this.refreshLocal();
   }
@@ -476,11 +507,16 @@ export class MachineManager {
         try {
           const snapshot = await this.readLocal();
           if (this.stopped) break;
+          this.localTimeouts = 0;
           // A newer event already patched the roster. Never publish this older load.
           if (revision !== this.localRevision) { this.localRefreshQueued = true; continue; }
           this.localDiagnostics.recovered(LOCAL_MACHINE, { operation: "snapshot", elapsed_ms: performance.now() - started });
           // a read that started before the cached one never replaces it
-          if (!olderOrderRead(this.local.snapshot, snapshot)) this.local.snapshot = snapshot;
+          // nor does one of a herdr run already seen to end; one that started after every status is newer than them
+          if (!olderOrderRead(this.local.snapshot, snapshot) && !this.localFinishes.stale(snapshot.finish_epoch)) {
+            this.local.snapshot = snapshot;
+            this.localFinishes.settle(snapshot);
+          }
           this.local.state = "connected"; this.local.error = null;
           // a pane the roster no longer lists is gone: the same id later is a pane heard of anew
           this.heardAgents.keepOnly(snapshot.panes);
@@ -489,7 +525,12 @@ export class MachineManager {
           if (revision !== this.localRevision) { this.localRefreshQueued = true; continue; }
           const code = e instanceof HerdrError ? transportFailureCode(e.code) : null;
           this.localDiagnostics.failed(LOCAL_MACHINE, code ?? "refresh_failed", { operation: "snapshot", elapsed_ms: performance.now() - started });
-          this.local.state = "error"; this.local.error = String(e instanceof Error ? e.message : e);
+          this.localTimeouts = e instanceof HerdrError && e.code === "timeout" ? this.localTimeouts + 1 : 0;
+          // One slow read is not proof that a previously connected herdr is gone. Keep the
+          // last roster for one timeout, but report startup and definite transport failures now.
+          if (this.local.state !== "connected" || this.local.snapshot === null || this.localTimeouts !== 1) {
+            this.local.state = "error"; this.local.error = String(e instanceof Error ? e.message : e);
+          }
         }
         this.emit();
       } while (this.localRefreshQueued && !this.stopped);
@@ -552,6 +593,8 @@ export class MachineManager {
     // a PC saved in herdr is named by its catalog (any length); a name sent with it is not read
     const name = existing?.machine.herdr_profile_id ? undefined : request.name;
     if (name !== undefined && (typeof name !== "string" || name.length > 100)) throw new Error("PC name must be at most 100 characters");
+    const waiting = existing && [...this.jobs.values()].find((j) => j.public.machine_id === existing.machine.id && j.public.phase === "starting" && (j.public.action_required === "windows_login" || j.public.action_required === "windows_start_failed"));
+    if (waiting && !request.update_remote && sameSshSession(target, waiting.public.target) && target.identity_file === waiting.public.target.identity_file) return waiting.public;
     if ([...this.jobs.values()].filter((j) => !["connected", "failed", "cancelled"].includes(j.public.phase)).length >= 4) throw new Error("Finish or cancel the current connection jobs first");
     if (request.machine_id && !existing) throw new Error("PC not found");
     if (existing && [...this.jobs.values()].some((j) => j.public.machine_id === existing.machine.id && !["connected", "failed", "cancelled"].includes(j.public.phase))) throw new Error("A connection job for this PC is already running");
@@ -566,7 +609,8 @@ export class MachineManager {
     // A saved PC set up at another SSH address stays at its own until it connects there: that address is the user's to
     // review in this dialog, and a reconnect or an update that asks nobody goes only where the PC is (#2075)
     const moving = !!existing && !sameSshSession(target, existing.machine.target!);
-    const job: JobState = { update: request.update_remote === true, auto, public: { id, machine_id: machineId, target, phase: "connecting", step: "Connecting with SSH keys and ssh-agent…", challenge: null, installations: [], error: null, ssh_output: null, progress: null }, abort: new AbortController(), timer: setTimeout(() => this.cancelJob(id), 600_000), stageStartedAt: Date.now(), finished: Promise.resolve() };
+    const resumeRetry = existing?.machine.state === "reconnecting";
+    const job: JobState = { update: request.update_remote === true, auto, public: { id, machine_id: machineId, target, phase: "connecting", step: "Connecting with SSH keys and ssh-agent…", challenge: null, installations: [], error: null, ssh_output: null, progress: null }, abort: new AbortController(), timer: setTimeout(() => this.cancelJob(id, true), 600_000), stageStartedAt: Date.now(), finished: Promise.resolve() };
     if (job.update && existing) job.runtime = existing;
     if (job.update && existing && !auto) existing.updateCancelled = false;
     job.timer.unref();
@@ -607,7 +651,7 @@ export class MachineManager {
         // all or nothing: one that cannot be completed or saved leaves the PC as it was, trying its own address (#2075)
         const move = runtime.move;
         runtime.move = undefined;
-        const left = { target: runtime.machine.target, error: runtime.machine.error, herdr: runtime.machine.herdr, snapshot: runtime.machine.snapshot, ownOvisAt: runtime.ownOvisAt };
+        const left = { target: runtime.machine.target, error: runtime.machine.error, herdr: runtime.machine.herdr, snapshot: runtime.machine.snapshot, ownOvisAt: runtime.ownOvisAt, finishes: runtime.finishes.copy() };
         try {
           runtime.machine.target = target;
           if (move) {
@@ -615,7 +659,9 @@ export class MachineManager {
             runtime.machine.error = null;
             if (move.herdr) runtime.machine.herdr = move.herdr;
             if (move.ownOvisAt === null) delete runtime.ownOvisAt; else if (move.ownOvisAt) runtime.ownOvisAt = move.ownOvisAt;
-            if (move.snapshot) this.publish(runtime, move.snapshot);
+            // a roster of the address it left is not this one's: until one read here is taken (one held for this
+            // server's health is published once that proves it), the PC has none, on its card or on disk (#2080)
+            if (move.snapshot) this.publish(runtime, move.snapshot, false, move.snapshotServer); else runtime.machine.snapshot = null;
           }
           if (runtime.machine.herdr_profile_id) {
             this.profileState.allowConnection(runtime.machine.herdr_profile_id, target);
@@ -626,6 +672,7 @@ export class MachineManager {
           if (move) {
             Object.assign(runtime.machine, { target: left.target, error: left.error, herdr: left.herdr, snapshot: left.snapshot });
             if (left.ownOvisAt) runtime.ownOvisAt = left.ownOvisAt; else delete runtime.ownOvisAt;
+            runtime.finishes = left.finishes;
           }
           throw error;
         }
@@ -645,22 +692,24 @@ export class MachineManager {
         const unreachable = ownsRuntime && job.update && !!existing && !(e instanceof MachineActionRequired)
           && (error === OWN_OVIS_AWAY || error === OWN_CHECK_RUNNING || (reached ? !ssh.connected() : !SSH_REFUSED.test(error)));
         if (ownsRuntime) this.disconnect(runtime);
-        // a cancelled update (its Cancel, a closed dialog, the setup's time limit) says nothing
-        // about the bridge either: the PC tries again on its own, and only a version check on a PC
-        // that answers asks for the update again, without starting the cancelled one by itself
+        // An interrupted setup says nothing about the bridge: restore a saved PC's retries.
+        // Only explicit cancellation suppresses automatic updates; a deadline is not a refusal.
         // A setup at another SSH address that did not connect there leaves the PC as it was, trying its own address
         // again when it is enabled: what that setup met there is not this PC's, and its dialog says how it ended (#2075).
-        if (job.public.phase === "cancelled") {
-          if (ownsRuntime && (job.update || moving) && existing && runtime.machine.enabled && !this.stopped) {
+        if (job.public.phase === "cancelled" || job.timedOut) {
+          if (ownsRuntime && !moving && runtime.machine.action_required === "windows_start_failed") { runtime.machine.state = "error"; this.emit(); }
+          else if (ownsRuntime && (job.update || moving || resumeRetry || runtime.machine.action_required === "windows_login") && existing && runtime.machine.enabled && !this.stopped) {
             runtime.machine.error = null; runtime.machine.action_required = null;
-            if (job.update && !moving) runtime.updateCancelled = true;
+            if (job.update && !moving && !job.timedOut) runtime.updateCancelled = true;
             this.retryLater(runtime);
           }
+          else if (ownsRuntime && runtime.machine.action_required === "windows_login") { runtime.machine.action_required = null; runtime.machine.error = null; this.emit(); }
         } else {
           job.public.phase = "failed"; job.public.step = "Connection failed";
           job.public.error = error;
           if (moving) { if (ownsRuntime && runtime.machine.enabled && !this.stopped) { runtime.machine.error = null; runtime.machine.action_required = null; this.retryLater(runtime); } }
-          else if (ownsRuntime && unreachable && runtime.machine.enabled) { runtime.machine.error = error; runtime.machine.action_required = null; this.retryLater(runtime); }
+          else if (ownsRuntime && existing && runtime.machine.enabled && !this.stopped && e instanceof MachineActionRequired && e.action === "windows_login") { runtime.machine.error = error; runtime.machine.action_required = e.action; this.retryLater(runtime); }
+          else if (ownsRuntime && existing && runtime.machine.enabled && !this.stopped && !(e instanceof MachineActionRequired) && (unreachable || resumeRetry || runtime.machine.action_required === "windows_login")) { runtime.machine.error = error; runtime.machine.action_required = null; this.retryLater(runtime); }
           // a failed bridge update on a PC that answered keeps its button: the bridge is still
           // out of date, and the error says why this attempt failed (a password needed, …)
           else if (ownsRuntime) { runtime.machine.state = "error"; runtime.machine.error = error; runtime.machine.action_required = e instanceof MachineActionRequired ? e.action : job.update && existing ? "update_bridge" : null; }
@@ -710,6 +759,13 @@ export class MachineManager {
     const job = this.jobs.get(id);
     if (!job) throw new Error("Setup job not found");
     if (action.action === "cancel") { this.cancelJob(id); return; }
+    if (action.action === "start_headless") {
+      if (job.abort.signal.aborted || job.public.phase !== "starting" || (job.public.action_required !== "windows_login" && job.public.action_required !== "windows_start_failed")) throw new Error("This PC is not waiting for Windows sign-in");
+      job.public.action_required = null;
+      job.public.step = "Starting without Windows sign-in…";
+      job.headlessStart = true;
+      return;
+    }
     if (!job.pending) throw new Error("This setup step has already changed");
     if (action.action === "approve") {
       if (job.public.phase !== "approval") throw new Error("No installation is awaiting approval");
@@ -726,10 +782,13 @@ export class MachineManager {
     job.public.step = actionStep(action.action);
     pending.resolve(action.action === "answer" ? action.answer : "approved");
   }
-  private cancelJob(id: string): void {
+  private cancelJob(id: string, timedOut = false): void {
     const job = this.jobs.get(id);
     if (!job || ["connected", "failed", "cancelled"].includes(job.public.phase)) return;
-    job.public.phase = "cancelled"; job.public.step = "Cancelled"; job.public.challenge = null; job.public.ssh_output = null;
+    job.timedOut = timedOut;
+    job.public.phase = timedOut ? "failed" : "cancelled"; job.public.step = timedOut ? "Connection timed out" : "Cancelled"; job.public.challenge = null; job.public.ssh_output = null;
+    if (timedOut) job.public.error = "Connection timed out";
+    job.public.action_required = null; job.headlessStart = false;
     job.abort.abort(); job.pending?.reject(new Error("Setup cancelled")); job.pending = undefined;
     job.ssh?.close(); clearTimeout(job.timer);
   }
@@ -760,6 +819,7 @@ export class MachineManager {
       if (runtime.generation === generation && !moving) runtime.machine.remote_ovis = left;
     };
     const { host, inspection } = await detectHost(ssh, session);
+    if (job && host.kind === "windows") job.public.windows_startup = moving || !this.machines.has(runtime.machine.id);
     const { platform, expectedSocket } = inspection;
     // what the PC's own Ovis said is read anew on every try: it may have been updated or replaced since
     if (!moving) runtime.machine.remote_ovis = null;
@@ -896,14 +956,55 @@ export class MachineManager {
     if (!descriptor) {
       if (job?.abort.signal.aborted || runtime.generation !== generation || this.stopped) throw new Error("Setup cancelled");
       if (job) this.stage(job, "starting", "Starting the remote bridge…");
-      await host.start(ssh, { session, herdrPath, inspection });
-      for (let i = 0; i < 40; i++) {
-        if (job?.abort.signal.aborted || this.stopped) throw new Error("Setup cancelled");
-        descriptor = (await host.descriptors(ssh)).find((d) => d.socket_path === expectedSocket && d.pid !== stalePid);
-        if (descriptor) break;
-        await Bun.sleep(250);
+      let notice: string | null = null;
+      let waitingForLogin = false;
+      do {
+        if (job?.abort.signal.aborted || runtime.generation !== generation || this.stopped) throw new Error("Setup cancelled");
+        const headless = job?.headlessStart === true;
+        if (job) job.headlessStart = false;
+        await host.start(ssh, { session, herdrPath, inspection, ...(headless ? { headless: true } : {}) });
+        notice = null;
+        // Windows allows 30 seconds for the desktop launcher, then 30 for herdr
+        // readiness. Leave a further ten seconds for bridge registration.
+        const pollLimit = host.kind === "windows" ? 280 : 40;
+        for (let i = 0; i < pollLimit; i++) {
+          if (job?.abort.signal.aborted || runtime.generation !== generation || this.stopped) throw new Error("Setup cancelled");
+          descriptor = (await host.descriptors(ssh)).find((d) => d.socket_path === expectedSocket && d.pid !== stalePid);
+          if (descriptor) break;
+          if (!headless) notice = await host.startupNotice?.(ssh, session) ?? null;
+          if (notice) break;
+          await Bun.sleep(250);
+        }
+        if (!descriptor && !headless && !notice) notice = await host.startupNotice?.(ssh, session) ?? null;
+        const startupAction = notice === WAITING_FOR_WINDOWS_LOGIN ? "windows_login" : "windows_start_failed";
+        // An unattended update has installed its bundle. Waiting for a person belongs to
+        // reconnection, not the global update queue or one of the four setup slots.
+        if (notice && job?.auto && job.update) throw new MachineActionRequired(notice, startupAction);
+        if (notice && job) {
+          if (!waitingForLogin) {
+            waitingForLogin = true;
+            clearTimeout(job.timer);
+            job.timer = setTimeout(() => this.cancelJob(job.public.id, true), 600_000);
+            job.timer.unref();
+          }
+          if (!job.headlessStart) {
+            job.public.action_required = startupAction;
+            if (!moving) { runtime.machine.action_required = startupAction; runtime.machine.error = notice; }
+            this.stage(job, "starting", notice);
+          }
+          do {
+            await this.pause(job.abort.signal);
+            if (job.abort.signal.aborted || runtime.generation !== generation || this.stopped) throw new Error("Setup cancelled");
+            // A scheduler refusal needs a decision, not another automatic launch.
+          } while (job.public.action_required === "windows_start_failed");
+        }
+      } while (!descriptor && notice && job);
+      if (!descriptor) {
+        if (notice) throw new MachineActionRequired(notice, notice === WAITING_FOR_WINDOWS_LOGIN ? "windows_login" : "windows_start_failed");
+        throw new Error(`Bridge did not start. Check ${host.logHint} on the PC.`);
       }
-      if (!descriptor) throw new Error(`Bridge did not start. Check ${host.logHint} on the PC.`);
+      if (job?.public.action_required === "windows_login" || job?.public.action_required === "windows_start_failed") job.public.action_required = null;
+      if (runtime.machine.action_required === "windows_login" || runtime.machine.action_required === "windows_start_failed") runtime.machine.action_required = null;
     }
     learnServer(descriptor);
     let verified: Awaited<ReturnType<MachineManager["verify"]>>;
@@ -946,17 +1047,25 @@ export class MachineManager {
       signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(BRIDGE_ANSWER_MS)]) : AbortSignal.timeout(BRIDGE_ANSWER_MS) });
     let port = descriptor.port;
     let url: string | null = null;
+    const take = (told: { port?: unknown; serving_url?: unknown } | null | undefined) => {
+      if (typeof told?.port === "number" && Number.isInteger(told.port) && told.port >= 1 && told.port <= 65535) port = told.port;
+      const serving = told?.serving_url;
+      if (typeof serving === "string" && serving.length <= 300 && /^https:\/\/[^\s/?#@]+(?:\/[^\s]*)?$/.test(serving)) url = serving;
+    };
     // where it answers, as it tells it: a relayed bridge (#1960) registers another port than its own.
-    // A server that wants its token tells nothing, and the descriptor's port stands
-    try {
-      const response = await get("/api/access");
-      if (response.ok) {
-        const access = await readCappedJson<{ port?: unknown; tailscale?: { serving_url?: unknown } } | null>(response, REMOTE_LIMITS.ownUpdates);
-        if (typeof access?.port === "number" && Number.isInteger(access.port) && access.port >= 1 && access.port <= 65535) port = access.port;
-        const serving = access?.tailscale?.serving_url;
-        if (typeof serving === "string" && serving.length <= 300 && /^https:\/\/[^\s/?#@]+(?:\/[^\s]*)?$/.test(serving)) url = serving;
-      } else await discard(response);
-    } catch { /* the address stays the descriptor's */ }
+    // This app's server tells it with its update status, to this token (#2191); an older one only on
+    // GET /api/access, which it opens to the tunnel only without OVIS_TOKEN. One that tells nothing
+    // keeps the descriptor's port
+    const locate = async (status: Partial<UpdateStatus> | null) => {
+      if (typeof status === "object" && status !== null && "port" in status) { take(status); return; }
+      try {
+        const response = await get("/api/access");
+        if (response.ok) {
+          const access = await readCappedJson<{ port?: unknown; tailscale?: { serving_url?: unknown } } | null>(response, REMOTE_LIMITS.ownUpdates);
+          take({ port: access?.port, serving_url: access?.tailscale?.serving_url });
+        } else await discard(response);
+      } catch { /* the address stays the descriptor's */ }
+    };
     const answer = (status: Partial<UpdateStatus> | null, reason: string | null): RemoteOvis => ({
       version: releaseVersion(status?.current_version), latest_version: releaseVersion(status?.latest_version),
       updatable: reason === null, reason, address: `${sshHost(target.destination)}:${port}`, url,
@@ -974,7 +1083,14 @@ export class MachineManager {
     };
     // a check for releases (its own, every 5 minutes) offers nothing while it runs: its answer is waited for
     let told = await read();
-    for (const until = Date.now() + this.ownUpdateCheckMs; "status" in told && told.status?.phase === "checking" && Date.now() < until && !signal?.aborted;) { await this.pause(signal); told = await read(); }
+    // the last status that told where it answers: a later read that fails does not take it back
+    let located = "status" in told ? told.status : null;
+    for (const until = Date.now() + this.ownUpdateCheckMs; "status" in told && told.status?.phase === "checking" && Date.now() < until && !signal?.aborted;) {
+      await this.pause(signal);
+      told = await read();
+      if ("status" in told && typeof told.status === "object" && told.status !== null && "port" in told.status) located = told.status;
+    }
+    await locate(located);
     if ("refused" in told) return answer(null, told.refused);
     const status = told.status;
     if (status?.managed !== true) return answer(status, `That PC's Ovis does not update itself: ${remoteWords(status?.blocked_reason) ?? "it was not started by its updater."}`);
@@ -1117,7 +1233,8 @@ export class MachineManager {
           if (generation !== runtime.generation || this.stopped) return;
           if (revision !== runtime.snapshotRevision) { runtime.refreshQueued = true; continue; }
           if (!runtime.move) runtime.machine.error = null;
-          if (this.admitRemote(runtime, snapshot)) { this.publish(runtime, snapshot); this.emit(); }
+          // read after every snapshot and status that reached this server before it (the revision did not move)
+          if (this.admitRemote(runtime, snapshot)) { this.publish(runtime, snapshot, true); this.emit(); }
         } catch (e) {
           if (generation !== runtime.generation || this.stopped) return;
           if (revision !== runtime.snapshotRevision) { runtime.refreshQueued = true; continue; }
@@ -1151,11 +1268,16 @@ export class MachineManager {
       if (generation !== runtime.generation || this.stopped) return;
       let message: ServerMessage;
       try { message = JSON.parse(String(event.data)); } catch { return; }
+      // a status of a run already seen to end is older than the read that showed it ended: not told, not kept
+      if (message.type === "pane-status" && runtime.finishes.stale(message.finish_epoch)) return;
       // session-changed queues one follow-up, but lets the active roster publish.
       if (["snapshot", "pane-status", "pane-exited"].includes(message.type)) runtime.snapshotRevision++;
-      if (message.type === "snapshot" && this.admitRemote(runtime, message.snapshot)) { runtime.machine.snapshot = message.snapshot; this.push.seed(forAlerts(message.snapshot.panes), runtime.machine.id, runtime.machine.name); this.emit(); }
+      // a frame may have been overtaken by an HTTP read: it holds its epoch, it proves no other ended
+      if (message.type === "snapshot" && this.admitRemote(runtime, message.snapshot)) { runtime.machine.snapshot = message.snapshot; runtime.finishes.hold(message.snapshot.finish_epoch, message.snapshot.order_epoch); this.push.seed(forAlerts(message.snapshot.panes), runtime.machine.id, runtime.machine.name); this.emit(); }
+      // a status names no server: it is the proven one's, or not known while health is asked (the cached roster's
+      // order epoch may be another server's)
       if (message.type === "pane-status") {
-        if (runtime.machine.snapshot) runtime.machine.snapshot = snapshotAfterStatus(runtime.machine.snapshot, message);
+        if (runtime.machine.snapshot) { runtime.machine.snapshot = snapshotAfterStatus(runtime.machine.snapshot, message); runtime.finishes.hold(message.finish_epoch, runtime.acceptedEpoch); }
         // a snapshot held for health is older than this frame too: published later, it keeps the status
         if (runtime.candidate) runtime.candidate = snapshotAfterStatus(runtime.candidate, message);
         void this.push.onStatus(message.pane_id, alertStatus(message.agent_status, message.background_wait), runtime.machine.id).catch(() => {});
@@ -1175,13 +1297,14 @@ export class MachineManager {
     this.remoteDiagnostics.failed(runtime.machine.id, error instanceof MachineActionRequired ? "action_required" : "connection_lost", { operation: "bridge", machine_id: runtime.machine.id });
     this.disconnect(runtime);
     runtime.machine.error = error instanceof Error ? error.message : String(error);
-    if (error instanceof MachineActionRequired) {
+    if (error instanceof MachineActionRequired && error.action !== "windows_login") {
       runtime.machine.state = "error"; runtime.machine.action_required = error.action;
       this.emit();
       // SSH itself just worked without a password, so the update can run unattended
       if (error.action === "update_bridge" && this.preferences.auto_update_bridges && this.mayManageBridge(runtime) && !runtime.updateCancelled) this.queueAutoUpdate(runtime.machine.id);
       return;
     }
+    runtime.machine.action_required = error instanceof MachineActionRequired ? error.action : null;
     this.retryLater(runtime);
   }
   /** a disconnected PC tries again on its own, waiting longer after each failed try */
@@ -1244,7 +1367,7 @@ export class MachineManager {
     runtime.ssh?.close(); runtime.ssh = undefined; runtime.endpoint = undefined;
     // what this connection proved goes with it; the start interval stays (sourceStarts)
     runtime.verification?.abort.abort(); runtime.verification = undefined;
-    runtime.acceptedEpoch = undefined; runtime.candidate = undefined; delete runtime.machine.source_boot_id;
+    runtime.acceptedEpoch = undefined; runtime.candidate = undefined; runtime.candidateRun = undefined; delete runtime.machine.source_boot_id;
     runtime.move = undefined;
     runtime.machine.state = "disconnected";
   }
@@ -1253,13 +1376,15 @@ export class MachineManager {
    * copied unchanged. Within the epoch its health proved over this connection, a read older than the
    * cached one is dropped; any other epoch, the connection's first included, is held back while the
    * manager asks that PC's /api/health which server answers now (a held one is offered again by the
-   * next refresh). A snapshot without evidence (an older bridge) is taken as before.
+   * next refresh). A snapshot without evidence (an older bridge) is taken as before. One of a herdr run this
+   * server already saw end is old, whatever its pair says (#2206).
    */
   private admitRemote(runtime: Runtime, snapshot: SessionSnapshot): boolean {
+    if (runtime.finishes.stale(snapshot.finish_epoch)) return false;
     const epoch = snapshot.order_epoch;
     if (typeof epoch !== "string" || !Number.isSafeInteger(snapshot.read_seq)) return true;
     if (epoch === runtime.acceptedEpoch) return !olderOrderRead(runtime.machine.snapshot, snapshot);
-    if (!olderOrderRead(runtime.candidate, snapshot)) runtime.candidate = snapshot;
+    if (!olderOrderRead(runtime.candidate, snapshot)) { runtime.candidate = snapshot; runtime.candidateRun = snapshot.finish_epoch; }
     this.sourceCheck(runtime);
     return false;
   }
@@ -1299,10 +1424,13 @@ export class MachineManager {
   /**
    * A full snapshot read from the PC's server becomes the PC's, saved and seeded for alerts. One that a setup at another
    * SSH address read waits for that setup to connect there (Runtime.move), and is neither shown nor saved before.
+   * `settled`: a read that started after every snapshot and status of the PC that reached this server
+   * (FinishEpochLedger.settle). Otherwise `server`: the one known to have named its finish epoch, if any.
    */
-  private publish(runtime: Runtime, snapshot: SessionSnapshot): void {
-    if (runtime.move) { runtime.move.snapshot = snapshot; return; }
+  private publish(runtime: Runtime, snapshot: SessionSnapshot, settled = false, server?: string): void {
+    if (runtime.move) { runtime.move.snapshot = snapshot; runtime.move.snapshotServer = settled ? snapshot.order_epoch : server; return; }
     runtime.machine.snapshot = snapshot;
+    if (settled) runtime.finishes.settle(snapshot); else runtime.finishes.hold(snapshot.finish_epoch, server);
     this.saveSoon();
     this.push.seed(forAlerts(snapshot.panes), runtime.machine.id, runtime.machine.name);
   }
@@ -1311,8 +1439,10 @@ export class MachineManager {
     runtime.machine.source_boot_id = boot;
     runtime.acceptedEpoch = boot;
     const candidate = runtime.candidate;
-    runtime.candidate = undefined;
-    if (candidate?.order_epoch === boot && !olderOrderRead(runtime.machine.snapshot, candidate)) this.publish(runtime, candidate);
+    const run = runtime.candidateRun;
+    runtime.candidate = undefined; runtime.candidateRun = undefined;
+    // its run is the proven server's own unless a status laid another over it
+    if (candidate?.order_epoch === boot && !olderOrderRead(runtime.machine.snapshot, candidate)) this.publish(runtime, candidate, false, candidate.finish_epoch === run ? boot : undefined);
     else if (runtime.machine.snapshot?.order_epoch !== boot) {
       // the cache is of another server: a read of this one replaces it
       const generation = runtime.generation;
@@ -1359,6 +1489,7 @@ export class MachineManager {
     if (patch.enabled !== undefined) {
       if (typeof patch.enabled !== "boolean") throw new Error("enabled must be boolean");
       runtime.machine.enabled = patch.enabled;
+      if (!patch.enabled && runtime.machine.action_required === "windows_login") { runtime.machine.action_required = null; runtime.machine.error = null; }
       this.disconnect(runtime);
       for (const [id, job] of this.jobs) if (job.public.machine_id === runtime.machine.id) this.cancelJob(id);
       if (patch.enabled) void this.reconnect(runtime);

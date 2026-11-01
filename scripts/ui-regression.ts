@@ -26,7 +26,7 @@ import { checkCommandArrows } from "./terminal-command-arrows-regression.ts";
 import { checkFolderFilter, checkNewFolder } from "./folder-filter-regression.ts";
 import { checkPaletteKeys } from "./palette-keys-regression.ts";
 import { checkFollowHerdrFocus } from "./follow-focus-regression.ts";
-import { UsageService } from "../server/usage.ts";
+import { systemUsageContext, UsageService } from "../server/usage.ts";
 import { openSettingsPage } from "./settings-page.ts";
 import { assertCspClean, watchCsp } from "./csp-violations.ts";
 import type { CspWatch } from "./csp-violations.ts";
@@ -85,7 +85,7 @@ try {
   }
   const [paneA, paneB] = panes as [string, string];
   // no provider is asked with the test machine's own sign-ins
-  server = createServer({ port: 0, hostname: "127.0.0.1", token: "", stateDir: join(root, "push"), usage: new UsageService(undefined, []) });
+  server = createServer({ port: 0, hostname: "127.0.0.1", token: "", stateDir: join(root, "push"), usage: new UsageService({ ...systemUsageContext(), home: root, env: {} }, []) });
   const origin = `http://127.0.0.1:${server.port}`;
   browser = await chromium.launch({
     executablePath: chromePath(),
@@ -124,8 +124,10 @@ try {
   csp.push(await watchCsp(page));
   let holdSubmitResult = false;
   let releaseSubmitResult: (() => void) | null = null;
-  // a connection's first frame held back: what the page does between a reconnect and its snapshot
+  // a connection's first frames held back: what the page does between a reconnect and the frame that
+  // says what the bridge supports (features), and then its snapshot
   let holdSnapshot = false;
+  let releaseFeatures: (() => void) | null = null;
   let releaseSnapshot: (() => void) | null = null;
   const routed: Array<{ close: () => Promise<void> }> = [];
   await page.routeWebSocket(/\/ws(?:\?|$)/, (socket) => {
@@ -133,7 +135,11 @@ try {
     const upstream = socket.connectToServer();
     upstream.onMessage((raw) => {
       const message = JSON.parse(String(raw));
-      if (holdSnapshot && message.type === "snapshot") {
+      if (holdSnapshot && message.type === "features") {
+        const release = () => { socket.send(raw); releaseFeatures = null; };
+        releaseFeatures = release;
+        releases.push(release);
+      } else if (holdSnapshot && message.type === "snapshot") {
         holdSnapshot = false;
         const release = () => { socket.send(raw); releaseSnapshot = null; };
         releaseSnapshot = release;
@@ -967,7 +973,7 @@ try {
   const socketsBeforeReconnect = sockets.length;
   holdSnapshot = true;
   await routed.at(-1)!.close();
-  await until(() => releaseSnapshot !== null, "the reconnect's snapshot was held back");
+  await until(() => releaseFeatures !== null && releaseSnapshot !== null, "the reconnect's features and snapshot were held back");
   // the server can send its snapshot before the page has even sent its attach: the pane is
   // ready only once the new connection says so, not by the closed one's last word
   await until(() => sockets.length > socketsBeforeReconnect, "the page opened its new connection");
@@ -975,9 +981,12 @@ try {
   assert.equal(await page.locator('.pending-message[data-state="uncertain"]').count(), 2, "the lost connection's rows are no longer its own");
   await composer.fill("sent before the snapshot");
   await page.getByRole("button", { name: "Send message", exact: true }).click();
-  assert.equal(inputs.length, sentBeforeSnapshot, "the message waits for the snapshot that says what the bridge supports");
-  releaseSnapshot!();
+  assert.equal(inputs.length, sentBeforeSnapshot, "the message waits for the frame that says what the bridge supports");
+  // that frame needs no herdr: once it is in, the message goes, with the snapshot (which waits on herdr) still held
+  releaseFeatures!();
   await until(async () => await page.locator('.pending-message[data-state="queued"]').count() === 1, "the message sent before the snapshot is a live pending row");
+  assert.notEqual(releaseSnapshot, null, "the snapshot was still held back when the message went");
+  releaseSnapshot!();
   assert.equal(inputs.at(-1)?.delivery, "queue");
   assert.equal(await page.locator(".composer-note").count(), 0);
   await page.getByRole("button", { name: "Discard", exact: true }).click();

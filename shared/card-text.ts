@@ -29,6 +29,9 @@ const CARD_TEXT = [
   "The message waits in its input. Send it as it is now?",
   "No goal set",
   "Set effort for this session",
+  "Turn Ultracode on",
+  "Turn Ultracode off",
+  "Keeps the effort level, for this session only",
   "Choose how to continue",
   "The agent is waiting for your answer.",
   "The agent is waiting for input.",
@@ -64,6 +67,8 @@ const CARD_TEXT = [
   "Comment",
   "The conversation is over its {context} context: omp compacts it first",
   "Question {n}",
+  "Approve",
+  "Deny",
 ] as const;
 
 export type CardTextKey = (typeof CARD_TEXT)[number];

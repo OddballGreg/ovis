@@ -7,16 +7,20 @@ import "./NewSessionDialog.css";
 import type { AgentKind, OpencodeModelCatalog, SlashCommand } from "../../shared/protocol.ts";
 import { MAX_LABEL_CHARS } from "../../shared/labels.ts";
 import { ApiError } from "../lib/api.ts";
+import { AddAgentPanel } from "./AddAgentPanel.tsx";
 import { AgentPicker, rememberAgent, rememberedAgent } from "./AgentPicker.tsx";
 import { DirectoryBrowser, homeRelative } from "./DirectoryBrowser.tsx";
 import { RecentFolderChips } from "./RecentFolderChips.tsx";
+import { Toggle } from "./SettingsControls.tsx";
 import { useMachineApi, useMachineId } from "../lib/machineContext.tsx";
+import { useAgentSkills } from "../lib/useAgentSkills.ts";
 import { useT } from "../lib/i18n.ts";
+import { latestRead, READ_AGAIN_MS, READ_AGAIN_TIMES, readAgainUntil } from "../lib/latestRead.ts";
 import { useSettings } from "../lib/settings.ts";
 import { launchCapabilities, modelSuggestions } from "../lib/agentLaunchMode.ts";
 import { opencodeLaunchModels } from "../lib/opencodeModels.ts";
 import { MAX_COMPOSER_CHARS } from "../lib/compose.ts";
-import { createRequest, firstMessageOutcome, newSessionLaunch, startNewSession } from "../lib/newSession.ts";
+import { createRequest, dialogLaunch, firstMessageOutcome, startNewSession } from "../lib/newSession.ts";
 import { useMachineSessions } from "../lib/machineSessionContext.tsx";
 import { composerDrafts } from "../lib/composerDraft.ts";
 import { paneStorageId } from "../../shared/machines.ts";
@@ -53,6 +57,10 @@ export interface NewSessionDialogProps {
   onDraft?: (fields: DialogFields) => void;
   /** the PC's open linked worktree checkouts: no project to offer among the recent folders */
   worktrees?: readonly string[];
+  /** shows a pane of this dialog's PC in its terminal: an agent's install or sign-in tab, from Add another agent */
+  onOpenPane?: (paneId: string) => void;
+  /** this device only watches: a setup types into the PC's terminal, so Add another agent is not offered */
+  watching?: boolean;
 }
 
 export interface DialogFields {
@@ -64,19 +72,12 @@ export interface DialogFields {
 
 /** how long the fields rest before the address follows them: Safari refuses a burst of history writes */
 const DRAFT_MS = 400;
-/** how long the agent and folder rest before their skills are asked for: a path is typed one key at a time */
-const SKILLS_MS = 300;
 /** recent folders offered: one row a phone swipes sideways; a wider screen fits what one row holds and lists the rest under "+N" */
 const RECENT_FOLDERS_SHOWN = 8;
 
 function directoryBasename(value: string): string {
   const trimmed = value.replace(/\\/g, "/").replace(/\/+$/, "");
   return trimmed.split("/").pop() || value;
-}
-
-/** The skills among an agent's commands, as chips the first message takes: `$name`, `@name` or `/name`. */
-function skillRows(commands: readonly SlashCommand[]): SlashCommand[] {
-  return commands.filter((command) => command.source === "skill" && command.visibility !== "terminal");
 }
 
 const skillToken = (skill: SlashCommand): string => `${skill.trigger ?? "/"}${skill.name}`;
@@ -91,7 +92,7 @@ export function insertToken(text: string, at: number, token: string): { text: st
   return { text: `${head}${after}`.slice(0, MAX_COMPOSER_CHARS), caret: Math.min(head.length, MAX_COMPOSER_CHARS) };
 }
 
-export function NewSessionDialog({ open, defaultCwd, tab = null, onClose, onCreated, machineName, prefill = null, onDraft, worktrees = [] }: NewSessionDialogProps) {
+export function NewSessionDialog({ open, defaultCwd, tab = null, onClose, onCreated, machineName, prefill = null, onDraft, worktrees = [], onOpenPane, watching = false }: NewSessionDialogProps) {
   const t = useT();
   const { settings } = useSettings();
   const machineId = useMachineId();
@@ -103,11 +104,13 @@ export function NewSessionDialog({ open, defaultCwd, tab = null, onClose, onCrea
   const [name, setName] = useState("");
   const [model, setModel] = useState("");
   const [effort, setEffort] = useState("");
+  const [ultracode, setUltracode] = useState(false);
   const [prompt, setPrompt] = useState("");
   /** OpenCode's models for `--model`, once listed: its 1.x HTTP source lists them (server/opencode-model.ts); null while not asked or not answered */
   const [opencodeModels, setOpencodeModels] = useState<OpencodeModelCatalog | null>(null);
-  /** the picked agent's skills in the folder, once listed; null while none were asked for or the answer is on its way */
-  const [skills, setSkills] = useState<{ rows: SlashCommand[]; note: string | null } | null>(null);
+  // the skills the picked agent would offer in the folder, before any process exists (GET /api/agent/commands)
+  const skillFolder = tab ? tab.cwd : cwd.trim() || null;
+  const [skills, setSkills] = useAgentSkills(open, agentKind, skillFolder, fetchAgentCommands, t);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<UserError | null>(null);
   const [createdPaneId, setCreatedPaneId] = useState<string | null>(null);
@@ -116,6 +119,14 @@ export function NewSessionDialog({ open, defaultCwd, tab = null, onClose, onCrea
   /** the first message was not queued and waits in the made pane's chat box: Open shows the chat */
   const [createdKept, setCreatedKept] = useState(false);
   const [browsing, setBrowsing] = useState(false);
+  // Add another agent shows in place of the fields, which keep what was typed
+  const [adding, setAdding] = useState(false);
+  // the PC's agents read again after a setup: nothing is started until the picker shows the result
+  const [refreshing, setRefreshing] = useState(false);
+  // counts openings and closings, so an answer for an earlier opening changes nothing
+  const openings = useRef(0);
+  // the agent list as read last: the read as the dialog opened may answer after the one an install asked for
+  const agentReads = useRef(latestRead());
   const [recentFolders, setRecentFolders] = useState(() => recentDirectories.read(machineId));
   // folders kept before worktrees and temporary folders were left out are left out here too
   const shownFolders = recentFolders.filter((path) => !passingFolder(path, worktrees)).slice(0, RECENT_FOLDERS_SHOWN);
@@ -149,6 +160,7 @@ export function NewSessionDialog({ open, defaultCwd, tab = null, onClose, onCrea
     setName(filled?.name ?? "");
     setModel("");
     setEffort("");
+    setUltracode(false);
     setPrompt("");
     setSkills(null);
     setError(null);
@@ -157,20 +169,31 @@ export function NewSessionDialog({ open, defaultCwd, tab = null, onClose, onCrea
     setCreatedStarted(false);
     setCreatedKept(false);
     setBrowsing(false);
+    setAdding(false);
+    setRefreshing(false);
     setRecentFolders(recentDirectories.read(machineId));
     const remembered = rememberedAgent();
     const stored = filled?.agent ?? remembered;
     setAgentKind(stored);
     let cancelled = false;
+    const latest = agentReads.current();
     void fetchAgentKinds()
       .then((next) => {
-        if (cancelled) return;
+        if (cancelled || !latest()) return;
         setAgents(next);
         // a linked agent herdr does not offer gives way to the last one picked, as an unknown remembered one does to a shell
-        if (stored && !next.some((agent) => agent.kind === stored)) setAgentKind(stored !== remembered && next.some((agent) => agent.kind === remembered) ? remembered : "");
+        if (stored && !next.some((agent) => agent.kind === stored)) {
+          const kind = stored !== remembered && next.some((agent) => agent.kind === remembered) ? remembered : "";
+          setAgentKind(kind);
+          // what was chosen meanwhile for the agent that gave way goes as pickAgent's choices go
+          const can = launchCapabilities(kind);
+          setModel("");
+          setEffort((current) => can.efforts.includes(current) ? current : "");
+          if (!can.ultracode) setUltracode(false);
+        }
       })
       .catch((reason: unknown) => {
-        if (!cancelled) setError(userErrorMessage(reason));
+        if (!cancelled && latest()) setError(userErrorMessage(reason));
       });
     return () => {
       cancelled = true;
@@ -183,30 +206,6 @@ export function NewSessionDialog({ open, defaultCwd, tab = null, onClose, onCrea
     return () => window.clearTimeout(timer);
   }, [open, onDraft, cwd, name, agentKind]);
 
-  // the skills the picked agent would offer in the folder, before any process exists (GET /api/agent/commands)
-  const skillFolder = tab ? tab.cwd : cwd.trim() || null;
-  useEffect(() => {
-    if (!open || agentKind === "") return;
-    let cancelled = false;
-    const timer = window.setTimeout(() => {
-      void fetchAgentCommands(agentKind, skillFolder)
-        .then((commands) => {
-          if (!cancelled) setSkills({ rows: skillRows(commands), note: null });
-        })
-        .catch((reason: unknown) => {
-          if (cancelled) return;
-          // a folder not there yet lists nothing; a PC whose bridge is from before the route cannot list
-          const note = reason instanceof ApiError && reason.code === "invalid_cwd" ? t("Skills are listed once the directory exists.")
-            : reason instanceof ApiError && reason.status === 404 ? t("This PC's bridge does not list skills yet.")
-              : userErrorMessage(reason).message;
-          setSkills({ rows: [], note });
-        });
-    }, SKILLS_MS);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timer);
-    };
-  }, [open, agentKind, skillFolder]);
 
   useEffect(() => {
     if (!open || agentKind !== "opencode") return;
@@ -227,14 +226,29 @@ export function NewSessionDialog({ open, defaultCwd, tab = null, onClose, onCrea
     return () => document.removeEventListener("keydown", onKeyDown);
   }, [open, onClose, pending]);
 
+  useLayoutEffect(() => { openings.current += 1; }, [open]);
+
+  // back from Add another agent, the focus returns to the picker it was opened from
+  const wasAdding = useRef(false);
+  // (after a setup, once the refreshed picker is enabled again)
+  useEffect(() => {
+    if (adding) { wasAdding.current = true; return; }
+    if (wasAdding.current && !refreshing) { wasAdding.current = false; firstFieldRef.current?.focus(); }
+  }, [adding, refreshing]);
+
+  // the read-again loop after Add another agent… installs one (addedAgent below): stopped on close,
+  // reopen and unmount
+  const readingAgain = useRef<() => void>(() => undefined);
+  useEffect(() => () => readingAgain.current(), []);
+  useEffect(() => { readingAgain.current(); }, [open]);
   if (!open) return null;
 
   const selectedAgent = agents.find((agent) => agent.kind === agentKind);
   const agentLabel = selectedAgent?.label ?? agentKind;
   const pendingLabel = selectedAgent ? t("Starting {agent}… up to 60s", { agent: selectedAgent.label }) : t("Starting shell…");
-  const fieldsDisabled = pending || createdPaneId !== null;
+  const fieldsDisabled = pending || refreshing || createdPaneId !== null;
   const can = launchCapabilities(agentKind);
-  const launched = newSessionLaunch({ agent: agentKind, model, effort, prompt }, settings);
+  const launched = dialogLaunch({ agent: agentKind, model, effort, ultracode, prompt }, settings);
   const fault = "fault" in launched ? launched.fault : null;
   const launch = "fault" in launched ? null : launched;
   // OpenCode's models are `provider/id`, offered only while the bridge lists them: without its 1.x HTTP source the
@@ -255,6 +269,38 @@ export function NewSessionDialog({ open, defaultCwd, tab = null, onClose, onCrea
     const next = launchCapabilities(kind);
     if (!next.model || kind !== agentKind) setModel("");
     if (!next.efforts.includes(effort)) setEffort("");
+    if (!next.ultracode) setUltracode(false);
+  };
+
+  // the installed agent is offered once the PC lists it: picked then, else said why not
+  // the installed agent is offered once the PC lists it: picked then. Its installer may still be
+  // editing the shell profile the PC reads the PATH from: until then the dialog says why and reads
+  // again, every READ_AGAIN_MS for about a minute (lib/latestRead.ts readAgainUntil)
+  const addedAgent = (kind: string): void => {
+    const opening = openings.current;
+    setAdding(false);
+    setRefreshing(true);
+    readingAgain.current();
+    // the fields stay off while it waits: nothing the user picks or starts meanwhile is overridden; each
+    // read's outcome is taken once (a late answer after its deadline is ignored), and the last one,
+    // a stalled read included, turns the fields back on
+    readingAgain.current = readAgainUntil(() => { agentReads.current(); return fetchAgentKinds(); }, {
+      every: READ_AGAIN_MS,
+      times: READ_AGAIN_TIMES,
+      later: (run, ms) => { const timer = window.setTimeout(run, ms); return () => window.clearTimeout(timer); },
+      apply: (outcome, last) => {
+        if (openings.current !== opening) return true;
+        if (outcome.kind === "answer") {
+          setAgents(outcome.value);
+          if (outcome.value.some((agent) => agent.kind === kind)) { pickAgent(kind); setError(null); setRefreshing(false); return true; }
+        }
+        if (!last) { setError({ message: t("It is installed. Waiting for this PC to offer it here…"), detail: null }); return false; }
+        if (outcome.kind === "failed") setError(userErrorMessage(outcome.reason));
+        else setError({ message: t("It is installed, but this PC does not offer it here yet. Restart Ovis on the PC, or start it in a terminal tab."), detail: null });
+        setRefreshing(false);
+        return true;
+      },
+    });
   };
 
   const insertSkill = (skill: SlashCommand): void => {
@@ -271,7 +317,7 @@ export function NewSessionDialog({ open, defaultCwd, tab = null, onClose, onCrea
   };
 
   const startWorkspace = async (directory: string): Promise<void> => {
-    if (pending || guard.current.busy()) return;
+    if (pending || refreshing || guard.current.busy()) return;
     if (createdPaneId !== null) { onCreated(createdPaneId, createdStarted, createdKept); return; }
     // a combination the launch does not take: Start is disabled for it, and an Enter in a field sends nothing
     if (launch === null) return;
@@ -343,10 +389,12 @@ export function NewSessionDialog({ open, defaultCwd, tab = null, onClose, onCrea
             <X aria-hidden="true" />
           </button>
         </header>
-        <div className="modal-body">
+        {adding && !watching ? <div className="modal-body">
+          <AddAgentPanel onReady={addedAgent} onOpenTerminal={(paneId) => { if (onOpenPane) onOpenPane(paneId); else onClose(); }} onBack={() => setAdding(false)} />
+        </div> : <><div className="modal-body">
           <div className="field">
             <span className="field-label" id="new-session-agent">{t("Agent")}</span>
-            <AgentPicker ref={firstFieldRef} agents={agents} value={agentKind} disabled={fieldsDisabled} labelledBy="new-session-agent" hints={pickerHints} onChange={pickAgent} />
+            <AgentPicker ref={firstFieldRef} agents={agents} value={agentKind} disabled={fieldsDisabled} labelledBy="new-session-agent" hints={pickerHints} addAgent={watching ? undefined : { label: t("Add another agent…"), onSelect: () => setAdding(true) }} onChange={pickAgent} />
           </div>
           {tab ? (
             <div className="field">
@@ -424,6 +472,14 @@ export function NewSessionDialog({ open, defaultCwd, tab = null, onClose, onCrea
               <span id="new-session-effort-hint" className="field-hint">{t("Levels depend on the model.")}</span>
             </div>}
           </div>}
+          {/* Claude Code's own term, a setting beside the level rather than one of them, on one line under Model and
+              Effort; the whole sentence is the switch's description and the line's tooltip; off adds nothing */}
+          {can.ultracode && <div className="new-session-ultracode" title={t("Dynamic workflows at any effort level. Needs Claude Code 2.1.284 or later.")}>
+            <Toggle id="new-session-ultracode" checked={ultracode} label={t("Ultracode")} disabled={fieldsDisabled} describedBy="new-session-ultracode-hint" onChange={setUltracode} />
+            <label className="new-session-ultracode-label" htmlFor="new-session-ultracode">{t("Ultracode")}</label>
+            <span className="new-session-ultracode-note" aria-hidden="true">{t("Claude Code 2.1.284 or later")}</span>
+            <span id="new-session-ultracode-hint" className="visually-hidden">{t("Dynamic workflows at any effort level. Needs Claude Code 2.1.284 or later.")}</span>
+          </div>}
           {agentKind !== "" && <div className="field">
             <label className="field-label" htmlFor="new-session-prompt">{t("First message")}</label>
             <textarea
@@ -466,8 +522,8 @@ export function NewSessionDialog({ open, defaultCwd, tab = null, onClose, onCrea
         </div>
         <footer className="modal-footer">
           <button type="button" className="btn btn-ghost" disabled={pending} onClick={onClose}>{t("Cancel")}</button>
-          <button type="submit" className="btn btn-primary" disabled={pending || fault !== null}>{t(pending ? "Starting…" : createdPaneId !== null ? "Open" : "Start")}</button>
-        </footer>
+          <button type="submit" className="btn btn-primary" disabled={pending || refreshing || fault !== null}>{t(pending ? "Starting…" : createdPaneId !== null ? "Open" : "Start")}</button>
+        </footer></>}
       </form>
     </div>
   );

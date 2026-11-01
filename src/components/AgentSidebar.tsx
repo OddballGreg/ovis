@@ -107,6 +107,17 @@ const DRAWER_QUERY = "(max-width: 768px)";
 const inDrawer = (): boolean => window.matchMedia?.(DRAWER_QUERY).matches === true;
 /** whether Settings → Agents on a phone starts the list folded on this screen */
 const startsFolded = (fold: AgentsDrawerFold): boolean => fold === "folded" && inDrawer();
+/** the reader's fold of the list, kept on this device as a PC's fold is (MachineSidebar.tsx): a phone and a desktop each keep their own */
+const FOLD_KEY = "ovis:agents-collapsed";
+
+/** the fold the reader left on this device, or null with none kept */
+function storedFold(): boolean | null {
+  try {
+    const stored = window.localStorage.getItem(FOLD_KEY);
+    if (stored === "1" || stored === "0") return stored === "1";
+  } catch { /* no storage: the screen's default */ }
+  return null;
+}
 /**
  * The row whose menu is open, by its pin key: at its ⋯, or at the pointer for a right-click. What
  * the menu says of the row is read from the row at each render, so a value that changes while it is
@@ -117,7 +128,8 @@ interface PinMenu { key: string; anchor: HTMLElement; point?: { x: number; y: nu
 /**
  * All PCs' live agents form a second list; workspace and PC folds do not hide these rows.
  * In the phone's drawer the list starts folded, leaving the room to the workspaces, unless
- * Settings → Agents on a phone starts it open.
+ * Settings → Agents on a phone starts it open, until the reader folds or opens it: that choice is
+ * kept on this device.
  * The pinned agents stand first, in a card; on a desktop only a
  * right-click (or the context-menu key) opens the menu. A row's ⋯, or a right-click on it, opens its
  * menu, which pins or unpins it, and mutes or unmutes its alerts for every browser and device.
@@ -130,7 +142,7 @@ export function AgentSidebar({ machines, selectedMachineId, selectedPaneId, stat
   // preferences arrive after the first render, lib/preferencesSync.ts); a fold the user makes stays until the setting changes,
   // and on a wider screen, where the setting does not apply, it stays
   const drawerFold = settings.agentsDrawerFold;
-  const [collapsed, setCollapsed] = useState(() => startsFolded(drawerFold));
+  const [collapsed, setCollapsed] = useState(() => storedFold() ?? startsFolded(drawerFold));
   const foldSetting = useRef(drawerFold);
   useEffect(() => {
     // the effect also runs again with the same value (a hidden <Activity> shown again, Fast Refresh): only a new one refolds
@@ -297,7 +309,12 @@ export function AgentSidebar({ machines, selectedMachineId, selectedPaneId, stat
   // Settings -> Agents list -> Under the workspaces: the list scrolls with the workspaces (MachineSidebar.tsx)
   const below = settings.agentsPlacement === "below";
   return <section ref={sectionRef} className={`agents-sidebar${folded ? " is-collapsed" : ""}${rows.length === 0 ? " is-empty" : ""}${oneLine ? " is-one-line" : ""}${below ? " is-below" : ""}`} aria-label={t("Agents")}>
-    <button type="button" className="agent-section-toggle sidebar-section-label" aria-expanded={!folded} aria-controls={listId} onClick={() => { if (filter.active) setFilterFold(!folded); else setCollapsed(!collapsed); }}>
+    <button type="button" className="agent-section-toggle sidebar-section-label" aria-expanded={!folded} aria-controls={listId} onClick={() => {
+      // the filter's fold lasts for the filter's time and is never kept; the reader's own is
+      if (filter.active) { setFilterFold(!folded); return; }
+      setCollapsed(!collapsed);
+      try { window.localStorage.setItem(FOLD_KEY, collapsed ? "0" : "1"); } catch { /* private mode: this page keeps it */ }
+    }}>
       {folded ? <ChevronRight className="agent-section-caret" aria-hidden="true" /> : <ChevronDown className="agent-section-caret" aria-hidden="true" />}
       <span>{t("Agents")}</span>
       {/* the count is of the agents running, filter or not */}

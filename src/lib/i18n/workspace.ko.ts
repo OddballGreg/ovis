@@ -59,6 +59,9 @@ export const WORKSPACE_KO: Record<string, string> = {
   "One model name, without spaces.": "띄어쓰기 없는 모델 이름 하나를 적으세요.",
   "Effort": "노력 수준",
   "Levels depend on the model.": "고를 수 있는 수준은 모델에 따라 다릅니다.",
+  "Ultracode": "Ultracode",
+  "Claude Code 2.1.284 or later": "Claude Code 2.1.284 이상",
+  "Dynamic workflows at any effort level. Needs Claude Code 2.1.284 or later.": "어느 노력 수준에서든 동적 워크플로를 실행합니다. Claude Code 2.1.284 이상이 필요합니다.",
   "First message": "첫 메시지",
   "Optional": "선택",
   "Sent to {agent} as it starts.": "{agent}가 시작할 때 함께 보냅니다.",
@@ -87,4 +90,7 @@ export const WORKSPACE_KO: Record<string, string> = {
   "The folder could not be made.": "폴더를 만들 수 없습니다.",
   "Tab name (optional)": "탭 이름 (선택)",
   "Uses the workspace's folder": "워크스페이스의 폴더를 그대로 씁니다",
+  "Add another agent…": "다른 에이전트 추가…",
+  "It is installed, but this PC does not offer it here yet. Restart Ovis on the PC, or start it in a terminal tab.": "설치는 됐지만 이 PC가 아직 여기서 고를 수 있게 내놓지 않아요. PC에서 Ovis를 다시 시작하거나, 터미널 탭에서 시작하세요.",
+  "It is installed. Waiting for this PC to offer it here…": "설치됐어요. 이 PC에서 고를 수 있게 될 때까지 기다리는 중…",
 };

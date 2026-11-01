@@ -60,7 +60,7 @@ describe("WebSocket liveness ping", () => {
     // a remote PC's socket, as /ws?machine_id= relays it, with this bridge as the remote
     const manager = { endpoint: () => ({ url: `http://127.0.0.1:${bridge!.port}`, token: "test-ping" }), trackTerminal: () => () => {} } as unknown as MachineManager;
     proxy = Bun.serve<{ relay: MachineRelay }>({ port: 0, hostname: "127.0.0.1", async fetch(request, instance) {
-      const relay = new MachineRelay(manager, "remote"); relays.push(relay);
+      const relay = new MachineRelay(manager, "remote", false, (snapshot) => snapshot); relays.push(relay);
       await relay.ready;
       if (instance.upgrade(request, { data: { relay } })) return;
       relay.close(); return new Response(null, { status: 426 });
@@ -94,6 +94,17 @@ describe("WebSocket liveness ping", () => {
     socket.send({ type: "ping", id: "x" });
     expect(await socket.next((message) => message.type === "error", "invalid ping", before)).toMatchObject({ code: "invalid_ping" });
     expect(socket.seen.slice(before).some((message) => message.type === "pong")).toBe(false);
+  }, 20_000);
+
+  // #511: a remote PC's own bridge enforces agent_only, so the relay must hand it the flag as sent: an invalid one
+  // (only true is allowed) comes back refused by the remote, which a relay that dropped or rewrote it would not cause
+  it("relays a submit's agent_only to a remote PC unchanged, and its agent-only feature back", async () => {
+    const socket = await connect(`ws://127.0.0.1:${proxy!.port}/ws`);
+    const snapshot = socket.seen.find((message) => message.type === "snapshot");
+    expect(snapshot?.type === "snapshot" && snapshot.features).toContain("agent-only");
+    socket.send({ type: "submit", id: 77, pane_id: "w9:p9", text: "x", payload: "x", agent_only: false } as never);
+    expect(await socket.next((message) => message.type === "submit-result" && message.id === 77, "relayed submit result"))
+      .toMatchObject({ ok: false, code: "invalid_delivery" });
   }, 20_000);
 
   it("relays a ping to a remote PC and its pong back unchanged", async () => {

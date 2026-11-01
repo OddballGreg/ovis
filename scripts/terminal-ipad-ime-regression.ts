@@ -10,7 +10,8 @@ import type { Browser } from "playwright-core";
  * insertText, a changed one is deleteContentBackward followed by insertText of the whole result.
  * There are no composition events. Recorded with scripts/terminal-ime-diagnostic.ts on 2026-10-13.
  * The iPhone's on-screen Korean keyboard (iOS 27 simulator, Safari, 2026-10-18) edits the same way,
- * with keyCode 0 on each jamo's keydown.
+ * with keyCode 0 on each jamo's keydown. So does the Ovis iOS app (iOS 27 simulator, 2026-10-29),
+ * whose WKWebView reports no "Safari" in its user agent: there each jamo reached the pane on its own.
  */
 export async function checkIpadIme(browser: Browser, origin: string, pane: string, otherPane: string): Promise<void> {
   // one context for both iPad platforms: the page, not the context, carries the platform it reports
@@ -23,17 +24,22 @@ export async function checkIpadIme(browser: Browser, origin: string, pane: strin
     userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 27_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0 Mobile/15E148 Safari/604.1",
     viewport: { width: 1100, height: 700 },
   });
+  // the Ovis iOS app's web view, as recorded: WebKit, but no Version/ or Safari/ in its user agent
+  const iphoneApp = await browser.newContext({
+    userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
+    viewport: { width: 1100, height: 700 },
+  });
   try {
   // the platform iPadOS Safari reports by default (desktop site), the one it reports otherwise,
-  // and an iPhone's
-  for (const platform of ["MacIntel", "iPad", "iPhone"]) {
-    const page = await (platform === "iPhone" ? iphone : context).newPage();
+  // an iPhone's, and the iPhone app's
+  for (const platform of ["MacIntel", "iPad", "iPhone", "iPhone app"]) {
+    const page = await (platform === "iPhone" ? iphone : platform === "iPhone app" ? iphoneApp : context).newPage();
     await page.addInitScript(({ pane, platform }) => {
       Object.defineProperty(navigator, "platform", { get: () => platform });
       Object.defineProperty(navigator, "maxTouchPoints", { get: () => 5 });
       localStorage.setItem("ovis:settings", JSON.stringify({ language: "en", terminalInputMode: "direct" }));
       localStorage.setItem(`ovis:view:${pane}`, "terminal");
-    }, { pane, platform });
+    }, { pane, platform: platform === "iPhone app" ? "iPhone" : platform });
     const sent: Array<{ pane_id: string; text: string }> = [];
     // key frames (a key-bar chord), with how many input frames came before each
     const keyed: Array<{ pane_id: string; keys: string[]; after: number }> = [];
@@ -82,6 +88,23 @@ export async function checkIpadIme(browser: Browser, origin: string, pane: strin
       }
       return box.value.slice(from);
     }, hypotheses);
+    // A keyboard that commits a whole string as one key (FluidVoice's dictation, any keyboard
+    // extension calling insertText): WebKit names the string as the keydown's key, sends a keypress
+    // with its first character's charCode, then inserts the whole string (iOS 27 simulator, #1488).
+    // `inserted` is what the editor inserts after the keypress, if anything.
+    const insertWhole = (text: string, keyCode: number, inserted: string | null = text) => input.evaluate(async (element, { text, keyCode, inserted }) => {
+      const box = element as HTMLTextAreaElement;
+      const down = box.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, composed: true, key: text, code: "Unidentified", keyCode }));
+      const charCode = text.codePointAt(0)!;
+      const press = down && box.dispatchEvent(new KeyboardEvent("keypress", { bubbles: true, cancelable: true, composed: true, key: text, code: "Unidentified", keyCode: charCode, charCode }));
+      if (down && press && inserted !== null) {
+        box.dispatchEvent(new InputEvent("beforeinput", { bubbles: true, cancelable: true, composed: true, inputType: "insertText", data: inserted, isComposing: false }));
+        box.setRangeText(inserted, box.selectionStart, box.selectionEnd, "end");
+        box.dispatchEvent(new InputEvent("input", { bubbles: true, composed: true, inputType: "insertText", data: inserted, isComposing: false }));
+      }
+      box.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, composed: true, key: text, code: "Unidentified", keyCode }));
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    }, { text, keyCode, inserted });
     // SwiftKey (#3746 in Agent of Empires): letters as plain edits, then a composition that wraps the
     // word before the caret again and commits it, or a longer one.
     const typeText = (text: string) => input.evaluate(async (element, text) => {
@@ -133,7 +156,7 @@ export async function checkIpadIme(browser: Browser, origin: string, pane: strin
         box.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: jamo, keyCode, isComposing: false }));
         await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
         return down;
-      }, { jamo, keyCode: platform === "iPhone" ? 0 : KEYCODES[jamo] ?? 65, edits, moveCaret });
+      }, { jamo, keyCode: platform.startsWith("iPhone") ? 0 : KEYCODES[jamo] ?? 65, edits, moveCaret });
     };
     const fresh = (jamo: string) => key(jamo, [["insert", jamo]]);
     const replace = (jamo: string, result: string) => key(jamo, [["delete"], ["insert", result]]);
@@ -208,8 +231,10 @@ export async function checkIpadIme(browser: Browser, origin: string, pane: strin
       await fresh("ㄱ"); await replace("ㅡ", "그");
       const sizes = await page.evaluate(() => {
         const row = [...document.querySelectorAll<HTMLElement>(".xterm-rows span")].find((span) => span.textContent?.includes("한"))!;
+        // the fit is drawn by a span inside the row's (terminalGlyphs.ts), which carries any enlarged size
+        const glyph = row.querySelector<HTMLElement>(".herdr-box-glyph") ?? row;
         const view = document.querySelector<HTMLElement>(".composition-view")!;
-        return { row: getComputedStyle(row).fontSize, view: getComputedStyle(view).fontSize, pending: view.classList.contains("active") ? view.textContent : null };
+        return { row: getComputedStyle(glyph).fontSize, view: getComputedStyle(view).fontSize, pending: view.classList.contains("active") ? view.textContent : null };
       });
       assert.equal(sizes.pending, "그", "a syllable is pending");
       assert(Math.abs(Number.parseFloat(sizes.view) - Number.parseFloat(sizes.row)) < 0.01,
@@ -263,6 +288,44 @@ export async function checkIpadIme(browser: Browser, origin: string, pane: strin
       assert.equal(await dictate(hypotheses), "This is a test.", "the field ends on the corrected phrase");
       await check("This is a test.", "dictation replacement commits one corrected phrase");
       report("dictation replacement commits one corrected phrase");
+
+      for (const [label, text, keyCode] of [
+        ["a sentence", "hello world this is a test", 72],
+        ["a capitalised word", "Yes", 89],
+        ["Hangul", "안녕하세요", 0],
+        // WebKit's charCode is the first code point, here outside the BMP
+        ["an emoji first", "😀 hello", 0],
+        ["a CJK extension character first", "𠮷野家", 0],
+      ] as const) {
+        await reset();
+        await insertWhole(text, keyCode);
+        await check(text, `a whole string committed as one key is sent whole, once: ${label}`);
+        report(`a whole string committed as one key is sent whole, once: ${label}`);
+      }
+      // with no insertion of that string, the keypress's own character goes, as it always did
+      for (const [label, inserted] of [["no insertion", null], ["another insertion", "hey "]] as const) {
+        await reset();
+        // sent by the keyup (or the insertion) itself, not left for a later key to flush
+        const sentAlone = signal("input:h");
+        await insertWhole("hey", 72, inserted);
+        await sentAlone;
+        await check("h", `a whole-string key with ${label} sends its keypress's character`);
+        report(`a whole-string key with ${label} sends its keypress's character`);
+      }
+      // typing goes on as before after it: a letter, then a Hangul syllable composed in the editor
+      await reset();
+      await insertWhole("hello world", 72);
+      await input.press("x");
+      await fresh("ㅎ"); await replace("ㅏ", "하");
+      await input.press("Space");
+      await check("hello worldx하 ", "typing after a whole-string key");
+      report("typing after a whole-string key");
+      // a syllable still being typed goes first, then the whole string, each once
+      await reset();
+      await fresh("ㅎ"); await replace("ㅏ", "하");
+      await insertWhole("hello", 72);
+      await check("하hello", "a whole-string key after a pending syllable");
+      report("a whole-string key after a pending syllable");
 
       for (const [label, run, expected] of [
         ["test, test again, space", async () => { await typeText("test"); await composeWord("test"); await typeText(" "); }, "test "],
@@ -328,7 +391,7 @@ export async function checkIpadIme(browser: Browser, origin: string, pane: strin
       await page.goto("about:blank").catch(() => {});
     }
   }
-  } finally { await context.close(); await iphone.close(); }
+  } finally { await context.close(); await iphone.close(); await iphoneApp.close(); }
   console.log("PASS iPad hardware-keyboard and iPhone keyboard replay: jamo keys composed in the editor, pending syllable at its row's size, commit keys, two-syllable replacement, blur, pane reset, dictation, SwiftKey and refused contexts");
 }
 

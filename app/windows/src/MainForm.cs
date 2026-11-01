@@ -120,6 +120,12 @@ namespace Ovis
                 case Phase.Installed:
                     Installed();
                     break;
+                case Phase.Outdated:
+                    Outdated();
+                    break;
+                case Phase.HerdrTooOld:
+                    HerdrTooOld();
+                    break;
             }
             ResumeLayout(true);
         }
@@ -130,29 +136,52 @@ namespace Ovis
             body.Controls.Add(Paragraph(Lang.L(
                 "This installs herdr, Bun and the Ovis server for your user only, with no administrator password, and starts herdr when you sign in to Windows. Then scan the QR code with Ovis on your phone.",
                 "herdr, Bun, Ovis 서버를 내 사용자 계정에만 설치합니다(관리자 권한 필요 없음). Windows에 로그인할 때 herdr가 자동으로 켜집니다. 설치가 끝나면 휴대폰의 Ovis로 QR 코드를 찍으면 됩니다.")));
-            if (model.GitMissing)
-            {
-                var git = Heading(Lang.L("First, Git for Windows", "먼저 Git for Windows가 필요합니다"));
-                git.Margin = new Padding(0, 6, 0, 4);
-                body.Controls.Add(git);
-                body.Controls.Add(Paragraph(model.CanUseWinget
-                    ? Lang.L("The installer needs Git. Install it with winget (Windows asks for permission), or download it yourself and open Ovis again.",
-                             "설치 프로그램에 Git이 필요합니다. winget으로 설치하거나(Windows가 허락을 물어봅니다) 직접 받아 설치한 뒤 Ovis를 다시 열어 주세요.")
-                    : Lang.L("The installer needs Git. Download and install it, then open Ovis again.",
-                             "설치 프로그램에 Git이 필요합니다. 받아서 설치한 뒤 Ovis를 다시 열어 주세요.")));
-                body.Controls.Add(model.CanUseWinget
-                    ? Buttons(
-                        Primary(Lang.L("Install Git", "Git 설치"), () => model.InstallGit()),
-                        Button(Lang.L("Download Git", "Git 내려받기"), () => Open(Links.GitDownload)),
-                        Button(Lang.L("Check again", "다시 확인"), () => model.Refresh()))
-                    : Buttons(
-                        Primary(Lang.L("Download Git", "Git 내려받기"), () => Open(Links.GitDownload)),
-                        Button(Lang.L("Check again", "다시 확인"), () => model.Refresh())));
-                return;
-            }
+            if (GitStep()) return;
             var install = Primary(Lang.L("Install", "설치"), () => model.Install());
             body.Controls.Add(Buttons(install));
             AcceptButton = install;
+        }
+
+        /// <summary>Install and Update both need Git for Windows: while it is missing, getting it is the step shown.</summary>
+        private bool GitStep()
+        {
+            if (!model.GitMissing) return false;
+            var git = Heading(Lang.L("First, Git for Windows", "먼저 Git for Windows가 필요합니다"));
+            git.Margin = new Padding(0, 6, 0, 4);
+            body.Controls.Add(git);
+            body.Controls.Add(Paragraph(model.CanUseWinget
+                ? Lang.L("The installer needs Git. Install it with winget (Windows asks for permission), or download it yourself and open Ovis again.",
+                         "설치 프로그램에 Git이 필요합니다. winget으로 설치하거나(Windows가 허락을 물어봅니다) 직접 받아 설치한 뒤 Ovis를 다시 열어 주세요.")
+                : Lang.L("The installer needs Git. Download and install it, then open Ovis again.",
+                         "설치 프로그램에 Git이 필요합니다. 받아서 설치한 뒤 Ovis를 다시 열어 주세요.")));
+            body.Controls.Add(model.CanUseWinget
+                ? Buttons(
+                    Primary(Lang.L("Install Git", "Git 설치"), () => model.InstallGit()),
+                    Button(Lang.L("Download Git", "Git 내려받기"), () => Open(Links.GitDownload)),
+                    Button(Lang.L("Check again", "다시 확인"), () => model.Refresh()))
+                : Buttons(
+                    Primary(Lang.L("Download Git", "Git 내려받기"), () => Open(Links.GitDownload)),
+                    Button(Lang.L("Check again", "다시 확인"), () => model.Refresh())));
+            return true;
+        }
+
+        private void Outdated()
+        {
+            body.Controls.Add(Heading(Lang.L("Update the Ovis server", "Ovis 서버를 업데이트해야 합니다")));
+            body.Controls.Add(Paragraph(Setup.UpdateMessage(model.UpdateReason, model.Plugin, model.Status != null && model.Status.Running, model.Status == null ? null : model.Status.RunningVersion, model.Status == null ? null : model.Status.Version, Model.AppVersion)));
+            if (GitStep()) return;
+            var update = Primary(Lang.L("Update", "업데이트"), () => model.Update());
+            body.Controls.Add(Buttons(update, Button(Lang.L("Check again", "다시 확인"), () => model.Refresh())));
+            AcceptButton = update;
+        }
+
+        private void HerdrTooOld()
+        {
+            body.Controls.Add(Heading(Lang.L("Update herdr first", "먼저 herdr를 업데이트해야 합니다")));
+            body.Controls.Add(Paragraph(Setup.HerdrMessage(model.Plugin, model.HerdrVersion)));
+            body.Controls.Add(Buttons(
+                Primary(Lang.L("Check again", "다시 확인"), () => model.Refresh()),
+                Button(Lang.L("Get help", "도움 받기"), () => Open(Links.Support))));
         }
 
         private void Installed()
@@ -176,7 +205,8 @@ namespace Ovis
 
         private void Phone(Status status)
         {
-            if (status.PhoneUrl != null)
+            var step = Setup.Phone(status.PhoneUrl, status.Tailscale, status.AccessLocked);
+            if (step == PhoneStep.Qr)
             {
                 var row = new FlowLayoutPanel { FlowDirection = FlowDirection.LeftToRight, AutoSize = true, WrapContents = false, Margin = new Padding(0, 0, 0, 12) };
                 var size = (int)Math.Round(180 * DeviceDpi / 96.0);
@@ -199,7 +229,15 @@ namespace Ovis
                 row.Controls.Add(words);
                 body.Controls.Add(row);
             }
-            else if (status.Tailscale == "running")
+            else if (step == PhoneStep.TokenNeeded)
+            {
+                // what the server told without its token is not that Tailscale is missing: say what stood in the way
+                body.Controls.Add(Heading(Lang.L("Ovis cannot read this PC's phone address", "이 PC의 휴대폰 주소를 읽지 못했습니다")));
+                body.Controls.Add(Paragraph(Lang.L(
+                    "The Ovis server asks for its token, and Ovis did not find it, or it did not work, in the server's settings (env or .env in herdr's config folder for the plugin). Open Ovis in the browser to connect your phone, or put the server's token there and check again.",
+                    "Ovis 서버가 토큰을 요구하는데, 서버 설정(herdr의 플러그인 설정 폴더에 있는 env 또는 .env)에서 그 토큰을 찾지 못했거나 그 토큰이 맞지 않습니다. 브라우저에서 Ovis를 열어 휴대폰을 연결하거나, 서버의 토큰을 그곳에 넣은 뒤 다시 확인해 주세요.")));
+            }
+            else if (step == PhoneStep.MakeAddress)
             {
                 body.Controls.Add(Heading(Lang.L("Your phone needs an address for this PC", "휴대폰이 열 주소가 아직 없습니다")));
                 body.Controls.Add(Paragraph(Lang.L("Tailscale runs here: let it serve the app to your own devices.", "이 PC에 Tailscale이 있습니다. 내 기기들에서만 열리는 주소를 만듭니다.")));
@@ -208,10 +246,10 @@ namespace Ovis
             else
             {
                 body.Controls.Add(Heading(Lang.L("Your phone needs a way to reach this PC", "휴대폰에서 이 PC에 올 길이 필요합니다")));
-                body.Controls.Add(Paragraph(status.Tailscale == "stopped"
+                body.Controls.Add(Paragraph(step == PhoneStep.SignInTailscale
                     ? Lang.L("Tailscale is installed but not signed in. Sign in to it, then check again.", "Tailscale이 설치돼 있지만 로그인되지 않았습니다. 로그인한 뒤 다시 확인해 주세요.")
                     : Lang.L("Install Tailscale on this PC and on your phone, sign in to both with the same account, then check again.", "이 PC와 휴대폰에 Tailscale을 설치하고 같은 계정으로 로그인한 뒤 다시 확인해 주세요.")));
-                if (status.Tailscale != "stopped") body.Controls.Add(Buttons(Button(Lang.L("Get Tailscale", "Tailscale 받기"), () => Open(Links.TailscaleDownload))));
+                if (step == PhoneStep.InstallTailscale) body.Controls.Add(Buttons(Button(Lang.L("Get Tailscale", "Tailscale 받기"), () => Open(Links.TailscaleDownload))));
             }
         }
 

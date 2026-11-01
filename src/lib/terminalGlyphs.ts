@@ -7,12 +7,17 @@
  * as falling apart (kana and Han too, at 0.87em to 1em).
  *
  * So each span the renderer draws with extra spacing is adjusted after the fact:
- * - a glyph in two cells that fills less than FILL of them is drawn larger, up to
- *   MAX_SCALE, the way a CJK coding font sizes it against its Latin;
+ * - a glyph in two cells that fills less than FILL of them is drawn wider, up to
+ *   MAX_SCALE, the way a CJK coding font sizes it against its Latin. It is widened before it
+ *   is enlarged: the row is as tall as the Latin font's line, and a syllable enlarged to fill
+ *   Menlo's 1.2em of two cells grew as tall as the row, so Korean lines nearly touched;
  * - the glyph is centered in its cells: padding moves the text right by half the spacing
  *   left over, a negative margin takes it back after the span so the next span keeps its
- *   column, and a clip trims the trailing half so a background or block cursor stays on its
- *   own cells.
+ *   column, and a clip trims the trailing half so an underline stays on its own cells.
+ *   All of that goes on a span inside xterm's, which keeps the cells' background and block
+ *   cursor: a stretched or clipped box ends inside a device pixel, and a background painted
+ *   there left a line of the pane between it and the next cell's (a light seam after every
+ *   Korean word in a dark block).
  * A glyph wider than its cells is left to run over, as in a native terminal.
  *
  * The renderer also hands the browser each cell's text as written, and two kinds of text
@@ -30,7 +35,7 @@
  */
 import type { Terminal } from "@xterm/xterm";
 
-import { BOX_GLYPHS, boxBackground, boxDrawing, boxRun, pixelPlacement, type BoxDrawing } from "./terminalBoxGlyphs.ts";
+import { BOX_GLYPHS, boxBackground, boxDrawing, boxRun, isBoxGlyph, pixelPlacement, type BoxDrawing } from "./terminalBoxGlyphs.ts";
 
 /** Spacing up to this is rounding between the font and the cell grid, not a misfit glyph. */
 const MIN_SPACING_PX = 1;
@@ -41,6 +46,11 @@ const MIN_SPACING_PX = 1;
 const FILL = 0.9;
 /** The most a wide glyph is enlarged, so it never towers over the Latin beside it. */
 const MAX_SCALE = 1.2;
+/**
+ * The most a wide glyph is widened alone (horizontal scaling, 장평 in Korean typesetting, where
+ * 90-110% is common); a glyph that needs more is enlarged for the rest.
+ */
+const MAX_STRETCH = 1.1;
 
 /** how many copies of a glyph xterm's WidthCache measures at once (WidthCacheSettings.REPEAT) */
 const XTERM_MEASURE_REPEAT = 32;
@@ -58,7 +68,9 @@ const TEXT_PRESENTATION = "\ufe0e";
 export interface GlyphFit {
   /** font-size multiplier for the span; 1 keeps it */
   scale: number;
-  /** the letter-spacing left after scaling; its half goes before each glyph */
+  /** horizontal scaling of the span, after `scale`; 1 keeps it */
+  stretch: number;
+  /** the space left beside each glyph once it is drawn; its half goes before the glyph */
   spacing: number;
 }
 
@@ -71,8 +83,9 @@ export function glyphFit(spacing: number, glyphWidth: number, cellWidth: number)
   const slot = glyphWidth + spacing;
   if (glyphWidth >= FILL * slot) return null;
   const wide = Math.round(slot / cellWidth) >= 2;
-  const scale = wide ? Math.min(MAX_SCALE, (FILL * slot) / glyphWidth) : 1;
-  return { scale, spacing: slot - glyphWidth * scale };
+  const widen = wide ? Math.min(MAX_SCALE, (FILL * slot) / glyphWidth) : 1;
+  const stretch = Math.min(widen, MAX_STRETCH);
+  return { scale: widen / stretch, stretch, spacing: slot - glyphWidth * widen };
 }
 
 /** Nerd Font icons and the like: the private use areas, where a font's glyph is meant to fill one cell. */
@@ -119,18 +132,29 @@ export interface LateFace {
 }
 
 export interface LateFaces {
-  /** Follows every face of `families` that covers a character of `text` and has not loaded yet. */
-  ask(families: string, text: string): void;
+  /**
+   * Follows every face of `families` that covers a character of `text` and has not loaded yet.
+   * `painted` text is drawn as boxes, not from a font: its faces are followed quietly, and their
+   * arrival measures nothing again until a character they cover is asked for as drawn from the font.
+   * True when that happened: xterm measured the text with a stand-in, and it is measured again in
+   * the next frame.
+   */
+  ask(families: string, text: string, painted?: boolean): boolean;
   stop(): void;
 }
 
 interface Relay {
   fire: (() => void) | null;
+  /** a face followed for painted text alone has arrived */
+  arrivedQuietly: ((face: LateFace) => void) | null;
 }
 
-/** A face that never loads holds on to the relay alone, and a stopped terminal's relay holds nothing. */
-function whenLoaded(face: LateFace, relay: Relay): void {
-  face.loaded.then(() => relay.fire?.(), () => undefined);
+/**
+ * A face that never loads holds on to the relay and its own entry alone, never a closure of the
+ * terminal's (it would keep the terminal), and a stopped terminal's relay holds nothing.
+ */
+function whenLoaded(face: LateFace, relay: Relay, entry: { quiet: boolean }): void {
+  face.loaded.then(() => entry.quiet ? relay.arrivedQuietly?.(face) : relay.fire?.(), () => undefined);
 }
 
 /**
@@ -139,10 +163,16 @@ function whenLoaded(face: LateFace, relay: Relay): void {
  * arrive before it, so the terminal measures and draws again once, not once a face. Each face is
  * followed by its own `loaded` promise and starts no load: the page loads the faces its text reaches
  * (a face behind a font that draws the character never loads), one face that fails or stalls holds
- * back none of the others, and a face that failed is not followed.
+ * back none of the others, and a face that failed is not followed. A face followed only for
+ * characters drawn as boxes measures nothing again when it arrives, since nothing drawn used it, but
+ * xterm measured those characters with the stand-in too: the first time one is drawn from the font
+ * (under the cursor), the terminal measures again then.
  */
 export function followLateFaces<Face extends LateFace>(fonts: Iterable<Face> | undefined, frame: (callback: () => void) => void, arrived: () => void): LateFaces {
-  const followed = new WeakSet<Face>();
+  // each face followed, and whether only painted text asked for it so far
+  const followed = new WeakMap<Face, { quiet: boolean }>();
+  // faces that arrived while only painted text had asked for them
+  const arrivedQuietly = new Set<LateFace>();
   let waiting = false;
   let stopped = false;
   const relay: Relay = {
@@ -151,24 +181,44 @@ export function followLateFaces<Face extends LateFace>(fonts: Iterable<Face> | u
       waiting = true;
       frame(() => {
         waiting = false;
-        if (!stopped) arrived();
+        if (stopped) return;
+        // everything is measured again: what arrived quietly is measured with it
+        arrivedQuietly.clear();
+        arrived();
       });
     },
+    arrivedQuietly: (face) => arrivedQuietly.add(face),
   };
   return {
-    ask(families, text) {
-      if (!fonts || stopped) return;
+    ask(families, text, painted = false) {
+      if (!fonts || stopped) return false;
+      let stale = false;
       const names = new Set(families.split(",").map(familyKey));
       for (const face of fonts) {
-        if ((face.status !== "unloaded" && face.status !== "loading") || followed.has(face)) continue;
         if (!names.has(familyKey(face.family)) || !coversAny(face.unicodeRange, text)) continue;
-        followed.add(face);
-        whenLoaded(face, relay);
+        const following = followed.get(face);
+        if (following) {
+          if (painted) continue;
+          following.quiet = false;
+          // the face arrived while its characters were boxes: this one is drawn from it, and xterm's width is the stand-in's
+          if (arrivedQuietly.delete(face)) {
+            stale = true;
+            relay.fire?.();
+          }
+          continue;
+        }
+        if (face.status !== "unloaded" && face.status !== "loading") continue;
+        const entry = { quiet: painted };
+        followed.set(face, entry);
+        whenLoaded(face, relay, entry);
       }
+      return stale;
     },
     stop() {
       stopped = true;
       relay.fire = null;
+      relay.arrivedQuietly = null;
+      arrivedQuietly.clear();
     },
   };
 }
@@ -186,6 +236,33 @@ export function oversizedIcon(char: string, width: number, cellWidth: number): b
 /** The font-size multiplier that fits every icon of a run into its cell. */
 export function iconScale(widths: readonly number[], cellWidth: number): number {
   return Math.min(1, ...widths.map((width) => cellWidth / width));
+}
+
+let segmenter: Intl.Segmenter | undefined;
+
+/** How many characters a text shows: letter-spacing is added once a grapheme, and a span's cells are counted the same way. */
+export function graphemes(text: string): number {
+  segmenter ??= new Intl.Segmenter(undefined, { granularity: "grapheme" });
+  let count = 0;
+  for (const _ of segmenter.segment(text)) count += 1;
+  return count;
+}
+
+/**
+ * The composition view's transform with a glyph stretch added. xterm moves a long text at the right
+ * edge left by `translateX(min(0px, calc(<room>px - 100%)))`, 100% being the box's width, and a
+ * browser gives that back in its own form (Chromium: `min(0px, -100% + <room>px)`): the move is
+ * written again from its room with the stretched width, the stretch applying first, so the text
+ * still ends at the edge.
+ */
+export function stretchedView(base: string, stretch: string): string {
+  if (stretch === "") return base;
+  if (base === "") return stretch;
+  // the last length is the room, signed (Chromium writes a negative one as `-100% - 3.5px`)
+  const room = base.includes("100%") ? base.match(/(?:-\s*)?[\d.]+px(?![\s\S]*px)/)?.[0].replace(/\s/g, "") : undefined;
+  if (room === undefined) return `${base} ${stretch}`;
+  const factor = Number(stretch.match(/^scaleX\(([\d.]+)\)$/)?.[1] ?? 1);
+  return `translateX(min(0px, calc(${room} - ${+(100 * factor).toFixed(4)}%))) ${stretch}`;
 }
 
 /** The text to draw for a cell span: composed when it carries marks or decomposed Hangul. */
@@ -218,6 +295,8 @@ export function adjustTerminalGlyphs(term: Terminal): () => void {
   const widths = new Map<string, number>();
   // the characters that asked for their faces in that font (every style's: a face of each weight is followed)
   const asked = new Set<string>();
+  // the box characters that asked while drawn as boxes
+  const askedPainted = new Set<string>();
   let measuredFont = "";
   // a box character's drawing, for the cell size it was drawn in
   const boxes = new Map<string, BoxDrawing | null>();
@@ -308,6 +387,7 @@ export function adjustTerminalGlyphs(term: Terminal): () => void {
     if (font !== measuredFont) {
       widths.clear();
       asked.clear();
+      askedPainted.clear();
       measuredFont = font;
     }
     const cellWidth = Number.parseFloat(screen.style.width) / term.cols;
@@ -319,15 +399,6 @@ export function adjustTerminalGlyphs(term: Terminal): () => void {
       const bold = span.classList.contains("xterm-bold");
       const italic = span.classList.contains("xterm-italic");
       const style = `${italic ? "italic " : ""}${bold ? fontWeightBold : fontWeight} ${fontSize}px`;
-      // every character drawn asks for its faces once, whether or not its span is fitted: xterm
-      // measured it too, and a span that already fills its cells is wrong once a late face arrives
-      let fresh = "";
-      for (const char of shown) {
-        if (asked.has(char)) continue;
-        asked.add(char);
-        fresh += char;
-      }
-      if (fresh !== "") lateFaces.ask(fontFamily ?? "", fresh);
       const widthOf = (glyph: string): number => {
         const key = `${bold ? 1 : 0}${italic ? 1 : 0}${glyph}`;
         let width = widths.get(key);
@@ -340,8 +411,37 @@ export function adjustTerminalGlyphs(term: Terminal): () => void {
       };
       // boxes drawn and icons fitted to their cells. The cell under the cursor keeps the font's glyph:
       // xterm draws an underline or bar cursor as the span's own border and shadow, which they would cover
-      if ((BOX_GLYPHS.test(shown) || ANY_PRIVATE_USE.test(shown)) && !span.classList.contains("xterm-cursor") && cellWidth > 0 && rowHeight > 0
-        && rebuild(span, shown, cellWidth, rowHeight, fontSize, widthOf)) continue;
+      const rebuilt = (BOX_GLYPHS.test(shown) || ANY_PRIVATE_USE.test(shown)) && !span.classList.contains("xterm-cursor") && cellWidth > 0 && rowHeight > 0
+        && rebuild(span, shown, cellWidth, rowHeight, fontSize, widthOf);
+      // every character drawn asks for its faces once, whether or not its span is fitted: xterm
+      // measured it too, and a span that already fills its cells is wrong once a late face arrives.
+      // A box character drawn as a box is painted, not taken from a face, and asks quietly: a
+      // Powerline prompt's separators would otherwise draw every row again when the icon font arrives
+      let fresh = "";
+      let painted = "";
+      for (const char of shown) {
+        if (rebuilt && isBoxGlyph(char)) {
+          if (!askedPainted.has(char)) {
+            askedPainted.add(char);
+            painted += char;
+          }
+          continue;
+        }
+        if (asked.has(char)) continue;
+        asked.add(char);
+        fresh += char;
+      }
+      if (painted !== "") lateFaces.ask(fontFamily ?? "", painted, true);
+      if (fresh !== "" && lateFaces.ask(fontFamily ?? "", fresh)) {
+        widths.clear();
+        // a box under the cursor, drawn from a face that arrived while it was painted: xterm spaced it
+        // for the stand-in's width, so its one cell is spaced from the face now, before the next frame
+        // measures everything again
+        if (span.classList.contains("xterm-cursor") && isBoxGlyph(shown) && [...shown].length === 1 && cellWidth > 0) {
+          span.style.letterSpacing = `${cellWidth - widthOf(shown)}px`;
+        }
+      }
+      if (rebuilt) continue;
       // under the cursor an icon is fitted in the cursor's own span, which keeps its background and border
       if (span.classList.contains("xterm-cursor") && [...shown].length === 1 && oversizedIcon(shown, widthOf(shown), cellWidth)) {
         span.style.cssText += `;font-size:${fontSize * iconScale([widthOf(shown)], cellWidth)}px;letter-spacing:0px`;
@@ -370,9 +470,20 @@ export function adjustTerminalGlyphs(term: Terminal): () => void {
         if (spacing !== xtermSpacing) span.style.letterSpacing = `${spacing}px`;
         continue;
       }
-      const half = fit.spacing / 2;
-      // appended in one write: later declarations win over xterm's letter-spacing
-      span.style.cssText += `;${fit.scale !== 1 ? `font-size:${fontSize * fit.scale}px;` : ""}letter-spacing:${fit.spacing}px;padding-left:${half}px;margin-right:${-half}px;clip-path:inset(0 ${half}px 0 0)`;
+      // the glyphs' own lengths, before the stretch: each glyph and its spacing then take their
+      // cells, and the margin brings xterm's span to the column after them, so it ends there
+      const spaced = fit.spacing / fit.stretch;
+      const half = spaced / 2;
+      const slot = glyphWidth + spacing;
+      const margin = fit.stretch === 1 ? -half : graphemes(shown) * slot * (1 - 1 / fit.stretch) - half;
+      const stretch = fit.stretch !== 1 ? `transform:scaleX(${fit.stretch});transform-origin:0 0;` : "";
+      // an inline-block (xterm's rule for a row's spans) takes no underline or strikethrough from the span around it: it asks for them
+      const glyphs = document.createElement("span");
+      glyphs.className = BOX_CLASS;
+      glyphs.style.cssText = `${fit.scale !== 1 ? `font-size:${fontSize * fit.scale}px;` : ""}${stretch}letter-spacing:${spaced}px;padding-left:${half}px;margin-right:${margin}px;clip-path:inset(0 ${half}px 0 0);text-decoration:inherit;font-weight:inherit`;
+      glyphs.textContent = shown;
+      span.style.letterSpacing = "0px";
+      span.replaceChildren(glyphs);
     }
   };
 
@@ -451,6 +562,10 @@ export function adjustTerminalGlyphs(term: Terminal): () => void {
    */
   const view = screen.querySelector<HTMLElement>(".composition-view");
   const probe = document.createElement("span").style;
+  // xterm's own transform of the box (a long text at the right edge is moved left to show its end),
+  // which the stretch is added to, and the transform this module wrote last
+  let viewBase = "";
+  let viewWritten = "";
   const fitView = (): void => {
     if (!view) return;
     const { fontFamily, fontSize, fontWeight } = term.options;
@@ -458,6 +573,7 @@ export function adjustTerminalGlyphs(term: Terminal): () => void {
     let size = `${fontSize}px`;
     let spacing = "";
     let padding = "";
+    let stretch = "";
     const cellWidth = Number.parseFloat(screen.style.width) / term.cols;
     const first = String.fromCodePoint((view.textContent ?? "").codePointAt(0) ?? 0x20);
     // the row's spacing is xterm's, from its own measure of the glyph (WidthCache: a run of it in
@@ -476,16 +592,29 @@ export function adjustTerminalGlyphs(term: Terminal): () => void {
       const fit = glyphFit(cells * cellWidth - drawn, glyphWidth, cellWidth);
       if (fit) {
         size = `${fontSize * fit.scale}px`;
-        spacing = `${fit.spacing}px`;
-        padding = `${fit.spacing / 2}px`;
+        spacing = `${fit.spacing / fit.stretch}px`;
+        padding = `${fit.spacing / fit.stretch / 2}px`;
+        if (fit.stretch !== 1) stretch = `scaleX(${fit.stretch})`;
       }
     }
     // each write is a mutation this observer sees again: only what differs is written, compared
     // as the browser stores it (15.600000000000001px reads back rounded)
+    if (view.style.transform !== viewWritten) viewBase = view.style.transform;
+    probe.transform = stretchedView(viewBase, stretch);
+    // a transform the browser cannot read keeps xterm's, and the glyph its own width
+    if (stretch !== "" && probe.transform === "") {
+      probe.transform = viewBase;
+      stretch = "";
+      spacing = padding = "";
+    }
     probe.fontSize = size;
     probe.letterSpacing = spacing;
     probe.paddingLeft = padding;
     if (view.style.fontSize !== probe.fontSize) view.style.fontSize = probe.fontSize;
+    if (view.style.transform !== probe.transform) view.style.transform = probe.transform;
+    viewWritten = view.style.transform;
+    const origin = stretch === "" ? "" : "0 0";
+    if (view.style.transformOrigin !== origin) view.style.transformOrigin = origin;
     if (view.style.letterSpacing !== probe.letterSpacing) view.style.letterSpacing = probe.letterSpacing;
     if (view.style.paddingLeft !== probe.paddingLeft) view.style.paddingLeft = probe.paddingLeft;
   };

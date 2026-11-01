@@ -14,7 +14,7 @@ export function useMachineApi() {
   return useMemo(() => ({
     fetchPaneTranscript: (pane: string, lines: number) => api.fetchPaneTranscript(pane, lines, id),
     fetchPaneConversation: (pane: string, page?: api.ConversationPageQuery) => api.fetchPaneConversation(pane, id, page),
-    peekPaneConversation: (pane: string) => api.peekPaneConversation(pane, id),
+    peekPaneConversation: (pane: string, prompts?: number) => api.peekPaneConversation(pane, id, prompts),
     fetchPanePrompt: (pane: string) => api.fetchPanePrompt(pane, id),
     fetchPanePromptState: (pane: string) => api.fetchPanePromptState(pane, id),
     answerPanePrompt: (answer: Parameters<typeof api.answerPanePrompt>[0]) => api.answerPanePrompt(answer, id),
@@ -31,6 +31,7 @@ export function useMachineApi() {
     fetchPaneOpencodeModels: (pane: string) => api.fetchPaneOpencodeModels(pane, id),
     fetchAgentModels: (agent: string) => api.fetchAgentModels(agent, id),
     selectPaneOpencodeModel: (request: Parameters<typeof api.selectPaneOpencodeModel>[0]) => api.selectPaneOpencodeModel(request, id),
+    fetchPaneArtifacts: (pane: string) => api.fetchPaneArtifacts(pane, id),
     closePane: (pane: string) => api.closePane(pane, id),
     focusPane: (pane: string) => api.focusPane(pane, id),
     closeWorkspace: (workspace: string, closeGroup = false) => api.closeWorkspace(workspace, id, closeGroup),

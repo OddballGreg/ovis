@@ -8,7 +8,7 @@ import { VOICE_DEFAULTS, type VoiceStatus } from "../shared/voice.ts";
 import type { HerdrUiConfig } from "../shared/protocol.ts";
 import type {} from "./chat-history-fixture.tsx";
 import { parseAgyTranscript } from "../server/agy.ts";
-import { buildXtermSource } from "./build-xterm.ts";
+import { buildXtermSource, xtermSourcePlugin } from "./build-xterm.ts";
 import { chromePath } from "./chrome-path.ts";
 
 const root = mkdtempSync(join(tmpdir(), "herdr-history-browser-"));
@@ -29,13 +29,7 @@ function nextRoute(name: string): Promise<void> {
 try {
   // the app's own xterm, as Vite aliases it: the patched source, not the package's minified build
   const xterm = buildXtermSource(join(import.meta.dir, ".."));
-  const build = await Bun.build({ entrypoints: ["scripts/chat-history-fixture.tsx"], outdir: root, target: "browser", define: { "process.env.NODE_ENV": '"development"' }, plugins: [{
-    name: "xterm-source-aliases",
-    setup(build) {
-      build.onResolve({ filter: /^@xterm\/xterm$/ }, () => ({ path: join(xterm, "browser/public/Terminal.js") }));
-      build.onResolve({ filter: /^(browser|common)\// }, ({ path }) => ({ path: join(xterm, path + ".js") }));
-    },
-  }] });
+  const build = await Bun.build({ entrypoints: ["scripts/chat-history-fixture.tsx"], outdir: root, target: "browser", define: { "process.env.NODE_ENV": '"development"' }, plugins: [xtermSourcePlugin(xterm)] });
   assert.ok(build.success, String(build.logs));
   server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch(request) {
     const path = new URL(request.url).pathname;
@@ -58,8 +52,11 @@ try {
   page.on("pageerror", (error) => { errors.push(error.message); console.error(error.stack); });
   let epoch = "one", newest = "old newest", before: string | null = "one:100";
   let holdOlder = false;
+  /** the cursor an older page answers with: null ends the history there */
+  let olderNext: string | null = null;
   let product = false;
   let unavailable = false, terminalFails = false;
+  let readPending = false, gapPending = false;
   let holdTerminal = false;
   let terminalText = "Fictional terminal fallback";
   /** product panes ("machine/pane") whose conversation requests wait for the script, and those that fail */
@@ -105,6 +102,19 @@ try {
       await route.fulfill({ json: { source: "scrollback", turns: [] } });
       return;
     }
+    if (readPending || (gapPending && url.searchParams.has("before"))) {
+      const displayed = url.searchParams.get("history_id");
+      if (displayed !== null && displayed !== epoch) {
+        await route.fulfill({ status: 409, json: { error: { code: "history_changed", message: "reload history" } } });
+        return;
+      }
+      if (displayed === null && !url.searchParams.has("before") && !url.searchParams.has("from")) {
+        await route.fulfill({ json: { source: "scrollback", turns: [] } });
+        return;
+      }
+      await route.fulfill({ status: 503, json: { error: { code: "conversation_read_pending", message: "The conversation could not be read; try again shortly." } } });
+      return;
+    }
     const captured = epoch;
     const cursor = url.searchParams.get("before") ?? url.searchParams.get("from");
     if (cursor && !cursor.startsWith(`${epoch}:`)) {
@@ -114,7 +124,7 @@ try {
     if (url.searchParams.has("before")) {
       routeEvents.dispatchEvent(new Event("older"));
       if (holdOlder) await new Promise<void>((resolve) => releases.push(resolve));
-      await route.fulfill({ json: { source: "omp-transcript", history_id: captured, cursor: null, turns: [user("old earlier")] } });
+      await route.fulfill({ json: { source: "omp-transcript", history_id: captured, cursor: olderNext ?? url.searchParams.get("since"), turns: [user("old earlier")] } });
     } else {
       const tool = { role: "assistant", ts: "reused", parts: [{ kind: "tool", name: "Read", summary: "same", input: "{}", output: "preview", output_ref: "reused", output_size: 9000 }] };
       await route.fulfill({ json: { source: "omp-transcript", history_id: epoch, cursor: before, turns: newest ? [user(newest), tool] : [] } });
@@ -123,6 +133,44 @@ try {
   await page.goto(`http://127.0.0.1:${server.port}/`);
   await page.getByText("old newest", { exact: true }).waitFor();
   const refresh = () => page.evaluate(() => window.qa.refresh());
+  await page.locator(".work-block-head").click();
+  await page.locator(".work-row-head").click();
+  const retainedTurn = await page.getByText("old newest", { exact: true }).elementHandle();
+  for (const gap of [false, true]) {
+    readPending = !gap; gapPending = gap;
+    if (gap) before = "one:200";
+    const failed = page.waitForResponse((response) => response.url().includes("/conversation?") && response.status() === 503);
+    await refresh();
+    await failed;
+    await page.getByText("Couldn't load the conversation", { exact: true }).waitFor();
+    assert.equal(await retainedTurn!.evaluate((node) => node.isConnected), true, "failed newest/gap reads keep the same mounted turn");
+    assert.equal(await page.locator(".work-block-head").getAttribute("aria-expanded"), "true", "failed reads keep opened work");
+    assert.equal(await page.locator(".work-row-head").getAttribute("aria-expanded"), "true", "failed reads keep opened tool details");
+    assert.equal(await page.locator(".chat-terminal-fallback").count(), 0, "a retryable read does not replace the conversation");
+    readPending = false; gapPending = false;
+    await refresh();
+    await page.getByText("Couldn't load the conversation", { exact: true }).waitFor({ state: "hidden" });
+    assert.equal(await page.getByText("old newest", { exact: true }).isVisible(), true);
+  }
+  // A session switched before an unpaged read fails: retrying it must not retain the old session.
+  await page.evaluate(() => window.qa.chat("switched-before-read"));
+  await page.waitForFunction(() => window.qa.answered.includes("local/switched-before-read"));
+  await page.getByText("old newest", { exact: true }).waitFor();
+  const switchedTurn = await page.getByText("old newest", { exact: true }).elementHandle();
+  epoch = "different-session"; before = null; readPending = true;
+  const rejectedHistory = page.waitForResponse((response) => response.url().includes("/conversation?") && response.status() === 409);
+  const freshFallback = page.waitForResponse((response) => response.url().includes("/conversation?") && !new URL(response.url()).searchParams.has("history_id") && response.status() === 200);
+  await refresh();
+  await rejectedHistory; await freshFallback;
+  await page.getByText("old newest", { exact: true }).waitFor({ state: "hidden" });
+  assert.equal(await switchedTurn!.evaluate((node) => node.isConnected), false, "an unpaged history mismatch clears old turns even when its fresh retry fails");
+  assert.equal(await page.getByText("old newest", { exact: true }).count(), 0);
+  readPending = false;
+  // Restore the original single-page fixture before the existing history-change cases.
+  epoch = "one-reset"; before = "one-reset:100";
+  await refresh();
+  await page.getByText("old newest", { exact: true }).waitFor();
+  console.log("PASS newest and gap read failures retain mounted messages, opened work and tool details, then recover");
   const output = page.locator("#output");
   await page.locator("#fetch-output").click();
   assert.equal(await page.evaluate(() => window.qa.requests.length), 1, "duplicate load deduplicated");
@@ -206,6 +254,25 @@ try {
   await page.getByText(newest, { exact: true }).waitFor();
   assert.equal(await page.locator(".chat-older").count(), 0);
   console.log("PASS held-cursor and older-page 409 recovery discard history and immediately reload");
+
+  // A page size chosen while the chat is open reaches the next older page, not only the newest.
+  epoch = "eight"; newest = "paged newest"; before = "eight:100"; olderNext = "eight:50";
+  await refresh();
+  await page.getByText(newest, { exact: true }).waitFor();
+  const olderAsked = async () => {
+    const answered = page.waitForResponse((response) => response.url().includes("/conversation?") && new URL(response.url()).searchParams.has("before"));
+    await page.locator(".chat-older").click();
+    const response = await answered;
+    await response.finished();
+    return new URL(response.url()).searchParams.get("prompts");
+  };
+  assert.equal(await olderAsked(), "10", "older pages are asked for at the default size");
+  await page.evaluate(() => window.qa.historyPrompts(50));
+  await page.locator(".chat-older").waitFor();
+  assert.equal(await olderAsked(), "50", "the next older page is asked for at the size just chosen");
+  await page.evaluate(() => window.qa.historyPrompts(10));
+  olderNext = null;
+  console.log("PASS a page size changed in a mounted chat applies to the next older page");
   assert.deepEqual(errors, []);
   console.log("PASS reused tool ids after clear, machine switch and unmount cancellation; no browser errors");
 

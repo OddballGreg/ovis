@@ -50,6 +50,39 @@ export function turnSegments(parts: ConversationPart[]): TurnSegment[] {
 }
 
 /**
+ * The name of each run's block, which also keeps its fold. A run keeps its name while its parts
+ * change: words before its tools join it (a record marks them commentary, a blank one is filled
+ * in), a part leaves it, or it splits or merges with another run (#2063). `previous` holds the name
+ * of the run each part was in when the turn was last drawn, by part index. A run takes the first
+ * of those names among its own parts that no earlier run has taken. Only then does a run with none
+ * get `work:<start>`, so a new run never takes the name of a run already shown.
+ *
+ * A run that draws no block (`drawn`: hidden reasoning alone) has no fold to keep: the runs drawn
+ * choose first, so it never takes a drawn block's name when the two split or merge (#2111). Its own
+ * name is `dormant`, by part index as `previous` is: a run drawn again takes it back, its fold with
+ * it, but only after every name a drawn run had.
+ */
+export function runNames(runs: readonly WorkSegment[], at: ReadonlyMap<ConversationPart, number>, previous: ReadonlyMap<number, string>,
+  drawn: (run: WorkSegment) => boolean = () => true, dormant: ReadonlyMap<number, string> = new Map()): string[] {
+  const used = new Set<string>();
+  const kept: (string | undefined)[] = runs.map(() => undefined);
+  const take = (index: number, from: ReadonlyMap<number, string>): void => {
+    const name = runs[index]!.parts.map((part) => from.get(at.get(part)!)).find((name) => name !== undefined && !used.has(name));
+    if (name !== undefined) { used.add(name); kept[index] = name; }
+  };
+  const shown = runs.flatMap((run, index) => drawn(run) ? [index] : []);
+  const hidden = runs.flatMap((run, index) => drawn(run) ? [] : [index]);
+  for (const group of [shown, hidden]) for (const from of [previous, dormant]) for (const index of group) if (kept[index] === undefined) take(index, from);
+  return runs.map((run, index) => {
+    if (kept[index] !== undefined) return kept[index];
+    let name = `work:${run.start}`;
+    while (used.has(name)) name += "+";
+    used.add(name);
+    return name;
+  });
+}
+
+/**
  * A work block is open while its turn runs and folded once the turn settles: the answer stays
  * outside the fold, so a finished turn reads as its answer under one "Worked for" row.
  *

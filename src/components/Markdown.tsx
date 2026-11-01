@@ -1,15 +1,16 @@
 import { createContext, Fragment, memo, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode } from "react";
 import { BookOpen, Check, Copy, ImageOff, Maximize2 } from "lucide-react";
 
-import { foldCode, mathNestsTooDeep, parseMarkdown, type InlineNode, type ListBlock, type MarkdownBlock } from "../lib/markdown.ts";
+import { foldCode, mathNestsTooDeep, parseInline, parseMarkdown, type InlineNode, type ListBlock, type MarkdownBlock } from "../../shared/markdown.ts";
 import { codeIsFilePath, OpenFileContext, splitFilePaths } from "../lib/filePaths.ts";
 import { FilePathLink } from "./FilePathLink.tsx";
-import { fileUriPath } from "../lib/terminalFileLinks.ts";
+import { fileUriPath } from "../../shared/fileUri.ts";
 import { WebPanelContext } from "../lib/webPanel.ts";
 import { MachineContext } from "../lib/machineContext.tsx";
 import { CHAT_HIGHLIGHT_LIMIT, languageForFence } from "../lib/highlight.ts";
 import { HighlightedCode } from "./HighlightedCode.tsx";
 import { useT } from "../lib/i18n.ts";
+import { useResourceUrlState } from "../lib/useResourceUrl.ts";
 import { type MarkdownImagePreview } from "../lib/markdownImages.ts";
 import { imageSlotStyle, standaloneImage } from "../lib/imageBox.ts";
 import { formatBytes } from "../lib/bridgeProgress.ts";
@@ -18,6 +19,7 @@ import { copyText } from "../lib/clipboard.ts";
 import { lazyChunk } from "../lib/lazyChunk.ts";
 import type { SkillMatcher } from "../lib/skillMentions.ts";
 import { previewChunks } from "../lib/textPreview.ts";
+import type { GalleryImage } from "../lib/imageViewer.ts";
 
 /** The pane's skill names: a name in an answer's plain text, in its trigger form, reads as a chip. */
 const SkillMatcherContext = createContext<SkillMatcher | null>(null);
@@ -107,9 +109,13 @@ function MermaidDiagram({ value }: { value: string }) {
   );
 }
 
-/** Stats an image before it can load; null context keeps chat images as links. */
+/** Stats an image before it can load; null context keeps image references as links. */
 type MarkdownImageResolver = (src: string) => Promise<MarkdownImagePreview | null>;
 export const MarkdownImageContext = createContext<MarkdownImageResolver | null>(null);
+/** Chat holds its viewer above virtualized rows; file previews keep their own image behavior. */
+export const MarkdownImageOpenContext = createContext<((image: GalleryImage) => void) | null>(null);
+/** A reconnect retries only failed images; decoded images and pending stats stay as they are. */
+export const MarkdownImageRetryContext = createContext(0);
 
 /**
  * An image that holds its box until it decodes (lib/imageBox.ts). With `slot`, the wrapper is the
@@ -121,50 +127,93 @@ export const MarkdownImageContext = createContext<MarkdownImageResolver | null>(
  * shows `fallback`. `src` is null while an address is still being resolved: the slot stands from
  * the first paint.
  */
-export function ReservedImage({ src, alt, width, className, slot, slotStyle, fallback }: {
-  src: string | null; alt: string; width?: number; className?: string; slot: boolean; slotStyle?: CSSProperties; fallback?: ReactNode;
+export function ReservedImage({ src: address, alt, width, className, slot, slotStyle, fallback, onError, retry = 0, renderImage }: {
+  src: string | null; alt: string; width?: number; className?: string; slot: boolean; slotStyle?: CSSProperties; fallback?: ReactNode; onError?: () => void; retry?: number;
+  renderImage?: (image: ReactNode) => ReactNode;
 }) {
   const t = useT();
+  const resource = useResourceUrlState(address, retry);
+  const src = resource.url;
+  // Transport failures happen before an <img> exists, but must reach the same parent failure path.
+  useEffect(() => { if (resource.error !== null) onError?.(); }, [resource.error, onError]);
   // keyed by address: another one starts from the slot again and never takes the old one's answer
-  const [settled, setSettled] = useState<{ src: string; failed: boolean } | null>(null);
-  const phase = src !== null && settled?.src === src ? (settled.failed ? "failed" : "decoded") : "loading";
+  const [settled, setSettled] = useState<{ src: string; failed: boolean; attempt?: number } | null>(null);
+  // an address the transport refused fails like an image that would not decode
+  const phase = resource.error !== null ? "failed" : src !== null && settled?.src === src && (!settled.failed || settled.attempt === retry) ? (settled.failed ? "failed" : "decoded") : "loading";
   // a cached image is complete before `onLoad` can fire
   const complete = useCallback((image: HTMLImageElement | null) => {
     if (image !== null && src !== null && image.complete && image.naturalWidth > 0) setSettled({ src, failed: false });
   }, [src]);
   if (phase === "failed" && !slot) return <>{fallback}</>;
   const image = src === null ? null : <img ref={complete} className={className} src={src} alt={alt} width={width} loading="lazy"
-    onLoad={() => setSettled({ src, failed: false })} onError={() => setSettled({ src, failed: true })} />;
-  if (!slot) return image;
-  if (phase === "failed") {
-    return <span className="image-slot is-failed" style={slotStyle}>
+    onLoad={() => setSettled({ src, failed: false })} onError={() => { setSettled({ src, failed: true, attempt: retry }); onError?.(); }} />;
+  // Only the image or its reserved slot can be wrapped in a viewer control, never the fallback.
+  const content = !slot ? image : phase === "failed"
+    ? <span className="image-slot is-failed" style={slotStyle}>
       <span className="image-slot-note"><ImageOff aria-hidden="true" /><span>{t("Image unavailable")}</span>{alt !== "" && <span>{alt}</span>}</span>
-    </span>;
-  }
-  if (phase === "loading") return <span className="image-slot is-loading" style={slotStyle} role="status" aria-label={t("Loading image")}>{image}</span>;
-  return <span className="image-slot">{image}</span>;
+    </span>
+    : phase === "loading"
+      ? <span className="image-slot is-loading" style={slotStyle} role="status" aria-label={t("Loading image")}>{image}</span>
+      : <span className="image-slot">{image}</span>;
+  return content !== null && renderImage ? renderImage(content) : content;
 }
 
 function MarkdownImage({ src, alt, width, fallback, resolve, interactive, standalone }: { src: string; alt: string; width?: number; fallback: ReactNode; resolve: MarkdownImageResolver; interactive: boolean; standalone: boolean }) {
   const t = useT();
-  const [loaded, setLoaded] = useState<{ src: string; resolve: MarkdownImageResolver; preview: MarkdownImagePreview | null } | null>(null);
+  const openImage = useContext(MarkdownImageOpenContext);
+  const retry = useContext(MarkdownImageRetryContext);
+  const [attempt, setAttempt] = useState(0);
+  const [pending, setPending] = useState(false);
+  const [loaded, setLoaded] = useState<{ src: string; resolve: MarkdownImageResolver; preview: MarkdownImagePreview | null; retry: number } | null>(null);
+  const request = useRef<{ src: string; resolve: MarkdownImageResolver; failed: boolean; pending: boolean } | null>(null);
+  const [failedUrl, setFailedUrl] = useState<string | null>(null);
+  useEffect(() => () => { request.current = null; }, [src, resolve]);
   useEffect(() => {
-    let live = true;
+    // Reconnects and manual retries never multiply a pending lookup or reload a healthy image.
+    if (request.current?.src === src && request.current.resolve === resolve && (request.current.pending || !request.current.failed)) return;
+    const current = { src, resolve, failed: false, pending: true };
+    request.current = current;
+    setPending(true);
+    const finish = (preview: MarkdownImagePreview | null, failed = preview?.kind === "unavailable") => {
+      if (request.current !== current) return;
+      current.pending = false;
+      current.failed = failed;
+      setPending(false);
+      setFailedUrl(null);
+      setLoaded({ src, resolve, preview, retry: retry + attempt });
+    };
     resolve(src).then(
-      (preview) => { if (live) setLoaded({ src, resolve, preview }); },
-      () => { if (live) setLoaded({ src, resolve, preview: null }); },
+      (preview) => finish(preview),
+      () => finish(null, true),
     );
-    return () => { live = false; };
-  }, [src, resolve]);
+  }, [src, resolve, retry, attempt]);
   const preview = loaded?.src === src && loaded.resolve === resolve ? loaded.preview : undefined;
   if (preview === null) return <>{fallback}</>;
+  if (preview?.kind === "unavailable") return <span className="markdown-image-unavailable" role="group" aria-label={alt || src}>
+    {fallback}
+    {interactive && <button type="button" className="btn markdown-image-retry" disabled={pending} onClick={() => {
+      if (request.current?.pending || !request.current?.failed) return;
+      setPending(true);
+      setAttempt((value) => value + 1);
+    }}>{t("Try again")}</button>}
+  </span>;
   if (preview?.kind === "too-large") {
     const message = t("This image is {size}; download it to view.", { size: formatBytes(preview.size) });
     return interactive ? <a href={preview.downloadUrl} download>{message}</a> : <span>{message}</span>;
   }
   // still being stat'ed: a standalone image's slot stands from the first paint, a badge shows its alt
   if (preview === undefined && !standalone) return <span>{alt}</span>;
-  return <ReservedImage src={preview?.url ?? null} alt={alt} width={width} className="markdown-image" slot={standalone} slotStyle={standalone ? imageSlotStyle(width) : undefined} fallback={fallback} />;
+  if (!standalone && preview?.url === failedUrl) return <>{fallback}</>;
+  // A failed byte load retries only after the new stat has passed the same size/type checks.
+  return <ReservedImage src={preview?.url ?? null} alt={alt} width={width} className="markdown-image" slot={standalone} slotStyle={standalone ? imageSlotStyle(width) : undefined} fallback={fallback} retry={loaded?.retry ?? 0} renderImage={preview === undefined || !interactive || openImage === null ? undefined : (image) =>
+    <button type="button" className={`markdown-image-open${standalone ? " is-standalone" : ""}`} aria-label={alt || preview.name} title={t("Open image")} onClick={(event) => {
+      event.currentTarget.focus({ preventScroll: true });
+      openImage({ src: preview.url, name: alt || preview.name, file: preview.name });
+    }}>{image}</button>
+  } onError={() => {
+    if (request.current?.src === src && request.current.resolve === resolve && !request.current.pending) request.current.failed = true;
+    setFailedUrl(preview?.url ?? null);
+  }} />;
 }
 
 /**
@@ -225,10 +274,14 @@ function Inline({ nodes, interactive = true, standalone = false }: { nodes: Inli
 /** A list, nested lists and tables in its items; a task item's box stands in for its bullet. */
 function List({ block }: { block: ListBlock }) {
   const Tag = block.ordered ? "ol" : "ul";
+  // the widest number's digits: its marker sets the list's indent (ChatView.css). The browser counts
+  // from 1 when `start` is past a 32-bit integer, so such a start sets no wider indent
+  const first = block.start !== undefined && block.start <= 2 ** 31 - 1 ? block.start : 1;
+  const digits = block.ordered ? String(first + block.items.length - 1).length : 1;
   const t = useT();
   const id = useId();
   return (
-    <Tag className="markdown-list" start={block.ordered ? block.start : undefined}>
+    <Tag className="markdown-list" start={block.ordered ? block.start : undefined} style={digits > 1 ? { "--markdown-list-digits": digits } as CSSProperties : undefined}>
       {block.items.map((item, index) => (
         <li key={index} className={item.checked === undefined ? undefined : "markdown-task"}>
           {/* a task's box shows its state; the agent's text owns it, so it cannot be ticked here. Drawn,
@@ -336,6 +389,24 @@ export const Markdown = memo(function Markdown({ children, className, html = fal
   const blocks = useMemo(() => parseMarkdown(children, 0, html), [children, html]);
   const parsed = <ParsedMarkdown blocks={blocks} className={className} />;
   return skills === null ? parsed : <SkillMatcherContext.Provider value={skills}>{parsed}</SkillMatcherContext.Provider>;
+});
+
+/** `nodes` with each link, file link and picture as its words: text in a control that answers when clicked opens nothing itself. */
+function withoutLinks(nodes: InlineNode[]): InlineNode[] {
+  return nodes.flatMap((node): InlineNode[] => {
+    switch (node.type) {
+      case "link": case "file": return withoutLinks(node.children);
+      case "image": return node.alt === "" ? [] : [{ type: "text", value: node.alt }];
+      case "strong": case "em": case "del": return [{ ...node, children: withoutLinks(node.children) }];
+      default: return [node];
+    }
+  });
+}
+
+/** One line of inline Markdown inside a button or a checkbox's label (an Ask card's option): emphasis, code and math, with no link in it. */
+export const InlineMarkdown = memo(function InlineMarkdown({ children }: { children: string }) {
+  const nodes = useMemo(() => withoutLinks(parseInline(children, false)), [children]);
+  return <Inline nodes={nodes} interactive={false} />;
 });
 
 /**

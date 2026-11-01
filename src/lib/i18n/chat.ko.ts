@@ -2,7 +2,7 @@
  * Korean for the keys only the chat files use:
  * components/ChatView.tsx, components/Markdown.tsx, components/MermaidLightbox.tsx,
  * components/ChatMinimap.tsx, components/ImageLightbox.tsx, components/BackgroundTasks.tsx,
- * components/BackgroundAgentDetail.tsx, components/MarkdownLinkMenu.tsx,
+ * components/BackgroundAgentDetail.tsx, components/Artifacts.tsx, components/MarkdownLinkMenu.tsx,
  * lib/workBlocks.ts (with CATEGORY_LABEL), lib/toolVerbs.ts (with VERB_LABEL), lib/outcomeChip.ts,
  * lib/chatTimestamp.ts, lib/chatReadDeadline.ts.
  * Register and fixed terms follow ../i18n.ko.ts; a key another feature also uses goes there.
@@ -27,6 +27,7 @@ export const CHAT_KO: Record<string, string> = {
   "Show all {n} lines": "{n}줄 모두 보기",
   "Empty task": "빈 할 일",
   "Couldn't copy. Select the text and copy it manually.": "복사하지 못했습니다. 텍스트를 선택해 직접 복사하세요.",
+  "Input": "입력",
   "Output": "출력",
   "Arguments omitted (too large)": "인자가 너무 커서 생략됨",
   "thinking": "생각",
@@ -144,6 +145,9 @@ export const CHAT_KO: Record<string, string> = {
   "{n} tool calls": "도구 호출 {n}회",
   "{n} tokens": "토큰 {n}개",
   "Background tasks": "백그라운드 작업",
+  "Artifacts": "아티팩트",
+  "{n} artifact": "아티팩트 {n}개",
+  "{n} artifacts": "아티팩트 {n}개",
   "Couldn't load the background tasks": "백그라운드 작업을 불러오지 못했습니다",
   "No background tasks to show yet": "아직 보여줄 백그라운드 작업이 없습니다",
   "Running": "실행 중",
@@ -203,4 +207,5 @@ export const CHAT_KO: Record<string, string> = {
   "Show full message": "전체 메시지 보기",
   "Open link": "링크 열기",
   "Share link": "링크 공유",
+  "Sent · waiting for the agent's next turn": "전송됨 · 에이전트의 다음 턴을 기다리는 중",
 };
