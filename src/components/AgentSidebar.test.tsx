@@ -5,7 +5,7 @@ import { create, type ReactTestRenderer } from "react-test-renderer";
 import type { Machine } from "../../shared/machines.ts";
 import machinesFixture from "../../site/demo/fixtures/machines.json";
 import { currentAgentRowTokens, setAgentRowTokens } from "../lib/agentRowTokens.ts";
-import { SettingsProvider } from "../lib/settings.ts";
+import { SettingsProvider, useSettings, type Settings } from "../lib/settings.ts";
 import type { SidebarFilter } from "../lib/sidebarFilter.ts";
 import { SidebarFilterProvider } from "../lib/sidebarFilterContext.ts";
 import { AgentSidebar } from "./AgentSidebar.tsx";
@@ -233,7 +233,10 @@ describe("AgentSidebar fold memory", () => {
   });
 
   const inactive: SidebarFilter = { query: "", active: false, machines: new Map(), matches: 0 };
+  let updateSettings: ((patch: Partial<Settings>) => void) | undefined;
+  const SettingsProbe = () => { updateSettings = useSettings().update; return null; };
   const view = (filter: SidebarFilter) => <SettingsProvider>
+    <SettingsProbe />
     <SidebarFilterProvider value={{ filter, reportBranches: () => {} }}>
       <AgentSidebar machines={roster()} selectedMachineId="local" selectedPaneId={null} stateWord={(machine) => machine.state} onSelect={() => {}} />
     </SidebarFilterProvider>
@@ -283,6 +286,22 @@ describe("AgentSidebar fold memory", () => {
     phone = false;
     stored.set(FOLD_KEY, "1");
     expect((await mount()).expanded()).toBe(false);
+  });
+
+  it("forgets the kept fold when Agents on a phone changes, so the new setting holds after a reload", async () => {
+    // Given a phone whose reader opened the list, kept on this device.
+    phone = true;
+    stored.set(FOLD_KEY, "0");
+    const sidebar = await mount();
+    expect(sidebar.expanded()).toBe(true);
+    // When Settings → Agents on a phone changes to Unfolded and back to Folded.
+    await act(async () => { updateSettings?.({ agentsDrawerFold: "open" }); });
+    expect(sidebar.expanded()).toBe(true);
+    await act(async () => { updateSettings?.({ agentsDrawerFold: "folded" }); });
+    expect(sidebar.expanded()).toBe(false);
+    // Then the kept fold is gone, and the setting still decides after a reload.
+    expect(stored.has(FOLD_KEY)).toBe(false);
+    expect((await sidebar.remount()).expanded()).toBe(false);
   });
 
   it("never writes the filter's temporary fold", async () => {

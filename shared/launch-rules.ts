@@ -102,10 +102,9 @@ const configValue = (value: string): string => {
 
 /**
  * What is wrong with an agent's launch arguments, in the API's words; null when they can be passed. No
- * argument may hold a control character. Claude Code's and Codex's model and effort flags take only
+ * argument may hold a control character. Claude Code's and Codex's model and effort flags, and OpenCode's model flag, take only
  * the values the dialog offers (and Claude Code's `--effort ultracode`), in every spelling their CLIs
- * accept (OpenCode's model flag too), and Codex's prompt after `--` follows a first message's rules. Any
- * other flag is the agent's own: Ultracode's `--settings {"ultracode":true}` passes as it is.
+ * accept, and Codex's prompt after `--` follows a first message's rules. Any other flag is the agent's own: Ultracode's `--settings {"ultracode":true}` passes as it is.
  */
 export function launchArgsFault(kind: string, args: readonly string[]): string | null {
   if (!args.every(argumentText)) return "agent.args must not contain control characters (a tab or a line break included)";

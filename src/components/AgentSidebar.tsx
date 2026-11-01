@@ -128,8 +128,8 @@ interface PinMenu { key: string; anchor: HTMLElement; point?: { x: number; y: nu
 /**
  * All PCs' live agents form a second list; workspace and PC folds do not hide these rows.
  * In the phone's drawer the list starts folded, leaving the room to the workspaces, unless
- * Settings → Agents on a phone starts it open, until the reader folds or opens it: that choice is
- * kept on this device.
+ * Settings → Agents on a phone starts it open. A fold the reader makes is kept on this device and
+ * wins over that default on the next launch, until the setting changes again.
  * The pinned agents stand first, in a card; on a desktop only a
  * right-click (or the context-menu key) opens the menu. A row's ⋯, or a right-click on it, opens its
  * menu, which pins or unpins it, and mutes or unmutes its alerts for every browser and device.
@@ -139,8 +139,8 @@ export function AgentSidebar({ machines, selectedMachineId, selectedPaneId, stat
   const listId = useId();
   const { settings } = useSettings();
   // Settings → Agents on a phone, as it stands when it is drawn and whenever it changes after (the shared
-  // preferences arrive after the first render, lib/preferencesSync.ts); a fold the user makes stays until the setting changes,
-  // and on a wider screen, where the setting does not apply, it stays
+  // preferences arrive after the first render, lib/preferencesSync.ts); a fold the user makes is kept on this device until
+  // the setting changes, which forgets it, and on a wider screen, where the setting does not apply, it stays
   const drawerFold = settings.agentsDrawerFold;
   const [collapsed, setCollapsed] = useState(() => storedFold() ?? startsFolded(drawerFold));
   const foldSetting = useRef(drawerFold);
@@ -148,6 +148,8 @@ export function AgentSidebar({ machines, selectedMachineId, selectedPaneId, stat
     // the effect also runs again with the same value (a hidden <Activity> shown again, Fast Refresh): only a new one refolds
     if (foldSetting.current === drawerFold) return;
     foldSetting.current = drawerFold;
+    // a new setting is the reader's newer choice: the fold kept from before would override it on the next launch
+    try { window.localStorage.removeItem(FOLD_KEY); } catch { /* no storage: nothing kept */ }
     if (!inDrawer()) return;
     setCollapsed(drawerFold === "folded");
   }, [drawerFold]);
