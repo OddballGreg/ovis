@@ -113,10 +113,10 @@ describe("opened finish identity", () => {
 describe("longest wait order", () => {
   const raw = (row: HerdrPane) => row.agent_status;
 
-  it("ranks blocked, then an unread finish, then ready, then working, whatever their recency", () => {
+  it("ranks blocked, then unread and ready finishes together, then working, whatever their recency", () => {
     const panes = [pane("working", "working"), pane("ready", "idle"), pane("finished", "done", 1), pane("blocked", "blocked"), { ...pane("bg", "done", 1), background_wait: true as const }];
     const seqs = new Map([["working", 1], ["ready", 2], ["finished", 3], ["blocked", 4], ["bg", 0]]);
-    expect(waitingOrder(panes, (p) => p, (p) => shownStatus(p, {}), seqs).map((p) => p.pane_id)).toEqual(["blocked", "finished", "ready", "bg", "working"]);
+    expect(waitingOrder(panes, (p) => p, (p) => shownStatus(p, {}), seqs).map((p) => p.pane_id)).toEqual(["blocked", "ready", "finished", "bg", "working"]);
   });
 
   it("puts the oldest state change first within a rank, then the order given, then panes with no counter", () => {
@@ -126,12 +126,12 @@ describe("longest wait order", () => {
     expect(activityOrder(panes, (p) => p, seqs).map((p) => p.pane_id).slice(0, 2)).toEqual(["new", "tie-a"]);
   });
 
-  it("takes a finish already opened for ready, behind an unread one and among the other ready agents", () => {
+  it("orders unread, opened and ready finishes by their oldest state change alone", () => {
     const panes = [pane("ready", "idle"), pane("opened", "done", 2), pane("unread", "done", 3)];
     const seqs = new Map([["ready", 5], ["opened", 1], ["unread", 9]]);
     const seen = { opened: 2 };
-    expect(waitingOrder(panes, (p) => p, (p) => shownStatus(p, seen), seqs).map((p) => p.pane_id)).toEqual(["unread", "opened", "ready"]);
-    expect(waitingOrder(panes, (p) => p, raw, seqs).map((p) => p.pane_id)).toEqual(["opened", "unread", "ready"]);
+    expect(waitingOrder(panes, (p) => p, (p) => shownStatus(p, seen), seqs).map((p) => p.pane_id)).toEqual(["opened", "ready", "unread"]);
+    expect(waitingOrder(panes, (p) => p, raw, seqs).map((p) => p.pane_id)).toEqual(["opened", "ready", "unread"]);
   });
 
   it("leaves a status herdr adds later after working", () => {
@@ -157,13 +157,13 @@ describe("Importance order", () => {
       importanceOf: (row) => row.level, waitOf: (row) => row.wait === undefined ? undefined : row.wait * MIN, aging,
     }).map((row) => row.id);
 
-  it("keeps Longest wait's status groups before any band", () => {
+  it("keeps Longest wait's status groups before any band, with unread and ready as one group", () => {
     expect(order([
       { id: "working-p0", status: "working", level: "P0", seq: 1 },
       { id: "idle-p0", status: "idle", level: "P0", seq: 2 },
-      { id: "done-p3", status: "done", level: "P3", seq: 3 },
+      { id: "done-p3", status: "done", level: "P3", seq: 1 },
       { id: "blocked-p3", status: "blocked", level: "P3", seq: 4 },
-    ])).toEqual(["blocked-p3", "done-p3", "idle-p0", "working-p0"]);
+    ])).toEqual(["blocked-p3", "idle-p0", "done-p3", "working-p0"]);
   });
 
   it("puts the more urgent band first within a group, whatever the seq", () => {
@@ -239,6 +239,22 @@ describe("Importance order", () => {
       { id: "working-p2", status: "working", level: "P2", wait: 1, seq: 2 },
       { id: "working-p3", status: "working", level: "P3", wait: 300, seq: 3 },
     ])).toEqual(["idle-p0", "working-p3", "working-p2"]);
+  });
+
+  it("orders unread and ready rows as one group: band first, then age, whichever status is older", () => {
+    expect(order([
+      { id: "done-p3", status: "done", level: "P3", seq: 1 },
+      { id: "idle-p2", status: "idle", level: "P2", seq: 3 },
+      { id: "idle-p3", status: "idle", level: "P3", seq: 2 },
+      { id: "done-p2", status: "done", level: "P2", seq: 4 },
+    ])).toEqual(["idle-p2", "done-p2", "done-p3", "idle-p3"]);
+  });
+
+  it("lifts a starved unread row into the band of a ready P0, as they share a group", () => {
+    expect(order([
+      { id: "idle-p0", status: "idle", level: "P0", wait: 1, seq: 1 },
+      { id: "done-p3", status: "done", level: "P3", wait: 241, seq: 2 },
+    ])).toEqual(["done-p3", "idle-p0"]);
   });
 
   it("follows the configured thresholds and factor", () => {

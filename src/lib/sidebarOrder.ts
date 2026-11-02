@@ -68,19 +68,23 @@ export function activityOrder<T>(rows: readonly T[], paneOf: (row: T) => Pick<Pa
     .map((entry) => entry.row);
 }
 
-/** Longest wait's ranks: blocked, a finish not opened yet, ready, then working (BG counts as working). */
-const WAIT_RANK: Readonly<Record<KnownStatus, number>> = { blocked: 0, done: 1, idle: 2, working: 3, waiting: 3, unknown: 4 };
+/**
+ * Longest wait's ranks: blocked, then unread and ready (one rank), then working (BG counts as
+ * working). Unread and ready are not told apart for order because a herdr restart turns unread
+ * finishes into ready ones without anyone opening them.
+ */
+const WAIT_RANK: Readonly<Record<KnownStatus, number>> = { blocked: 0, done: 1, idle: 1, working: 2, waiting: 2, unknown: 3 };
 
 /**
- * Longest wait first: blocked, then a finish not opened yet, then ready (a finish already opened
- * counts as ready, as its row draws it), then working; within each, herdr's oldest state change
- * first, then the order given. `statusOf` is the status the row draws (shownStatus), not the raw
- * one. This follows herdr's own agent view sorted by status, then state_change_seq ascending, with
- * two differences: an opened finish counts as ready, and BG (waiting) counts as working.
+ * Longest wait first: blocked, then unread finishes and ready agents together, then working;
+ * within each, herdr's oldest state change first, then the order given.
+ * `statusOf` is the status the row draws (shownStatus), not the raw one. This follows herdr's own
+ * agent view sorted by status, then state_change_seq ascending, with two differences: unread and
+ * ready are one group, and BG (waiting) counts as working.
  */
 export function waitingOrder<T>(rows: readonly T[], paneOf: (row: T) => Pick<PaneInfo, "pane_id">, statusOf: (row: T) => AgentStatus | undefined, seqs: ReadonlyMap<string, number>): T[] {
   return rows
-    .map((row, index) => ({ row, index, rank: WAIT_RANK[knownStatus(statusOf(row))] ?? 4, changed: seqs.get(paneOf(row).pane_id) ?? Infinity }))
+    .map((row, index) => ({ row, index, rank: WAIT_RANK[knownStatus(statusOf(row))] ?? 3, changed: seqs.get(paneOf(row).pane_id) ?? Infinity }))
     .sort((a, b) => a.rank - b.rank || (a.changed === b.changed ? 0 : a.changed < b.changed ? -1 : 1) || a.index - b.index)
     .map((entry) => entry.row);
 }
@@ -113,7 +117,7 @@ export function importanceFacts(level: ImportanceLevel | undefined, wait: number
 }
 
 /**
- * Importance: Longest wait's groups (blocked, an unread finish, ready, working), and in each the
+ * Importance: Longest wait's groups (blocked, unread and ready, working), and in each the
  * opencode-memory band first (P0 before P3; none known counts as P2), modelled on the objective
  * driver's order (opencode-memory analysis/objective_loop.py drive_order_key). Within a band a row
  * that has waited past its band's threshold goes first, longest wait first (a P0 always has); one
@@ -124,7 +128,7 @@ export function importanceFacts(level: ImportanceLevel | undefined, wait: number
 export function importanceOrder<T>(rows: readonly T[], paneOf: (row: T) => Pick<PaneInfo, "pane_id">, statusOf: (row: T) => AgentStatus | undefined, seqs: ReadonlyMap<string, number>,
   options: { importanceOf(row: T): ImportanceLevel | undefined; waitOf(row: T): number | undefined; aging: ImportanceAging }): T[] {
   const entries = rows.map((row, index) => ({
-    row, index, rank: WAIT_RANK[knownStatus(statusOf(row))] ?? 4, changed: seqs.get(paneOf(row).pane_id) ?? Infinity,
+    row, index, rank: WAIT_RANK[knownStatus(statusOf(row))] ?? 3, changed: seqs.get(paneOf(row).pane_id) ?? Infinity,
     level: options.importanceOf(row), wait: options.waitOf(row),
   }));
   const top = new Map<number, number>();

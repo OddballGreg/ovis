@@ -1260,12 +1260,13 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
   A raw counter rollback clears synthetic recency even on older bridges without an epoch.
   This ordering correction never changes finish identities or read records.
 - **Longest wait**, the third Agents order, lists the agents in the order they need a look, each
-  PC on its own: blocked, then a finish not opened yet, then ready (a finish opened here counts as
-  ready, as its row draws it), then working or waiting on background work. Within each, the
+  PC on its own: blocked, then unread finishes and ready agents as one group, then working or
+  waiting on background work. Within each, the
   oldest `state_change_seq` comes first, so the agent that has waited longest leads; rows with no
-  counter follow, in herdr's order. It follows herdr's own agent view sorted by status, then
-  `state_change_seq` ascending (`agent.view.set`), with two differences: an opened finish counts
-  as ready, and BG (waiting) counts as working. Activity puts the newest change first.
+  counter follow, in herdr's order. Unread and ready share a group because a herdr restart turns
+  unread finishes into ready ones that nobody opened. It follows herdr's own agent view sorted by
+  status, then `state_change_seq` ascending (`agent.view.set`), with two differences: unread and
+  ready are one group, and BG (waiting) counts as working. Activity puts the newest change first.
 - **Importance**, the fourth Agents order, keeps Longest wait's groups and, within each, puts
   first the band opencode-memory gives the pane's OpenCode session, P0 to P3. A pane memory says
   nothing of counts as P2, as does every pane while memory is away. Within a band an agent that has

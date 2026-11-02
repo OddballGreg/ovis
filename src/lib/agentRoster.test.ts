@@ -34,11 +34,11 @@ describe("agent roster", () => {
   it("sorts each PC's rows by Longest wait with the status each row draws", () => {
     const machines = [machine("local", "connected", [["a", "working"], ["b", "done", 1], ["c", "done", 2], ["d", "blocked"]]), machine("remote", "connected", [["e", "idle"], ["f", "done", 1]])];
     const seqs = new Map<string, ReadonlyMap<string, number>>([["local", new Map([["a", 1], ["b", 4], ["c", 2], ["d", 3]])], ["remote", new Map([["e", 1], ["f", 2]])]]);
-    // c's finish was opened: it draws as ready, so it waits behind b's unread one
+    // c's finish was opened and draws as ready; ready and unread share a group, so c's older change leads b
     const status = (id: string, pane: HerdrPane): AgentStatus | undefined => id === "local" && pane.pane_id === "c" ? "idle" : pane.agent_status;
     const split = agentRoster(machines, { order: "waiting", seqs: (id) => seqs.get(id) ?? new Map(), status, pinned: [] });
     const key = ({ machine, entry }: { machine: Machine; entry: { pane: HerdrPane } }) => `${machine.id}/${entry.pane.pane_id}`;
-    expect(split.rest.map(key)).toEqual(["local/d", "local/b", "local/c", "local/a", "remote/f", "remote/e"]);
+    expect(split.rest.map(key)).toEqual(["local/d", "local/c", "local/b", "local/a", "remote/e", "remote/f"]);
   });
 
   it("orders each PC's rows by Importance from the server's bands and wait clocks", () => {

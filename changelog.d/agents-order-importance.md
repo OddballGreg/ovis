@@ -1,7 +1,7 @@
 ### Added
 - **Settings → Appearance → Agents order → Importance** orders the agents by how much their work
-  matters. It keeps Longest wait's groups: blocked, unread finishes, ready, then working. Within
-  each group, the band that opencode-memory gives the pane's OpenCode session comes first, P0 to P3.
+  matters. It keeps Longest wait's groups: blocked, unread and ready, then working. Within each
+  group, the band that opencode-memory gives the pane's OpenCode session comes first, P0 to P3.
   Other agents count as P2. An agent that waits past its band's limit goes first in its band. The
   limits are 15 minutes for P1, 30 for P2 and 60 for P3, and you can change them in Settings. An
   agent that waits 4 times its limit is ordered with its group's most urgent band.
