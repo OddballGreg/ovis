@@ -305,8 +305,8 @@ export const SETTINGS_JA: Record<string, string> = {
   "{band} wait limit": "{band} の待ち上限",
   "An agent that waits longer than this goes first in its band, longest wait first. A P0 has no limit and goes by longest wait at once": "これより長く待ったエージェントは、同じ帯の中で待ち時間の長い順に先頭へ移ります。P0 には上限がなく、最初から待ち時間の長い順に並びます",
   "{minutes} min": "{minutes} 分",
-  "Joins the top band after": "最上位の帯に並ぶまで",
-  "An agent that waits this many times its band's limit is ordered with the most urgent band of its group, so none waits forever": "帯の待ち上限のこの倍数を待ったエージェントは、グループで最も急ぐ帯と一緒に並びます。いつまでも待たされることはありません",
+  "Joins the top band, P1 at most, after": "最上位の帯（P1 まで）に並ぶまで",
+  "An agent that waits this many times its band's limit is ordered with the most urgent band of its group, but never above P1, so a P0 agent always stays first": "帯の待ち上限のこの倍数を待ったエージェントは、グループで最も急ぐ帯と一緒に並びますが、P1 より上には上がらないので、P0 のエージェントは常に先頭のままです",
   "{factor}× its limit": "上限の {factor} 倍",
   // Settings, Phone & devices: Access
   "Access": "アクセス",

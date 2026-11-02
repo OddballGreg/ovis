@@ -385,7 +385,7 @@ function AppearancePage() {
             </SettingsSelect>
           </SettingsRow>
         ))}
-        <SettingsRow label={t("Joins the top band after")} description={t("An agent that waits this many times its band's limit is ordered with the most urgent band of its group, so none waits forever")} htmlFor="settings-importance-factor">
+        <SettingsRow label={t("Joins the top band, P1 at most, after")} description={t("An agent that waits this many times its band's limit is ordered with the most urgent band of its group, but never above P1, so a P0 agent always stays first")} htmlFor="settings-importance-factor">
           <SettingsSelect id="settings-importance-factor" value={String(settings.importanceAging.factor)} onChange={(event) => update({ importanceAging: { ...settings.importanceAging, factor: Number(event.target.value) } })}>
             {agingChoices(IMPORTANCE_AGING_FACTORS, settings.importanceAging.factor).map((factor) => <option key={factor} value={factor}>{t("{factor}× its limit", { factor })}</option>)}
           </SettingsSelect>

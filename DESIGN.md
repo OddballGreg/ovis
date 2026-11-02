@@ -1272,9 +1272,11 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
   nothing of counts as P2, as does every pane while memory is away. Within a band an agent that has
   waited past its band's limit (P1 15, P2 30, P3 60 minutes by default, set in Settings under the
   order) goes first, longest wait first; a P0 has no limit and goes by longest wait at once. An
-  agent that has waited 4 times its limit is ordered with the most urgent band of its group. The
-  rest keep Longest wait's order. This is modelled on opencode-memory's objective driver
-  (`drive_order_key`), so no band waits forever. The wait is the server's clock (`wait` on each
+  agent that has waited 4 times its limit is ordered with the most urgent band of its group, but
+  never above P1, so no wait lifts an agent past a P0. The rest keep Longest wait's order. This is
+  modelled on opencode-memory's objective driver (`drive_order_key`), so a P1, P2 or P3 is never
+  starved behind agents of its own band or lower; only a P0 stays ahead of it. The wait is the
+  server's clock (`wait` on each
   pane, kept in `wait-clocks.json` beside the shared preferences), restarted when the pane's
   status or `state_change_seq` changes. In this order an OpenCode row draws its band after the
   counts (`.agent-importance`, mono `--fs-2xs` in a `--border` box; P0 and P1 in `--accent`; a

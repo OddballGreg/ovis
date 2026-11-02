@@ -213,23 +213,30 @@ describe("Importance order", () => {
     ])).toEqual(["p1-fresh", "p3-aged"]);
   });
 
-  it("lifts a row that waited 4x its threshold into its group's top band, as an aged row there", () => {
-    // P3 waited 241 min (> 4 x 60): it competes in P0's band and, aged, goes before the fresh P0
+  it("lifts a row that waited 4x its threshold into its group's top band, but never above P1", () => {
+    // P3 waited 241 min (> 4 x 60): the group's top band is P0, so it competes in P1 and, aged, goes before the fresh P1
     expect(order([
       { id: "p0-fresh", status: "idle", level: "P0", wait: 1, seq: 1 },
       { id: "p1-fresh", status: "idle", level: "P1", wait: 1, seq: 2 },
       { id: "p3-starved", status: "idle", level: "P3", wait: 241, seq: 3 },
-    ])).toEqual(["p3-starved", "p0-fresh", "p1-fresh"]);
-    expect(importanceFacts("P3", 241 * MIN, DEFAULT_IMPORTANCE_AGING, 0)).toMatchObject({ promoted: true, effectiveBand: 0 });
+    ])).toEqual(["p0-fresh", "p3-starved", "p1-fresh"]);
+    expect(importanceFacts("P3", 241 * MIN, DEFAULT_IMPORTANCE_AGING, 0)).toMatchObject({ promoted: true, effectiveBand: 1 });
     expect(importanceFacts("P3", 239 * MIN, DEFAULT_IMPORTANCE_AGING, 0)).toMatchObject({ promoted: false, effectiveBand: 3 });
+    expect(importanceFacts("P1", 10_000 * MIN, DEFAULT_IMPORTANCE_AGING, 0)).toMatchObject({ promoted: false, effectiveBand: 1 });
+    expect(importanceFacts("P2", 121 * MIN, DEFAULT_IMPORTANCE_AGING, 0)).toMatchObject({ promoted: true, effectiveBand: 1 });
   });
 
-  it("orders a P0 and a row lifted into its band by longest wait, so a long-waiting P0 is not passed", () => {
+  it("keeps a P0 first in its group however long the other rows have waited", () => {
     expect(order([
       { id: "p3-starved", status: "blocked", level: "P3", wait: 241, seq: 1 },
       { id: "p0-long", status: "blocked", level: "P0", wait: 300, seq: 2 },
       { id: "p0-fresh", status: "blocked", level: "P0", wait: 2, seq: 3 },
-    ])).toEqual(["p0-long", "p3-starved", "p0-fresh"]);
+    ])).toEqual(["p0-long", "p0-fresh", "p3-starved"]);
+    // a session parked all day does not pass a P0 that just finished
+    expect(order([
+      { id: "p2-parked", status: "idle", level: "P2", wait: 600, seq: 1 },
+      { id: "p0-slack", status: "done", level: "P0", wait: 1, seq: 2 },
+    ])).toEqual(["p0-slack", "p2-parked"]);
   });
 
   it("promotes only to the top band of the row's own status group", () => {
@@ -250,11 +257,12 @@ describe("Importance order", () => {
     ])).toEqual(["idle-p2", "done-p2", "done-p3", "idle-p3"]);
   });
 
-  it("lifts a starved unread row into the band of a ready P0, as they share a group", () => {
+  it("lifts a starved unread row among the ready rows, as they share a group, but not past a ready P0", () => {
     expect(order([
       { id: "idle-p0", status: "idle", level: "P0", wait: 1, seq: 1 },
+      { id: "idle-p1", status: "idle", level: "P1", wait: 1, seq: 3 },
       { id: "done-p3", status: "done", level: "P3", wait: 241, seq: 2 },
-    ])).toEqual(["done-p3", "idle-p0"]);
+    ])).toEqual(["idle-p0", "done-p3", "idle-p1"]);
   });
 
   it("follows the configured thresholds and factor", () => {

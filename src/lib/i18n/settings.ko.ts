@@ -305,8 +305,8 @@ export const SETTINGS_KO: Record<string, string> = {
   "{band} wait limit": "{band} 대기 한도",
   "An agent that waits longer than this goes first in its band, longest wait first. A P0 has no limit and goes by longest wait at once": "이보다 오래 기다린 에이전트는 같은 등급 안에서 오래 기다린 순으로 앞에 섭니다. P0에는 한도가 없어 처음부터 오래 기다린 순으로 놓입니다",
   "{minutes} min": "{minutes}분",
-  "Joins the top band after": "최상위 등급에 합류",
-  "An agent that waits this many times its band's limit is ordered with the most urgent band of its group, so none waits forever": "등급 대기 한도의 이 배수만큼 기다린 에이전트는 그룹에서 가장 급한 등급과 함께 놓여, 끝없이 기다리는 일이 없습니다",
+  "Joins the top band, P1 at most, after": "최상위 등급(P1까지)에 합류",
+  "An agent that waits this many times its band's limit is ordered with the most urgent band of its group, but never above P1, so a P0 agent always stays first": "등급 대기 한도의 이 배수만큼 기다린 에이전트는 그룹에서 가장 급한 등급과 함께 놓이지만 P1보다 위로는 가지 않아, P0 에이전트는 항상 맨 앞에 남습니다",
   "{factor}× its limit": "한도의 {factor}배",
   // Settings, Phone & devices: Access
   "Access": "접근",
