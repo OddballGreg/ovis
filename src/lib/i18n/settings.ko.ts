@@ -115,7 +115,7 @@ export const SETTINGS_KO: Record<string, string> = {
   "Sidebar filter": "사이드바 필터",
   "Show the Filter field above the sidebar's lists on this device. When off, Filter workspaces and agents in the command palette opens it.": "이 기기에서 사이드바 목록 위에 필터 입력란을 보여 줍니다. 끄면 명령 팔레트의 워크스페이스와 에이전트 필터로 엽니다.",
   "Agents order": "에이전트 정렬",
-  "Activity keeps a waiting agent on top, then the one that changed last. Longest wait lists agents asking for input, then unread finishes, then ready, then working, each oldest first. Importance keeps those groups and puts the band opencode-memory gives each OpenCode session first, P0 to P3. herdr's own order is not changed": "활동순은 응답을 기다리는 에이전트를 맨 위에 두고, 그다음 가장 최근에 바뀐 순서로 놓습니다. 오래 기다린 순은 입력을 기다리는 에이전트, 읽지 않은 완료, 준비됨, 작업 중 순으로 놓고, 각각 가장 오래된 것부터 놓습니다. 중요도순은 그 그룹을 그대로 두고, opencode-memory가 각 OpenCode 세션에 매긴 등급(P0~P3)을 앞세웁니다. herdr 자체의 순서는 바뀌지 않습니다",
+  "Activity keeps a waiting agent on top, then the one that changed last. Longest wait lists agents asking for input, then unread finishes and ready agents as one group, then working, each oldest first. Importance keeps those groups and puts the band opencode-memory gives each OpenCode session first, P0 to P3. herdr's own order is not changed": "활동순은 응답을 기다리는 에이전트를 맨 위에 두고, 그다음 가장 최근에 바뀐 순서로 놓습니다. 오래 기다린 순은 입력을 기다리는 에이전트, 읽지 않은 완료와 준비됨(한 그룹), 작업 중 순으로 놓고, 각각 가장 오래된 것부터 놓습니다. 중요도순은 그 그룹을 그대로 두고, opencode-memory가 각 OpenCode 세션에 매긴 등급(P0~P3)을 앞세웁니다. herdr 자체의 순서는 바뀌지 않습니다",
   "Workspaces": "워크스페이스순",
   "Activity": "활동순",
   "Longest wait": "오래 기다린 순",

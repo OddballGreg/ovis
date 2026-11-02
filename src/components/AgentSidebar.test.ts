@@ -139,7 +139,7 @@ describe("AgentSidebar rows", () => {
     expect(contexts(named)[1]).not.toStartWith("Refactor the cart");
   });
 
-  test("Agents order → Longest wait lists blocked, then done, ready and working rows, the oldest state change first", () => {
+  test("Agents order → Longest wait lists blocked, then done and ready rows as one group, then working, the oldest state change first", () => {
     const panes = [
       pane("w1:p1", { agent_status: "working", title: "working 1" }),
       pane("w1:p2", { agent_status: "idle", title: "idle 5" }),
@@ -154,6 +154,6 @@ describe("AgentSidebar rows", () => {
     expect(texts(render([machine(panes)], true), "agent-title")).toEqual(["working 1", "idle 5", "done 7", "blocked 9", "idle 2", "blocked 3"]);
 
     stored = { agentOrder: "waiting" };
-    expect(texts(render([machine(panes)], true), "agent-title")).toEqual(["blocked 3", "blocked 9", "done 7", "idle 2", "idle 5", "working 1"]);
+    expect(texts(render([machine(panes)], true), "agent-title")).toEqual(["blocked 3", "blocked 9", "idle 2", "idle 5", "done 7", "working 1"]);
   });
 });

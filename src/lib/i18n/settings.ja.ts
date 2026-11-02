@@ -115,7 +115,7 @@ export const SETTINGS_JA: Record<string, string> = {
   "Sidebar filter": "サイドバーの絞り込み",
   "Show the Filter field above the sidebar's lists on this device. When off, Filter workspaces and agents in the command palette opens it.": "このデバイスで、サイドバーの一覧の上に絞り込み欄を表示します。オフのときは、コマンドパレットの「ワークスペースとエージェントを絞り込む」で開きます。",
   "Agents order": "エージェントの並び順",
-  "Activity keeps a waiting agent on top, then the one that changed last. Longest wait lists agents asking for input, then unread finishes, then ready, then working, each oldest first. Importance keeps those groups and puts the band opencode-memory gives each OpenCode session first, P0 to P3. herdr's own order is not changed": "アクティビティ順では、応答待ちのエージェントを一番上に、その後は最近変化した順に並べます。待ち時間順では、入力待ち、未読の完了、準備完了、作業中の順に、それぞれ古いものから並べます。重要度順では、そのグループのまま、opencode-memory が各 OpenCode セッションに付けた帯 (P0〜P3) を先に並べます。herdr 自体の順序は変わりません",
+  "Activity keeps a waiting agent on top, then the one that changed last. Longest wait lists agents asking for input, then unread finishes and ready agents as one group, then working, each oldest first. Importance keeps those groups and puts the band opencode-memory gives each OpenCode session first, P0 to P3. herdr's own order is not changed": "アクティビティ順では、応答待ちのエージェントを一番上に、その後は最近変化した順に並べます。待ち時間順では、入力待ち、未読の完了と準備完了（同じグループ）、作業中の順に、それぞれ古いものから並べます。重要度順では、そのグループのまま、opencode-memory が各 OpenCode セッションに付けた帯 (P0〜P3) を先に並べます。herdr 自体の順序は変わりません",
   "Workspaces": "ワークスペース順",
   "Activity": "アクティビティ順",
   "Longest wait": "待ち時間順",

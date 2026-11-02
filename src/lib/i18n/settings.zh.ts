@@ -115,7 +115,7 @@ export const SETTINGS_ZH: Record<string, string> = {
   "Sidebar filter": "侧边栏筛选",
   "Show the Filter field above the sidebar's lists on this device. When off, Filter workspaces and agents in the command palette opens it.": "在此设备的侧边栏列表上方显示筛选框。关闭时，可从命令面板的“筛选工作区和代理”打开。",
   "Agents order": "代理排序",
-  "Activity keeps a waiting agent on top, then the one that changed last. Longest wait lists agents asking for input, then unread finishes, then ready, then working, each oldest first. Importance keeps those groups and puts the band opencode-memory gives each OpenCode session first, P0 to P3. herdr's own order is not changed": "按活动排序会把等待回应的代理放在最上面，其余按最近变化排序；按等待时长会依次列出等待输入、未读完成、就绪、工作中的代理，每组内最早的在前；重要度顺序保留这些分组，并把 opencode-memory 给每个 OpenCode 会话的等级（P0 到 P3）排在前面。herdr 自身的顺序不会改变",
+  "Activity keeps a waiting agent on top, then the one that changed last. Longest wait lists agents asking for input, then unread finishes and ready agents as one group, then working, each oldest first. Importance keeps those groups and puts the band opencode-memory gives each OpenCode session first, P0 to P3. herdr's own order is not changed": "按活动排序会把等待回应的代理放在最上面，其余按最近变化排序；按等待时长会依次列出等待输入、未读完成和就绪（同一组）、工作中的代理，每组内最早的在前；重要度顺序保留这些分组，并把 opencode-memory 给每个 OpenCode 会话的等级（P0 到 P3）排在前面。herdr 自身的顺序不会改变",
   "Workspaces": "工作区顺序",
   "Activity": "按活动",
   "Longest wait": "按等待时长",

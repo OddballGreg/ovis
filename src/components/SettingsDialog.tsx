@@ -374,7 +374,7 @@ function AppearancePage() {
       <SettingsRow label={t("Sidebar filter")} description={t("Show the Filter field above the sidebar's lists on this device. When off, Filter workspaces and agents in the command palette opens it.")}>
         <Toggle label={t("Sidebar filter")} checked={settings.sidebarFilter} onChange={(sidebarFilter) => update({ sidebarFilter })} />
       </SettingsRow>
-      <SettingsRow label={t("Agents order")} description={t("Activity keeps a waiting agent on top, then the one that changed last. Longest wait lists agents asking for input, then unread finishes, then ready, then working, each oldest first. Importance keeps those groups and puts the band opencode-memory gives each OpenCode session first, P0 to P3. herdr's own order is not changed")} wide>
+      <SettingsRow label={t("Agents order")} description={t("Activity keeps a waiting agent on top, then the one that changed last. Longest wait lists agents asking for input, then unread finishes and ready agents as one group, then working, each oldest first. Importance keeps those groups and puts the band opencode-memory gives each OpenCode session first, P0 to P3. herdr's own order is not changed")} wide>
         <Segmented label={t("Agents order")} value={settings.agentOrder} onChange={(agentOrder) => update({ agentOrder })} options={[{ value: "workspace", label: t("Workspaces") }, { value: "activity", label: t("Activity") }, { value: "waiting", label: t("Longest wait") }, { value: "importance", label: t("Importance") }]} />
       </SettingsRow>
       {settings.agentOrder === "importance" && <>
