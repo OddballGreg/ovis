@@ -97,8 +97,8 @@ const LAST_BAND = 3;
 
 /**
  * A band's aging threshold in ms. P0 has none to wait out: a P0 with a known wait counts as aged
- * at once, so it and a row lifted into its band are ordered by longest wait, as every band ages in
- * the objective driver's order.
+ * at once, so the P0 rows are ordered by longest wait, as every band ages in the objective
+ * driver's order.
  */
 export function agingThresholdMs(band: number, aging: ImportanceAging): number {
   return band === 1 ? aging.p1 * 60_000 : band === 2 ? aging.p2 * 60_000 : band === 3 ? aging.p3 * 60_000 : 0;
@@ -107,22 +107,30 @@ export function agingThresholdMs(band: number, aging: ImportanceAging): number {
 /** What Importance order makes of one row: its band, the band it competes in, and whether it has aged. */
 export interface ImportanceFacts { band: number; effectiveBand: number; aged: boolean; promoted: boolean; wait: number | undefined }
 
-/** A row's facts against `topBand`, the most urgent band in its status group (drive_order_key's `top_band`). */
+/** The most urgent band a waiting row can be lifted into is P1, so no wait passes a P0. */
+const LIFT_CEILING = 1;
+
+/**
+ * A row's facts against `topBand`, the most urgent band in its status group (drive_order_key's
+ * `top_band`). A row lifted for its wait competes in `topBand`, or in P1 when `topBand` is P0.
+ */
 export function importanceFacts(level: ImportanceLevel | undefined, wait: number | undefined, aging: ImportanceAging, topBand: number): ImportanceFacts {
   const band = BAND[level ?? NEUTRAL];
   const threshold = agingThresholdMs(band, aging);
   const aged = wait !== undefined && wait > threshold;
-  const promoted = aged && wait > Math.max(1, aging.factor) * threshold && topBand < band;
-  return { band, effectiveBand: promoted ? topBand : band, aged, promoted, wait };
+  const target = Math.max(topBand, LIFT_CEILING);
+  const promoted = aged && wait > Math.max(1, aging.factor) * threshold && target < band;
+  return { band, effectiveBand: promoted ? target : band, aged, promoted, wait };
 }
 
 /**
  * Importance: Longest wait's groups (blocked, unread and ready, working), and in each the
  * opencode-memory band first (P0 before P3; none known counts as P2), modelled on the objective
  * driver's order (opencode-memory analysis/objective_loop.py drive_order_key). Within a band a row
- * that has waited past its band's threshold goes first, longest wait first (a P0 always has); one
+ * that has waited past its band's threshold goes first, longest wait first (a P0 with a known wait always has); one
  * that waited `factor` times its threshold competes in its group's most urgent band as an aged row,
- * so a P3 is never starved.
+ * so a P3 is never starved. That band is P1 at most: no wait lifts a row above a P0, so a session
+ * marked P0 stays first in its group however long the others have waited.
  * The rest keep Longest wait's order: herdr's oldest state change first, then the order given.
  */
 export function importanceOrder<T>(rows: readonly T[], paneOf: (row: T) => Pick<PaneInfo, "pane_id">, statusOf: (row: T) => AgentStatus | undefined, seqs: ReadonlyMap<string, number>,

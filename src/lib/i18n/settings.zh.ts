@@ -305,8 +305,8 @@ export const SETTINGS_ZH: Record<string, string> = {
   "{band} wait limit": "{band} 等待上限",
   "An agent that waits longer than this goes first in its band, longest wait first. A P0 has no limit and goes by longest wait at once": "等待超过此时长的代理会在同一等级内按等待时长排到前面。P0 没有上限，一开始就按等待时长排列",
   "{minutes} min": "{minutes} 分钟",
-  "Joins the top band after": "并入最高等级",
-  "An agent that waits this many times its band's limit is ordered with the most urgent band of its group, so none waits forever": "等待达到其等级上限这么多倍的代理会与组内最紧急的等级一起排列，不会一直等下去",
+  "Joins the top band, P1 at most, after": "并入最高等级（最高到 P1）",
+  "An agent that waits this many times its band's limit is ordered with the most urgent band of its group, but never above P1, so a P0 agent always stays first": "等待达到其等级上限这么多倍的代理会与组内最紧急的等级一起排列，但不会高于 P1，因此 P0 代理始终排在最前",
   "{factor}× its limit": "上限的 {factor} 倍",
   // Settings, Phone & devices: Access
   "Access": "访问",

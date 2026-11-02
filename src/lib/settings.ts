@@ -31,7 +31,8 @@ export type AgentOrder = "workspace" | "activity" | "waiting" | "importance";
 export const AGENT_ORDERS: readonly AgentOrder[] = ["workspace", "activity", "waiting", "importance"];
 /**
  * Importance order's aging: minutes a P1, P2 or P3 agent waits before it goes first in its band, and how many times
- * that wait lifts it into its group's most urgent band. P0 has no wait to serve: it goes by longest wait at once.
+ * that wait lifts it into its group's most urgent band, P1 at most, so nothing passes a P0. P0 has no wait to
+ * serve: it goes by longest wait at once.
  */
 export interface ImportanceAging { p1: number; p2: number; p3: number; factor: number }
 export const DEFAULT_IMPORTANCE_AGING: ImportanceAging = { p1: 15, p2: 30, p3: 60, factor: 4 };

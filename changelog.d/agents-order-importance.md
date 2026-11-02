@@ -4,7 +4,8 @@
   group, the band that opencode-memory gives the pane's OpenCode session comes first, P0 to P3.
   Other agents count as P2. An agent that waits past its band's limit goes first in its band. The
   limits are 15 minutes for P1, 30 for P2 and 60 for P3, and you can change them in Settings. An
-  agent that waits 4 times its limit is ordered with its group's most urgent band.
+  agent that waits 4 times its limit is ordered with its group's most urgent band, but never above
+  P1, so a P0 agent stays first in its group however long the others have waited.
 - In Importance order, each OpenCode agent row shows its band, with memory's reason as the
   tooltip. The row menu sets the band by hand: Importance: Auto, or P0 to P3. If memory refuses,
   the Agents list says why.
