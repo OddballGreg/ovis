@@ -352,6 +352,9 @@ describe("OpenCode model API", () => {
       [`${base()}/api/pane/opencode-model`, "GET", undefined, 400, "method_not_allowed"],
       [`${base()}/api/pane/opencode-model`, "POST", { pane_id: "w9999:p9999" }, 400, "missing_model"],
       [`${base()}/api/pane/opencode-model`, "POST", { pane_id: "w9999:p9999", provider_id: "p", model_id: "m" }, 503, "unavailable"],
+      [`${base()}/api/pane/opencode-agent`, "GET", undefined, 400, "method_not_allowed"],
+      [`${base()}/api/pane/opencode-agent`, "POST", {}, 400, "missing_pane_id"],
+      [`${base()}/api/pane/opencode-agent`, "POST", { pane_id: "w9999:p9999", agent: "pl\u001ban" }, 400, "invalid_agent"],
     ] as const) {
       const response = await fetch(url, { method, ...(body === undefined ? {} : { body: JSON.stringify(body), headers: { "content-type": "application/json", "x-herdr-machine": "1" } }) });
       expect(response.status).toBe(status);

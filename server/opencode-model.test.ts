@@ -217,8 +217,8 @@ describe("OpenCode's model dialog on the screen", () => {
   it("reads the prompt box of a session by where it is drawn: its draft, and its footer under it", () => {
     // a session's view, with a three-line draft typed (ctrl+j) and not sent, before and after a switch
     const draft = ["Draft line one, not sent", "line two · with a dot", "line three"];
-    expect(promptBox(fixture("session-draft"))).toEqual({ draft, footer: "Kimi K3.1 Pro OpenCode Go" });
-    expect(promptBox(fixture("session-switched"))).toEqual({ draft, footer: "Agentic Chat (Claude Sonnet 5.5) GitLab Duo" });
+    expect(promptBox(fixture("session-draft"))).toEqual({ draft, footer: "Kimi K3.1 Pro OpenCode Go", agent: "Plan", popup: false });
+    expect(promptBox(fixture("session-switched"))).toEqual({ draft, footer: "Agentic Chat (Claude Sonnet 5.5) GitLab Duo", agent: "Plan", popup: false });
     // a prompt with nothing typed draws its placeholder
     expect(promptBox(fixture("closed"))?.draft).toEqual(["Ask anything… \"What is the tech stack of this project?\""]);
     expect(promptBox(`${BASE}Sessions\r\n${BASE}  nothing here`)).toBeNull();
@@ -775,6 +775,8 @@ describe("the model routes", () => {
       expect(answer.providers.map((provider) => provider.id)).toEqual(["gitlab", "go"]);
       expect(answer.current).toEqual({ provider_id: "gitlab", model_id: "opus-5-5" });
       expect(answer.footer).toBe("model");
+      // the agent the footer names before the model
+      expect(answer.agent).toBe("Build");
     });
     await withHerdr(tui, { agent: "claude", agent_status: "idle" }, async () => {
       expect(await (await call("/api/pane/opencode-models?pane_id=w1:p1")).json()).toEqual({ available: false, providers: [], current: null });

@@ -322,6 +322,14 @@ export type { DevicePairedEvent, Machine, MachineEvent, MachineRoster, PaneTarge
  *         screen cannot be read (dialog_left_open: true), so a later Enter only picks the list's
  *         highlighted row and never sends the draft; 503
  *         unavailable; 403 read_only for a watching device)
+ *  POST   /api/pane/opencode-agent { pane_id, agent? } -> { ok: true, agent } (moves the pane's
+ *         OpenCode 1.x TUI to `agent` with Tab, its agent_cycle key, reading the prompt footer back
+ *         after each press, at most as many presses as OpenCode lists primary agents (GET /agent),
+ *         else 4; no agent: one press. `agent` is the footer's agent after it. 409 busy /
+ *         dialog_open / popup_open (the autocomplete is open: Tab would accept its row) / not_ready
+ *         / aborted before any key, or dialog_open / popup_open when one opened after a press;
+ *         502 pane_error / agent_not_found / not_confirmed, with error.agent the agent the footer
+ *         shows; 403 read_only for a watching device)
  *  GET    /api/pane/files?pane_id=&q=&limit=  -> { files: string[] } (paths relative to the pane
  *         cwd matching q, for @-mentions; git ls-files when the cwd is a repo, bounded walk otherwise)
  *  GET    /api/workspace/diff/files?pane_id=&directory=&scope=&base=&head= -> RepoDiffFileList
@@ -608,6 +616,8 @@ export interface OpencodeModelCatalog {
    * name and provider. Absent without a pane and from older bridges: read it as "unreadable".
    */
   footer?: "model" | "unmatched" | "unreadable";
+  /** the agent the pane's footer names before the model (`Build`, `Plan`, a custom one); null when it names none, absent without a pane and from older bridges */
+  agent?: string | null;
 }
 
 /** POST /api/pane/opencode-model: switch the model of an OpenCode 1.x pane through its TUI's own dialog. */
@@ -621,6 +631,17 @@ export interface OpencodeModelRequest {
 export type OpencodeModelFailure =
   | "unavailable" | "not_opencode" | "busy" | "dialog_open" | "not_ready" | "aborted" | "unknown_model" | "ambiguous_model"
   | "pane_error" | "dialog_not_opened" | "model_not_found" | "not_confirmed" | "timeout";
+
+/** POST /api/pane/opencode-agent: move an OpenCode 1.x pane's TUI to an agent with Tab; no agent: to the next one. */
+export interface OpencodeAgentRequest {
+  pane_id: string;
+  agent?: string;
+}
+
+/** Why an agent switch did not happen; error.agent, when present, is the agent the footer shows. */
+export type OpencodeAgentFailure =
+  | "not_opencode" | "busy" | "read_only" | "dialog_open" | "popup_open" | "not_ready" | "aborted"
+  | "pane_error" | "agent_not_found" | "not_confirmed";
 
 /** One page a Claude Code session published with its Artifact tool: its claude.ai URL, the title of its latest publish (else the published file's name) and when that was. */
 export interface ClaudeArtifact {

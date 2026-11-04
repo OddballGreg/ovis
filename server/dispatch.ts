@@ -3,6 +3,7 @@ import { connectionData, type createCore, type SocketData } from "./core/index.t
 import type { ClientConnectionLog } from "./client-connection-log.ts";
 import type { RequestLog } from "./request-log.ts";
 import { handlePaneRequest } from "./pane-routes.ts";
+import { handleOpencodeAgentRequest } from "./opencode-agent.ts";
 import { handleOpencodeModelRequest } from "./opencode-model.ts";
 import { handleImportanceRequest } from "./importance-routes.ts";
 import { handleIntegrationsRequest } from "./integrations-routes.ts";
@@ -447,6 +448,9 @@ export async function handleRequest(request: Request, ctx: ServerContext): Promi
 
   const modelResponse = await handleOpencodeModelRequest(request, url, pathname, { serialize });
   if (modelResponse) return modelResponse;
+
+  const agentModeResponse = await handleOpencodeAgentRequest(request, pathname, { serialize, readOnly });
+  if (agentModeResponse) return agentModeResponse;
 
   const tasksResponse = await handleTasksRequest(request, url, pathname, { omo, claudeAgents, opencodeAgents });
   if (tasksResponse) return tasksResponse;

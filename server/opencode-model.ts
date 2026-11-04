@@ -357,6 +357,10 @@ export interface PromptBox {
   draft: string[];
   /** the footer's words after the agent, `<model name> <provider name>[ · <variant>]`; "" when it names no model (a shell prompt) */
   footer: string;
+  /** the footer's agent (`Build`, `Plan`, a custom one), spaces collapsed; null when the footer names no model */
+  agent: string | null;
+  /** the prompt's autocomplete is open over the box (a `┃ … ┃` panel on its border): Tab would accept its row */
+  popup: boolean;
 }
 
 /** The footer's agent, ` · `, then the rest: the agent may be two words (`Build auto`) but holds no `·`. */
@@ -396,9 +400,13 @@ export function promptBox(screen: string): PromptBox | null {
     return cellText(row, column + 3, end).trimEnd();
   };
   const words = FOOTER_WORDS.exec(inside(rows[footer]!).trim().split(/ {3,}/u)[0]!);
+  // the autocomplete is drawn on the box's own border, a panel closed by a `┃` at its right
+  const popup = rows.slice(top, footer).some((row) => cellText(row, column + 1, row.length).trimEnd().endsWith(BORDER));
   return {
     draft: rows.slice(top + 1, footer - 1).map(inside),
     footer: words === null ? "" : collapse(words[2]!),
+    agent: words === null ? null : collapse(words[1]!),
+    popup,
   };
 }
 
@@ -787,7 +795,8 @@ const NONE: OpencodeModelCatalog = { available: false, providers: [], current: n
 /** A screen read for the list's `current`, bounded. */
 const READ_MS = 2_000;
 
-function paneDeps(paneId: string): DriveDeps {
+/** The drive's deps for a pane in herdr: its visible screen with colours, its keys and its text. */
+export function paneDeps(paneId: string): DriveDeps {
   return {
     read: async (timeoutMs) => (await paneRead({ paneId, source: "visible", format: "ansi", timeoutMs })).text,
     keys: (keys, timeoutMs) => paneSendKeys(paneId, keys, undefined, undefined, timeoutMs),
@@ -832,7 +841,9 @@ export async function handleOpencodeModelRequest(request: Request, url: URL, pat
       // "unmatched" only when the footer names a model the list lacks: then the pill must not keep the last
       // one read. A footer a narrow pane cut inside a listed model's name and provider is only unreadable
       const footer = current !== null ? "model" : words && !cutListedModel(words, providers) ? "unmatched" : "unreadable";
-      return jsonResponse({ available: true, providers, current, footer } satisfies OpencodeModelCatalog);
+      // the agent the footer names first (Build, Plan): null when no prompt is drawn or it names no model
+      const agent = screen === null ? null : promptBox(screen)?.agent ?? null;
+      return jsonResponse({ available: true, providers, current, footer, agent } satisfies OpencodeModelCatalog);
     } catch (error) {
       return errorResponse(error);
     }
