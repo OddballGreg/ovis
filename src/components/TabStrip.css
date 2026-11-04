@@ -80,6 +80,11 @@
   color: var(--text-strong);
 }
 
+/* the form only carries a phone keyboard's Enter: the field lays out as if it were not there */
+.tab-strip-rename-form {
+  display: contents;
+}
+
 /* the name being typed, in the tab's own place */
 .tab-strip-rename {
   align-self: center;
