@@ -251,7 +251,9 @@ export type DiffStyle = (typeof DIFF_STYLES)[number];
 type TelemetrySourceSettings = Omit<Settings,
   "keyBarExtras" | "keyBarItems" | "shortcutOverrides" | "terminalFontFamily" | "chatFontFamily" | "uiFontFamily"
   | "quickReplies" | "usageOrder" | "usageHidden" | "fileOpen" | "webLinks" | "claudeLaunchMode" | "codexLaunchMode"
-  | "followHerdrFocus" | "composerNewTabButton" | "composerArtifacts" | "agentRowTitle" | "compactTerminalInput" | "compactKeyBarShown" | "agentsPlacement" | "agentsDrawerFold" | "terminalMirrorWrap" | "importanceAging" | "sidebarFilter" | "historyPrompts"
+  | "followHerdrFocus" | "composerNewTabButton" | "composerArtifacts"
+  | "agentRowTitle" | "compactTerminalInput" | "compactKeyBarShown" | "agentsPlacement" | "agentsDrawerFold" | "terminalMirrorWrap" | "importanceAging"
+  | "sidebarFilter" | "historyPrompts"
   | "expandThinking" | "foldWork" | "autoTabNames">;
 
 /** Compare structured custom settings by content against this app's built-in defaults. */

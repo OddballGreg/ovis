@@ -128,15 +128,15 @@ export function TabStrip({ snapshot, workspace, selectedPane, onSelectPane, onNe
   });
   const firstLines = useSyncExternalStore(subscribeTabLabels, shownTabLabels, shownTabLabels);
   const placeOf = (tab: HerdrTab): number => tabs.findIndex((candidate) => candidate.tab_id === tab.tab_id) + 1;
-  const tabPanes = (tab: HerdrTab) => panes.filter((pane) => pane.tab_id === tab.tab_id);
+  const panesOf = (tab: HerdrTab): PaneInfo[] => panes.filter((pane) => pane.tab_id === tab.tab_id);
   // a tab herdr still names by its number shows a few words of its first message (#2019); never herdr's own label
   const autoOf = (tab: HerdrTab): string | null => settings.autoTabNames
-    ? autoTabLabel(tab, tabPanes(tab), machineId, firstLines, placeOf(tab)) : null;
+    ? autoTabLabel(tab, panesOf(tab), machineId, firstLines, placeOf(tab)) : null;
   // the name herdr holds (or was just sent), which a rename compares against: the tab's own name, not its lone pane's
   const givenName = (tab: HerdrTab): string => sent?.tabId === tab.tab_id ? sent.label : tabLabel(tab, t, placeOf(tab));
   // a lone pane's given name goes before the words of a first message
   const nameOf = (tab: HerdrTab): string => sent?.tabId === tab.tab_id ? sent.label
-    : (lonePaneLabel(tabPanes(tab)) === null ? autoOf(tab) : null) ?? tabLabel(tab, t, placeOf(tab), tabPanes(tab));
+    : customTabLabel(tab, placeOf(tab)) ?? lonePaneLabel(panesOf(tab)) ?? autoOf(tab) ?? tabLabel(tab, t, placeOf(tab));
   // an edit ended by Enter or Escape is over: the blur its field sends as it goes commits nothing
   const editSettled = useRef(false);
 
@@ -270,7 +270,6 @@ export function TabStrip({ snapshot, workspace, selectedPane, onSelectPane, onNe
 
   if (!shown || loneTabHidden(cramped, tabs.length)) return null;
 
-  const panesOf = (tab: HerdrTab): PaneInfo[] => panes.filter((pane) => pane.tab_id === tab.tab_id);
   const paneFor = (tab: HerdrTab): PaneInfo | undefined => {
     const own = panesOf(tab);
     const pick = (id: string | null | undefined) => (id ? own.find((pane) => pane.pane_id === id) : undefined);
@@ -294,7 +293,6 @@ export function TabStrip({ snapshot, workspace, selectedPane, onSelectPane, onNe
     if (!blurred) refocus.current = tab.tab_id;
     setEditing(null);
     if (label === "") return;
-    // a tab given its pane's name keeps it
     if (label === givenName(tab)) return;
     setSent({ tabId: tab.tab_id, label });
     void renameTab(tab.tab_id, label).catch((reason: unknown) => {
