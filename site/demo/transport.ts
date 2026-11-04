@@ -1417,6 +1417,8 @@ async function route(url: URL, method: string, init: RequestInit | undefined, in
     return json({ available: false, providers: [], current: null } satisfies OpencodeModelCatalog);
   }
   if (path === "/api/pane/opencode-model") return error("unavailable", "the OpenCode HTTP source is not configured or does not answer", 503);
+  // the demo lists no OpenCode models, so it draws no agent chip to press either
+  if (path === "/api/pane/opencode-agent") return error("not_opencode", "the pane does not run OpenCode", 409);
   if (path === "/api/pane/prompt") return json({ prompt: keyOfPane.get(paneId) === "web" && promptOpen ? { ...PROMPT, id: promptId } : null, outcomes: outcomesByPane.get(paneId) ?? [] });
   if (path === "/api/pane/prompt/answer") {
     const body = await bodyOf(init, input);
