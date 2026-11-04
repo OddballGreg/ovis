@@ -4,6 +4,8 @@ import { connectionData } from "./connections.ts";
 import type { PaneAttachment } from "./terminal-process.ts";
 import * as terminalProcess from "./terminal-process.ts";
 import * as pty from "../pty/session.ts";
+import * as coreAttach from "../herdr-core/attach-session.ts";
+import type { CoreAttachOptions } from "../herdr-core/attach-session.ts";
 import * as herdr from "../herdr/client.ts";
 import type { ServerMessage } from "../../shared/protocol.ts";
 
@@ -207,6 +209,21 @@ async function resizableAttach() {
   spyOn(Bun, "which").mockReturnValue("/fixture/herdr");
   const attempts: pty.PtySessionOptions[] = [];
   const RealPtySession = pty.PtySession;
+  const writes: string[] = [];
+  const coreAttaches: CoreAttachOptions[] = [];
+  const RealCoreAttachSession = coreAttach.CoreAttachSession;
+  mock.module("../herdr-core/attach-session.ts", () => ({
+    CoreAttachSession: class {
+      readonly exited = Promise.withResolvers<void>().promise;
+      constructor(options: CoreAttachOptions) { coreAttaches.push(options); }
+      kill() {}
+      pause() {}
+      resume() {}
+      resize() {}
+      winch() {}
+      write(data: string) { writes.push(data); return true; }
+    },
+  }));
   mock.module("../pty/session.ts", () => ({
     PtySession: class {
       readonly exited = Promise.withResolvers<void>().promise;
@@ -216,7 +233,7 @@ async function resizableAttach() {
       resume() {}
       resize() {}
       winch() {}
-      write() { return true; }
+      write(data: string) { writes.push(data); return true; }
     },
   }));
   const frames: ServerMessage[] = [];
@@ -238,10 +255,10 @@ async function resizableAttach() {
     holdPending() {}, holdPendingPane() {}, attached() {}, inputReady() {}, end(_client, reason) { ended.push(reason); },
   });
   await registry.terminalFrames.attach(client, { type: "attach", pane_id: "p", cols: 80, rows: 24, flow_control: "ack" });
-  const attach = attempts[0];
+  const attach = attempts[0] ?? coreAttaches[0];
   if (!attach) throw new Error("no attach was started");
   return {
-    attach, ended,
+    attach, pty: attempts[0], core: coreAttaches[0], ended, writes,
     ready: (): boolean => frames.some((frame) => frame.type === "input-ready" && frame.ready !== false),
     painted: (): string => frames.flatMap((frame) => frame.type === "pty-data" ? [frame.data] : []).join(""),
     resize: (cols: number, rows: number) => registry.terminalFrames.resize(client, { type: "resize", pane_id: "p", cols, rows }),
@@ -250,8 +267,45 @@ async function resizableAttach() {
       registry.closeAttachment("p");
       registry.conversations.stop();
       mock.module("../pty/session.ts", () => ({ PtySession: RealPtySession }));
+      mock.module("../herdr-core/attach-session.ts", () => ({ CoreAttachSession: RealCoreAttachSession }));
     },
   };
+}
+
+for (const onCore of [true, false]) {
+  it(`isolates ${onCore ? "a core stream from herdr probes, with no PTY" : "herdr attach startup probes and socket env"}`, async () => {
+    const previous = process.env["OVIS_RUNTIME"];
+    const previousSocketPath = process.env["HERDR_SOCKET_PATH"];
+    process.env["OVIS_RUNTIME"] = onCore ? "herdr-core" : "herdr";
+    process.env["HERDR_SOCKET_PATH"] = "/fixture/inherited-herdr.sock";
+    try {
+      using pane = await resizableAttach();
+      const query = "\x1b[c";
+      const setup = "\x1b[?1049h";
+      pane.attach.onData(query + setup);
+      if (onCore) {
+        expect(pane.painted()).toBe(query + setup);
+        expect(pane.ready()).toBe(true);
+        expect(pane.writes).toEqual([]);
+        // the stream is a channel on the server's hc connection: no process, so no herdr socket to leak
+        expect(pane.pty).toBeUndefined();
+        expect(pane.core).toMatchObject({ terminal: "term_0", cols: 80, rows: 24 });
+      } else {
+        expect(pane.painted()).toBe("");
+        expect(pane.ready()).toBe(false);
+        expect(pane.writes).toEqual(["\x1b[?1;2c"]);
+        expect(pane.pty?.env).toEqual({ HERDR_SOCKET_PATH: herdr.herdrSocketPath() });
+        expect(pane.pty?.args).toEqual(["terminal", "attach", "term_0"]);
+        pane.attach.onData("screen");
+        expect(pane.painted()).toBe(setup + "screen");
+      }
+    } finally {
+      if (previous === undefined) delete process.env["OVIS_RUNTIME"];
+      else process.env["OVIS_RUNTIME"] = previous;
+      if (previousSocketPath === undefined) delete process.env["HERDR_SOCKET_PATH"];
+      else process.env["HERDR_SOCKET_PATH"] = previousSocketPath;
+    }
+  });
 }
 
 // #2289: a resized attach goes out on herdr's screen at the pty's grid, not on an older one

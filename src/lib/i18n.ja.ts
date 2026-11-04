@@ -12,6 +12,7 @@ import { SETUP_JA } from "./i18n/setup.ja.ts";
 import { GUIDE_JA } from "./i18n/guide.ja.ts";
 import { UPDATES_JA } from "./i18n/updates.ja.ts";
 import { PALETTE_JA } from "./i18n/palette.ja.ts";
+import { RELAY_JA } from "./i18n/relay.ja.ts";
 
 /**
  * Japanese for every `t("…")` in src/ that no part in lib/i18n/ holds: keys more than one feature
@@ -184,6 +185,7 @@ const BASE: Record<string, string> = {
   "New code": "新しいコード",
   "Paired: {name}.": "ペアリングしました: {name}。",
   "QR code that pairs a phone with code {code}": "コード {code} でスマートフォンをペアリングする QR コード",
+  "Connect a phone": "スマートフォンを接続",
   "Pairing code": "ペアリングコード",
   "Open this address on your phone": "スマートフォンでこのアドレスを開いてください",
   "{agent} is ready": "{agent} の準備ができました",
@@ -303,6 +305,7 @@ const BASE: Record<string, string> = {
   // t3code ports (a)
   // t3code ports (d)
   "Change PC": "PCを切り替え",
+  "Forget this PC": "このPCを削除",
   "Selected": "選択中",
   "Open Terminal": "ターミナルを開く",
   "Terminal keys": "ターミナルキー",
@@ -363,6 +366,7 @@ export const JA_PARTS: Record<string, Record<string, string>> = {
   guide: GUIDE_JA,
   updates: UPDATES_JA,
   palette: PALETTE_JA,
+  relay: RELAY_JA,
 };
 
 export const JA: Record<string, string> = Object.assign({}, ...Object.values(JA_PARTS));

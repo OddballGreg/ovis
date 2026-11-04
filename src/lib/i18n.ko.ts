@@ -12,6 +12,7 @@ import { SETUP_KO } from "./i18n/setup.ko.ts";
 import { GUIDE_KO } from "./i18n/guide.ko.ts";
 import { UPDATES_KO } from "./i18n/updates.ko.ts";
 import { PALETTE_KO } from "./i18n/palette.ko.ts";
+import { RELAY_KO } from "./i18n/relay.ko.ts";
 
 /**
  * Korean for every `t("…")` in src/ that no part in lib/i18n/ holds: keys more than one feature
@@ -182,6 +183,7 @@ const BASE: Record<string, string> = {
   "New code": "새 코드",
   "Paired: {name}.": "페어링됨: {name}.",
   "QR code that pairs a phone with code {code}": "코드 {code}로 폰을 페어링하는 QR 코드",
+  "Connect a phone": "폰 연결",
   "Pairing code": "페어링 코드",
   "Open this address on your phone": "폰에서 이 주소를 여세요",
   "{agent} is ready": "{agent} 준비 완료",
@@ -301,6 +303,7 @@ const BASE: Record<string, string> = {
   // t3code ports (a)
   // t3code ports (d)
   "Change PC": "PC 바꾸기",
+  "Forget this PC": "이 PC 잊기",
   "Selected": "선택됨",
   "Open Terminal": "터미널 열기",
   "Terminal keys": "터미널 키",
@@ -361,6 +364,7 @@ export const KO_PARTS: Record<string, Record<string, string>> = {
   guide: GUIDE_KO,
   updates: UPDATES_KO,
   palette: PALETTE_KO,
+  relay: RELAY_KO,
 };
 
 export const KO: Record<string, string> = Object.assign({}, ...Object.values(KO_PARTS));
