@@ -318,6 +318,11 @@ const BASE: Record<string, string> = {
   "A dialog was left open in OpenCode.": "OpenCode에 대화상자가 열린 채로 남았습니다.",
   "Couldn't switch the model in OpenCode. Choose it in the terminal with ctrl+x m.": "OpenCode에서 모델을 바꾸지 못했습니다. 터미널에서 ctrl+x m으로 고르세요.",
   "Model": "모델",
+  // the composer's OpenCode agent chip (components/OpencodeModelPicker.tsx)
+  "Agent: {agent}. Switch to {next}.": "에이전트: {agent}. {next}(으)로 전환합니다.",
+  "OpenCode is working. Switch the agent once it is idle.": "OpenCode가 작업 중입니다. 작업이 끝난 뒤 에이전트를 전환하세요.",
+  "A dialog or a list is open in OpenCode. Close it in the terminal first.": "OpenCode에서 대화 상자나 목록이 열려 있습니다. 먼저 터미널에서 닫으세요.",
+  "Couldn't switch the agent in OpenCode. Press Tab in the terminal.": "OpenCode에서 에이전트를 전환하지 못했습니다. 터미널에서 Tab을 누르세요.",
   // Recover unsent text (components/UnsentText.tsx)
   "Unsent text": "보내지 않은 글",
   "Text you had not sent when herdr restarted. A new herdr gives pane IDs out again, so it waits here rather than in a pane it was not written for. Nothing here is sent.": "herdr가 다시 시작될 때 보내지 않았던 글입니다. 새 herdr는 패널 ID를 다시 나눠 주므로, 그 글이 다른 패널에 나타나지 않도록 여기에 보관합니다. 여기서는 아무것도 보내지 않습니다.",

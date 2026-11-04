@@ -4,7 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import type { OpencodeModelCatalog } from "../../shared/protocol.ts";
 import { SettingsProvider } from "../lib/settings.ts";
-import { OpencodeModelPicker, type Switch } from "./OpencodeModelPicker.tsx";
+import { isPlanAgent, nextAgent, OpencodeModelPicker, type AgentSwitch, type Switch } from "./OpencodeModelPicker.tsx";
 
 const catalog: OpencodeModelCatalog = {
   available: true,
@@ -15,7 +15,7 @@ const catalog: OpencodeModelCatalog = {
   current: { provider_id: "duo", model_id: "opus-5" },
 };
 
-const render = (initial: { catalog?: OpencodeModelCatalog; open?: boolean; query?: string; state?: Switch }, options: { busy?: boolean; terminal?: boolean } = {}): string => {
+const render = (initial: { catalog?: OpencodeModelCatalog; open?: boolean; query?: string; state?: Switch; agentState?: AgentSwitch }, options: { busy?: boolean; terminal?: boolean } = {}): string => {
   const saved = Object.getOwnPropertyDescriptor(navigator, "languages");
   Object.defineProperty(navigator, "languages", { configurable: true, value: ["en"] });
   try {
@@ -77,5 +77,34 @@ describe("the OpenCode model chip", () => {
     const busy = render({ catalog, open: true, state: { kind: "failed", code: "busy", detail: "busy" } }, { terminal: true });
     expect(busy).not.toContain("oc-model-terminal");
     expect(render({ catalog, open: true, state: { kind: "failed", code: null, detail: "network down" } })).toContain("network down");
+  });
+});
+
+describe("the OpenCode agent chip", () => {
+  it("names the footer's agent before the model, Plan drawn apart, and offers the other", () => {
+    const plan = render({ catalog: { ...catalog, agent: "Plan" } });
+    expect(plan).toMatch(/class="oc-agent-toggle is-plan"[^>]*aria-label="Agent: Plan. Switch to Build."/u);
+    expect(plan.indexOf("oc-agent-label")).toBeLessThan(plan.indexOf("oc-model-label"));
+    const build = render({ catalog: { ...catalog, agent: "Build" } });
+    expect(build).toContain('class="oc-agent-toggle"');
+    expect(build).toContain('aria-label="Agent: Build. Switch to Plan."');
+    expect(build).toContain('class="oc-agent-label">Build<');
+  });
+
+  it("draws no chip when the footer names no agent or an older bridge does not say", () => {
+    expect(render({ catalog })).not.toContain("oc-agent-toggle");
+    expect(render({ catalog: { ...catalog, agent: null } })).not.toContain("oc-agent-toggle");
+  });
+
+  it("is not pressed while OpenCode works, and says a switch that did not happen", () => {
+    expect(render({ catalog: { ...catalog, agent: "Plan" } }, { busy: true })).toMatch(/<button type="button" class="oc-agent-toggle is-plan" disabled=""/u);
+    const failed = render({ catalog: { ...catalog, agent: "Build" }, agentState: { kind: "failed", code: "popup_open" } });
+    expect(failed).toContain("oc-agent-toggle is-error");
+    expect(failed).toContain("A dialog or a list is open in OpenCode. Close it in the terminal first.");
+  });
+
+  it("moves Plan to Build and anything else to Plan", () => {
+    expect([nextAgent("Plan"), nextAgent("plan auto"), nextAgent("Build"), nextAgent("Review")]).toEqual(["build", "build", "plan", "plan"]);
+    expect([isPlanAgent("Plan"), isPlanAgent("Planner"), isPlanAgent("Build")]).toEqual([true, false, false]);
   });
 });

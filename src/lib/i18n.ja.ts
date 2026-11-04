@@ -320,6 +320,11 @@ const BASE: Record<string, string> = {
   "A dialog was left open in OpenCode.": "OpenCode でダイアログが開いたままです。",
   "Couldn't switch the model in OpenCode. Choose it in the terminal with ctrl+x m.": "OpenCode でモデルを切り替えられませんでした。ターミナルで ctrl+x m を押して選んでください。",
   "Model": "モデル",
+  // the composer's OpenCode agent chip (components/OpencodeModelPicker.tsx)
+  "Agent: {agent}. Switch to {next}.": "エージェント: {agent}。{next} に切り替えます。",
+  "OpenCode is working. Switch the agent once it is idle.": "OpenCode が作業中です。作業が終わってからエージェントを切り替えてください。",
+  "A dialog or a list is open in OpenCode. Close it in the terminal first.": "OpenCode でダイアログまたは一覧が開いています。先にターミナルで閉じてください。",
+  "Couldn't switch the agent in OpenCode. Press Tab in the terminal.": "OpenCode でエージェントを切り替えられませんでした。ターミナルで Tab を押してください。",
   // Recover unsent text (components/UnsentText.tsx)
   "Unsent text": "未送信のテキスト",
   "Text you had not sent when herdr restarted. A new herdr gives pane IDs out again, so it waits here rather than in a pane it was not written for. Nothing here is sent.": "herdr が再起動したときに送信していなかったテキストです。新しい herdr はペイン ID を再び割り当てるため、別のペインに出ないようここに保管しています。ここからは何も送信されません。",

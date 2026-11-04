@@ -8,6 +8,7 @@ import type {
   WorkspaceMoved,
   AgentKind,
   OpencodeModelCatalog,
+  OpencodeAgentRequest,
   OpencodeModelRequest,
   AgentRenameRequest,
   AgentImportanceRequest,
@@ -1056,6 +1057,12 @@ export async function fetchAgentModels(agent: string, machineId = "local"): Prom
 /** POST /api/pane/opencode-model: picks the model in the pane's OpenCode TUI; an ApiError's `code` says why it did not (OpencodeModelFailure). */
 export async function selectPaneOpencodeModel(request: OpencodeModelRequest, machineId = "local"): Promise<void> {
   await sendJson(machinePath(machineId, "pane/opencode-model"), "POST", request);
+}
+
+/** POST /api/pane/opencode-agent: moves the pane's OpenCode TUI to an agent with Tab; the agent its footer then shows. An ApiError's `code` says why it did not (OpencodeAgentFailure). */
+export async function selectPaneOpencodeAgent(request: OpencodeAgentRequest, machineId = "local"): Promise<string> {
+  const answer = await (await sendJson(machinePath(machineId, "pane/opencode-agent"), "POST", request)).json() as { agent?: unknown };
+  return typeof answer.agent === "string" ? answer.agent : "";
 }
 
 /** GET /api/pane/files: paths under the pane's cwd matching `query`, for @-mentions. */

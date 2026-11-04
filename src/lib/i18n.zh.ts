@@ -322,6 +322,11 @@ const BASE: Record<string, string> = {
   "A dialog was left open in OpenCode.": "OpenCode 中仍有一个对话框处于打开状态。",
   "Couldn't switch the model in OpenCode. Choose it in the terminal with ctrl+x m.": "无法在 OpenCode 中切换模型。请在终端中按 ctrl+x m 选择。",
   "Model": "模型",
+  // the composer's OpenCode agent chip (components/OpencodeModelPicker.tsx)
+  "Agent: {agent}. Switch to {next}.": "代理: {agent}。切换到 {next}。",
+  "OpenCode is working. Switch the agent once it is idle.": "OpenCode 正在工作。请在空闲后再切换代理。",
+  "A dialog or a list is open in OpenCode. Close it in the terminal first.": "OpenCode 中有对话框或列表处于打开状态。请先在终端中关闭它。",
+  "Couldn't switch the agent in OpenCode. Press Tab in the terminal.": "无法在 OpenCode 中切换代理。请在终端中按 Tab。",
   // Recover unsent text (components/UnsentText.tsx)
   "Unsent text": "未发送的文本",
   "Text you had not sent when herdr restarted. A new herdr gives pane IDs out again, so it waits here rather than in a pane it was not written for. Nothing here is sent.": "herdr 重启时尚未发送的文本。新的 herdr 会重新分配面板 ID，因此这些文本保存在这里，而不会出现在不属于它的面板中。这里不会发送任何内容。",

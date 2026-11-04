@@ -31,6 +31,7 @@ export function useMachineApi() {
     fetchPaneOpencodeModels: (pane: string) => api.fetchPaneOpencodeModels(pane, id),
     fetchAgentModels: (agent: string) => api.fetchAgentModels(agent, id),
     selectPaneOpencodeModel: (request: Parameters<typeof api.selectPaneOpencodeModel>[0]) => api.selectPaneOpencodeModel(request, id),
+    selectPaneOpencodeAgent: (request: Parameters<typeof api.selectPaneOpencodeAgent>[0]) => api.selectPaneOpencodeAgent(request, id),
     fetchPaneArtifacts: (pane: string) => api.fetchPaneArtifacts(pane, id),
     closePane: (pane: string) => api.closePane(pane, id),
     focusPane: (pane: string) => api.focusPane(pane, id),
