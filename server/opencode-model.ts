@@ -834,15 +834,16 @@ export async function handleOpencodeModelRequest(request: Request, url: URL, pat
       const pane = await paneGet(paneId);
       if (resolveAgent(pane).agent !== "opencode") return jsonResponse(NONE);
       const providers = await opencodeModelCatalog();
-      if (providers === null) return jsonResponse(NONE);
       const screen = await paneRead({ paneId, source: "visible", format: "text", timeoutMs: READ_MS }).then((read) => read.text, () => null);
+      // the agent the footer names first (Build, Plan): null when no prompt is drawn or it names no model. It is read
+      // off the screen, so it is said without the HTTP source too
+      const agent = screen === null ? null : promptBox(screen)?.agent ?? null;
+      if (providers === null) return jsonResponse({ ...NONE, agent } satisfies OpencodeModelCatalog);
       const current = screen === null ? null : footerModel(screen, providers);
       const words = screen === null ? null : promptFooter(screen);
       // "unmatched" only when the footer names a model the list lacks: then the pill must not keep the last
       // one read. A footer a narrow pane cut inside a listed model's name and provider is only unreadable
       const footer = current !== null ? "model" : words && !cutListedModel(words, providers) ? "unmatched" : "unreadable";
-      // the agent the footer names first (Build, Plan): null when no prompt is drawn or it names no model
-      const agent = screen === null ? null : promptBox(screen)?.agent ?? null;
       return jsonResponse({ available: true, providers, current, footer, agent } satisfies OpencodeModelCatalog);
     } catch (error) {
       return errorResponse(error);

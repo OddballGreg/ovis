@@ -130,7 +130,7 @@ export function OpencodeModelPicker({ paneId, busy, disabled, onOpenTerminal, on
   }, [onCurrent, available, unmatched, shownName, shownId, shownVariant]);
   useEffect(() => () => onCurrent?.(null), [onCurrent]);
 
-  if (catalog === null || !catalog.available) return null;
+  if (catalog === null || (!catalog.available && !catalog.agent)) return null;
 
   const current = catalog.current;
   const currentName = opencodeModelName(catalog, current);
@@ -190,6 +190,9 @@ export function OpencodeModelPicker({ paneId, busy, disabled, onOpenTerminal, on
     <span className="oc-agent-label">{agent}</span>
     {agentFailure !== null && <span className="visually-hidden" role="status">{agentFailure}</span>}
   </button>;
+
+  // without the HTTP source no model is listed, but the footer's agent is still read: the chip alone
+  if (!catalog.available) return <span className="oc-model">{agentChip}</span>;
 
   return <span className="oc-model" ref={root}>
     {agentChip}

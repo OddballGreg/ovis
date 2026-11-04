@@ -783,6 +783,14 @@ describe("the model routes", () => {
     });
   });
 
+  it("names the footer's agent without the HTTP source, the list empty", async () => {
+    opencodeModelOptions.endpoint = async () => null;
+    const tui = new FakeTui(MODELS, MODELS[2]!);
+    await withHerdr(tui, { agent: "opencode", agent_status: "idle" }, async () => {
+      expect(await (await call("/api/pane/opencode-models?pane_id=w1:p1")).json()).toEqual({ available: false, providers: [], current: null, agent: "Build" });
+    });
+  });
+
   it("lists the models for a new session's --model, and none for another agent", async () => {
     configure();
     expect((await (await call("/api/agent/models?agent=opencode")).json() as OpencodeModelCatalog).providers.length).toBe(2);

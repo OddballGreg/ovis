@@ -616,7 +616,7 @@ export interface OpencodeModelCatalog {
    * name and provider. Absent without a pane and from older bridges: read it as "unreadable".
    */
   footer?: "model" | "unmatched" | "unreadable";
-  /** the agent the pane's footer names before the model (`Build`, `Plan`, a custom one); null when it names none, absent without a pane and from older bridges */
+  /** the agent an OpenCode pane's footer names before the model (`Build`, `Plan`, a custom one), read off the screen, so also while `available` is false; null when it names none; absent without a pane, for another agent and from older bridges */
   agent?: string | null;
 }
 

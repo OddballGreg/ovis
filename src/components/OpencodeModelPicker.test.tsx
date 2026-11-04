@@ -91,6 +91,12 @@ describe("the OpenCode agent chip", () => {
     expect(build).toContain('class="oc-agent-label">Build<');
   });
 
+  it("is drawn alone when no model is listed (no HTTP source) but the footer names the agent", () => {
+    const alone = render({ catalog: { available: false, providers: [], current: null, agent: "Plan" } });
+    expect(alone).toContain("oc-agent-toggle is-plan");
+    expect(alone).not.toContain("oc-model-toggle");
+  });
+
   it("draws no chip when the footer names no agent or an older bridge does not say", () => {
     expect(render({ catalog })).not.toContain("oc-agent-toggle");
     expect(render({ catalog: { ...catalog, agent: null } })).not.toContain("oc-agent-toggle");
