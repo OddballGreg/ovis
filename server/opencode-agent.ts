@@ -9,8 +9,9 @@
  * until it names the agent asked for. Tab keeps the draft, but with the prompt's autocomplete open
  * it accepts the row under the cursor instead, so nothing is sent while a dialog or the autocomplete
  * is drawn. The presses are capped at the number of primary agents OpenCode lists (GET /agent on the
- * HTTP source, when it answers), else at OPENCODE_AGENT_MAX_TABS: a cap reached means the agent asked
- * for is not one Tab reaches.
+ * HTTP source, when it answers), else at OPENCODE_AGENT_MAX_TABS, and stop early once the footer is
+ * back on the agent it started from (every agent Tab reaches has been seen) or OPENCODE_AGENT_DRIVE_MS
+ * has gone: either means the agent asked for is not one Tab reaches.
  */
 import type { OpencodeAgentFailure } from "../shared/protocol.ts";
 import { paneGet } from "./herdr/client.ts";
@@ -24,7 +25,7 @@ export const OPENCODE_AGENT_MAX_TABS = 4;
 /** The footer shows the next agent within this of a Tab. */
 const STEP_MS = 1_500;
 /** The whole switch, from the first key to the footer read back. */
-export const OPENCODE_AGENT_DRIVE_MS = 6_000;
+export const OPENCODE_AGENT_DRIVE_MS = 8_000;
 const POLL_MS = 50;
 const IO_MS = 2_000;
 const IO_MIN_MS = 100;
@@ -98,6 +99,8 @@ export async function cycleAgent(deps: DriveDeps, target: string | undefined, ma
     if (next === null) return refuse("not_confirmed", `its footer shows ${JSON.stringify(shown)}`, shown);
     shown = next;
     if (target === undefined || agentNamed(shown, target)) return { ok: true, agent: shown };
+    // back where it started: every agent Tab reaches has been seen, and the pane is left as it was
+    if (shown === first.agent) break;
     if (deps.now() >= deadline) break;
   }
   return refuse("agent_not_found", `${JSON.stringify(target)}; its footer shows ${JSON.stringify(shown)}`, shown);

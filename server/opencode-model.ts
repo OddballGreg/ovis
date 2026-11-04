@@ -400,8 +400,10 @@ export function promptBox(screen: string): PromptBox | null {
     return cellText(row, column + 3, end).trimEnd();
   };
   const words = FOOTER_WORDS.exec(inside(rows[footer]!).trim().split(/ {3,}/u)[0]!);
-  // the autocomplete is drawn on the box's own border, a panel closed by a `┃` at its right
-  const popup = rows.slice(top, footer).some((row) => cellText(row, column + 1, row.length).trimEnd().endsWith(BORDER));
+  // the autocomplete is drawn on the box's own border, a panel closed by a `┃` at its right; a narrow pane may cut
+  // that edge off, so a row whose words start one column in, not after the box's two-column padding, is one too
+  const popup = rows.slice(top, footer).some((row) => cellText(row, column + 1, row.length).trimEnd().endsWith(BORDER)
+    || (row[column + 1]?.ch === " " && (row[column + 2]?.ch ?? " ") !== " "));
   return {
     draft: rows.slice(top + 1, footer - 1).map(inside),
     footer: words === null ? "" : collapse(words[2]!),

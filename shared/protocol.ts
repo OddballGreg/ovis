@@ -325,7 +325,8 @@ export type { DevicePairedEvent, Machine, MachineEvent, MachineRoster, PaneTarge
  *  POST   /api/pane/opencode-agent { pane_id, agent? } -> { ok: true, agent } (moves the pane's
  *         OpenCode 1.x TUI to `agent` with Tab, its agent_cycle key, reading the prompt footer back
  *         after each press, at most as many presses as OpenCode lists primary agents (GET /agent),
- *         else 4; no agent: one press. `agent` is the footer's agent after it. 409 busy /
+ *         else 4, stopping once the footer is back on the agent it started from or about 8 s have
+ *         gone; no agent: one press. `agent` is the footer's agent after it. 409 busy /
  *         dialog_open / popup_open (the autocomplete is open: Tab would accept its row) / not_ready
  *         / aborted before any key, or dialog_open / popup_open when one opened after a press;
  *         502 pane_error / agent_not_found / not_confirmed, with error.agent the agent the footer

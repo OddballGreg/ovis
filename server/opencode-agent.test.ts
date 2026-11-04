@@ -29,6 +29,13 @@ describe("the agent the prompt's footer names", () => {
     expect(promptBox(fixture("plan-slash"))).toMatchObject({ agent: "Plan", popup: true });
   });
 
+  it("sees the autocomplete a narrow pane cut at its right edge", () => {
+    const plain = (row: string): string => row.replace(/\u001b\[[0-9;]*m/gu, "");
+    const cut = fixture("plan-slash").split("\n").map((row) => plain(row).includes("┃ /") ? `${row.slice(0, row.lastIndexOf("┃"))} ` : row).join("\n");
+    expect(cut).not.toBe(fixture("plan-slash"));
+    expect(promptBox(cut)?.popup).toBe(true);
+  });
+
   it("reads an agent of two words, and none from a footer that names no model", () => {
     expect(promptBox(fixture("plan-home").replace("Plan", "Plan auto"))?.agent).toBe("Plan auto");
     const shell = fixture("plan-home").split("\n").map((row) => row.includes("Agentic Chat") ? `${BASE}  ┃  Shell` : row).join("\n");
@@ -113,6 +120,12 @@ describe("switching the agent with Tab", () => {
     const result = await cycleAgent(tui.deps(), "deploy", 2);
     expect(result).toMatchObject({ ok: false, code: "agent_not_found", agent: "Build" });
     expect(tui.sent).toEqual(["tab", "tab"]);
+  });
+
+  it("stops once Tab is back on the agent it started from, leaving the pane as it was", async () => {
+    const tui = new FakeTui(["Build", "Plan", "Review"]);
+    expect(await cycleAgent(tui.deps(), "deploy", 4)).toMatchObject({ ok: false, code: "agent_not_found", agent: "Build" });
+    expect(tui.sent).toEqual(["tab", "tab", "tab"]);
   });
 
   it("says a Tab the footer did not answer, and sends no second", async () => {

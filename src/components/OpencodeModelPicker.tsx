@@ -129,6 +129,11 @@ export function OpencodeModelPicker({ paneId, busy, disabled, onOpenTerminal, on
     else if (shownName !== null && shownId !== null) onCurrent?.({ id: shownId, name: shownName, variant: shownVariant });
   }, [onCurrent, available, unmatched, shownName, shownId, shownVariant]);
   useEffect(() => () => onCurrent?.(null), [onCurrent]);
+  // a new agent in the footer (switched here or in the terminal) is no longer the switch that failed
+  const footerAgent = catalog?.agent ?? null;
+  useEffect(() => { setAgentState((was) => was.kind === "failed" ? { kind: "idle" } : was); }, [footerAgent]);
+  // no models listed any more: the list is not left open behind the agent chip
+  useEffect(() => { if (available === false) setOpen(false); }, [available]);
 
   if (catalog === null || (!catalog.available && !catalog.agent)) return null;
 
