@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 
-import { customTabLabel, tabLabel } from "./tabName.ts";
+import { customTabLabel, lonePaneLabel, tabLabel } from "./tabName.ts";
 
 const t = (key: string, vars?: Record<string, string | number>): string => key.replace("{n}", String(vars?.["n"]));
 
@@ -32,5 +32,15 @@ describe("tab names", () => {
   it("treats an empty label as herdr's automatic name", () => {
     expect(customTabLabel({ label: "", number: 3 }, 2)).toBeNull();
     expect(tabLabel({ label: "", number: 3 }, t, 2)).toBe("Tab 2");
+  });
+
+  it("goes by its lone pane's name until the tab itself is named", () => {
+    expect(tabLabel({ label: "8", number: 8 }, t, 8, [{ label: " review " }])).toBe("review");
+    expect(tabLabel({ label: "build", number: 8 }, t, 8, [{ label: "review" }])).toBe("build");
+    expect(tabLabel({ label: "8", number: 8 }, t, 8, [{ label: "review" }, { label: "other" }])).toBe("Tab 8");
+    expect(tabLabel({ label: "8", number: 8 }, t, 8, [{ label: "  " }])).toBe("Tab 8");
+    expect(tabLabel({ label: "8", number: 8 }, t, 8, [{ label: null }])).toBe("Tab 8");
+    expect(lonePaneLabel([{ label: "review" }])).toBe("review");
+    expect(lonePaneLabel([])).toBeNull();
   });
 });

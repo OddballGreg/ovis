@@ -9,7 +9,14 @@ export function customTabLabel(tab: Pick<HerdrTab, "label" | "number">, place: n
   return label === "" || label === String(place) ? null : label;
 }
 
+/** A tab of one pane that was named (Rename pane) goes by that pane's name until the tab is named. */
+export function lonePaneLabel(panes: readonly { label?: string | null }[]): string | null {
+  if (panes.length !== 1) return null;
+  const label = panes[0]?.label?.trim() ?? "";
+  return label === "" ? null : label;
+}
+
 /** herdr names a tab by its place until it is renamed: the strip says so in words. */
-export function tabLabel(tab: Pick<HerdrTab, "label" | "number">, t: (key: string, vars?: Record<string, string | number>) => string, place: number = tab.number): string {
-  return customTabLabel(tab, place) ?? t("Tab {n}", { n: place });
+export function tabLabel(tab: Pick<HerdrTab, "label" | "number">, t: (key: string, vars?: Record<string, string | number>) => string, place: number = tab.number, panes: readonly { label?: string | null }[] = []): string {
+  return customTabLabel(tab, place) ?? lonePaneLabel(panes) ?? t("Tab {n}", { n: place });
 }
