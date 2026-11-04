@@ -121,7 +121,10 @@ export function TabStrip({ snapshot, workspace, selectedPane, onSelectPane, onNe
       move: paneDrag.move, back: paneDrag.back, drop: paneDrag.drop, cancel: paneDrag.cancel,
     } : undefined,
   });
-  const nameOf = (tab: HerdrTab): string => sent?.tabId === tab.tab_id ? sent.label : tabLabel(tab, t, tabs.findIndex((candidate) => candidate.tab_id === tab.tab_id) + 1);
+  const nameOf = (tab: HerdrTab): string => sent?.tabId === tab.tab_id ? sent.label
+    : tabLabel(tab, t, tabs.findIndex((candidate) => candidate.tab_id === tab.tab_id) + 1, panes.filter((pane) => pane.tab_id === tab.tab_id));
+  // an edit ended by Enter or Escape is over: the blur its field sends as it goes commits nothing
+  const editSettled = useRef(false);
 
   useEffect(() => {
     // the pane each tab was last seen on, per PC: a tab clicked again opens where it was left
@@ -238,6 +241,7 @@ export function TabStrip({ snapshot, workspace, selectedPane, onSelectPane, onNe
 
   const beginRename = (tab: HerdrTab): void => {
     setError(null);
+    editSettled.current = false;
     setEditing({ tabId: tab.tab_id, value: sent?.tabId === tab.tab_id ? sent.label : customTabLabel(tab, tabs.findIndex((candidate) => candidate.tab_id === tab.tab_id) + 1) ?? "" });
   };
   // The request is one-shot (the app clears it once handled), so the effect depends on it alone: a
@@ -267,12 +271,18 @@ export function TabStrip({ snapshot, workspace, selectedPane, onSelectPane, onNe
   };
 
   // an empty name is not sent: herdr would keep it, and its own tab row would show nothing
-  const saveRename = (tab: HerdrTab): void => {
+  // a click away keeps what was typed, as Enter does; an emptied field then only closes
+  const saveRename = (tab: HerdrTab, blurred = false): void => {
+    if (editSettled.current) return;
     const label = editing?.value.trim() ?? "";
-    if (label === "") { setError(t("A tab needs a name.")); return; }
-    refocus.current = tab.tab_id;
+    if (label === "" && !blurred) { setError(t("A tab needs a name.")); return; }
+    editSettled.current = true;
+    if (!blurred) refocus.current = tab.tab_id;
     setEditing(null);
-    if (label === nameOf(tab)) return;
+    if (label === "") return;
+    // the tab's own name, not its lone pane's: a tab given its pane's name keeps it
+    const place = tabs.findIndex((candidate) => candidate.tab_id === tab.tab_id) + 1;
+    if (label === (sent?.tabId === tab.tab_id ? sent.label : tabLabel(tab, t, place))) return;
     setSent({ tabId: tab.tab_id, label });
     void renameTab(tab.tab_id, label).catch((reason: unknown) => {
       if (latest.current.machineId !== machineId || latest.current.workspaceId !== workspace.workspace_id) return;
@@ -374,14 +384,18 @@ export function TabStrip({ snapshot, workspace, selectedPane, onSelectPane, onNe
     const paneItems = touch && tab.tab_id === selectedPane.tab_id
       ? (paneActions?.(selectedPane.pane_id) ?? []).filter((item) => !soloPanes
         || (item.id === "zoom" ? layout?.zoomed : item.id !== "split-right" && item.id !== "split-down")) : [];
+    // with the pane's own actions beside it, Rename tab leads them: Rename pane names a pane the strip does not show
+    const tabItems = tabActions(tab);
+    const renameItem = paneItems.length > 0 ? tabItems.filter((item) => item.id === "rename-tab") : [];
     const groups: RowMenuItem[][] = [
       own.length < 2 ? [] : own.map((pane): RowMenuItem => ({
         id: `pane:${pane.pane_id}`, label: displayPaneTitle(pane), icon: Terminal,
         glyph: pane.agent ? <AgentMark agent={pane.agent} size={16} /> : undefined,
         current: pane.pane_id === selectedPane.pane_id, run: () => onSelectPane(pane.pane_id),
       })),
+      renameItem,
       paneItems,
-      tabActions(tab),
+      renameItem.length > 0 ? tabItems.filter((item) => item.id !== "rename-tab") : tabItems,
     ].filter((group) => group.length > 0);
     return groups.flatMap((group, at) => at === 0 ? group : group.map((item, index) => index === 0 ? { ...item, divider: true } : item));
   };
@@ -428,25 +442,29 @@ export function TabStrip({ snapshot, workspace, selectedPane, onSelectPane, onNe
           return (
             <div className={`tab-strip-item${active ? " is-active" : ""}${own.length > 1 ? " has-panes" : ""}${editing?.tabId === tab.tab_id ? " is-editing" : ""}${reorder.drag?.tabId === tab.tab_id ? " is-dragging" : ""}${reorder.drag?.boundary === index ? " is-drop-before" : ""}${reorder.drag?.boundary === tabs.length && index === tabs.length - 1 ? " is-drop-after" : ""}`} key={tab.tab_id}>
               {editing?.tabId === tab.tab_id ? (
+                // a phone keyboard's Enter (Gboard sends keyCode 229) submits the form, as any Enter does
+                <form className="tab-strip-rename-form" onSubmit={(event) => { event.preventDefault(); event.stopPropagation(); saveRename(tab); }}>
                 <input
                   className="input tab-strip-rename"
                   aria-label={t("Tab name")}
                   autoFocus
+                  enterKeyHint="done"
                   size={Math.max(8, editing.value.length + 1)}
                   maxLength={MAX_LABEL_CHARS}
                   placeholder={name}
                   value={editing.value}
                   onFocus={(event) => event.currentTarget.select()}
                   onChange={(event) => setEditing({ tabId: tab.tab_id, value: event.target.value })}
-                  onBlur={() => setEditing(null)}
+                  // the window losing the focus leaves the field open; a click elsewhere commits it
+                  onBlur={(event) => { if (document.activeElement !== event.currentTarget) saveRename(tab, true); }}
                   onKeyDown={(event) => {
                     event.stopPropagation();
-                    // an IME's Enter and Escape are the composition's, not the field's
+                    // an IME's Escape is the composition's, not the field's
                     if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
-                    if (event.key === "Enter") saveRename(tab);
-                    if (event.key === "Escape") { refocus.current = tab.tab_id; setEditing(null); }
+                    if (event.key === "Escape") { editSettled.current = true; refocus.current = tab.tab_id; setEditing(null); }
                   }}
                 />
+                </form>
               ) : (
                 <button
                   type="button"

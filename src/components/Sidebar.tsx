@@ -479,22 +479,29 @@ export function Sidebar({ snapshot, online, selectedPaneId, actions, watching = 
   editingRef.current = { workspace: editingWorkspaceId };
   const editorOpen = (): boolean => editingRef.current.workspace !== null;
 
+  // an edit ended by Enter or Escape is over: the blur its field sends as it goes commits nothing
+  const workspaceEditSettled = useRef(false);
   const beginWorkspaceRename = (workspace: WorkspaceInfo): void => {
+    workspaceEditSettled.current = false;
     setEditingWorkspaceId(workspace.workspace_id);
     setWorkspaceLabel(workspace.label);
   };
 
-  const saveWorkspaceRename = (workspaceId: string): void => {
+  const saveWorkspaceRename = (workspaceId: string, blurred = false): void => {
+    if (workspaceEditSettled.current) return;
     const typed = workspaceLabel;
     const label = typed.trim();
-    // herdr would keep an empty name, and the row would show none: the editor stays open
-    if (label === "") { noteError(t("A workspace needs a name."), workspaceId); return; }
+    // herdr would keep an empty name, and the row would show none: the editor stays open, and a click away only closes it
+    if (label === "" && !blurred) { noteError(t("A workspace needs a name."), workspaceId); return; }
+    workspaceEditSettled.current = true;
     setEditingWorkspaceId(null);
+    if (label === "") return;
     // a name herdr set longer than the field allows is not sent back to be refused
     if (label === snapshotRef.current?.workspaces.find((candidate) => candidate.workspace_id === workspaceId)?.label) return;
     void renameWorkspace(workspaceId, label).catch((reason: unknown) => {
       // as for a pane: the typed name survives a failed request, for as long as the workspace does
       if (!editorOpen() && snapshotRef.current?.workspaces.some((candidate) => candidate.workspace_id === workspaceId)) {
+        workspaceEditSettled.current = false;
         setEditingWorkspaceId(workspaceId);
         setWorkspaceLabel(typed);
       }
@@ -727,22 +734,24 @@ export function Sidebar({ snapshot, online, selectedPaneId, actions, watching = 
           }}
         >
           {rowMark(pane, workspace.worktree?.is_linked_worktree === true)}
-          {editingWorkspace ? <input
+          {editingWorkspace ? <form className="workspace-rename-form" onClick={(event) => event.stopPropagation()}
+            onSubmit={(event) => { event.preventDefault(); event.stopPropagation(); saveWorkspaceRename(workspace.workspace_id); }}><input
             className="input workspace-rename-input"
             aria-label={t("Workspace name")}
             autoFocus
+            enterKeyHint="done"
             maxLength={MAX_LABEL_CHARS}
             value={workspaceLabel}
             onClick={(event) => event.stopPropagation()}
             onChange={(event) => setWorkspaceLabel(event.target.value)}
-            onBlur={() => setEditingWorkspaceId(null)}
+            // a click elsewhere keeps the typed name; the window losing the focus leaves the field open
+            onBlur={(event) => { if (document.activeElement !== event.currentTarget) saveWorkspaceRename(workspace.workspace_id, true); }}
             onKeyDown={(event) => {
               event.stopPropagation();
               if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
-              if (event.key === "Enter") saveWorkspaceRename(workspace.workspace_id);
-              if (event.key === "Escape") setEditingWorkspaceId(null);
+              if (event.key === "Escape") { workspaceEditSettled.current = true; setEditingWorkspaceId(null); }
             }}
-          /> : lines ? <span className="workspace-copy is-two-line">
+          /></form> : lines ? <span className="workspace-copy is-two-line">
             <span className="workspace-line">
               <span className="workspace-name">{lines.title}</span>
               {foldedCount > 0 && <span className="workspace-fold-count" aria-hidden="true">+{foldedCount}</span>}

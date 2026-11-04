@@ -5,7 +5,7 @@ import { copyFileSync, chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSy
 import { homedir, tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { chromium } from "playwright-core";
-import type { BrowserContext, Page } from "playwright-core";
+import type { BrowserContext, Page, Request } from "playwright-core";
 import { createServer } from "../server/index.ts";
 import { herdrRpc, sessionSnapshot, workspaceCreate, workspaceClose } from "../server/herdr/client.ts";
 import type { SessionSnapshot, WorkspaceCreated, WorktreeOpened } from "../shared/protocol.ts";
@@ -1925,6 +1925,26 @@ try {
   await tabName.fill("build");
   await page.keyboard.press("Enter");
   await until(async () => (await tabsInHerdr()).join() === "first,build", "the menu's rename reaches herdr");
+  // a click away keeps the typed name, as Enter does, and sends it
+  const tabRenames: string[] = [];
+  const onTabRename = (request: Request): void => { if (request.method() === "POST" && new URL(request.url()).pathname === "/api/tab/rename") tabRenames.push(request.postData() ?? ""); };
+  page.on("request", onTabRename);
+  await strip.getByRole("tab", { name: "build", exact: true }).dblclick();
+  await tabName.fill("clicked-away");
+  await page.locator(".tab-strip-add").focus();
+  await tabName.waitFor({ state: "detached" });
+  await until(async () => (await tabsInHerdr()).join() === "first,clicked-away", "a click away from the field renames the tab");
+  assert.deepEqual(await strip.getByRole("tab").allTextContents(), ["first", "clicked-away"], "the strip shows the name kept by the click away");
+  assert.ok(tabRenames.some((body) => body.includes("clicked-away")), `a click away posts /api/tab/rename: ${JSON.stringify(tabRenames)}`);
+  // a phone keyboard's Enter comes as keyCode 229: the form's submit still saves the name
+  await strip.getByRole("tab", { name: "clicked-away", exact: true }).dblclick();
+  await tabName.fill("build");
+  await tabName.dispatchEvent("keydown", { key: "Enter", keyCode: 229, bubbles: true });
+  assert.equal(await tabName.getAttribute("enterkeyhint"), "done", "the phone keyboard's Enter key says Done");
+  await tabName.evaluate((input) => (input as HTMLInputElement).form?.requestSubmit());
+  await tabName.waitFor({ state: "detached" });
+  await until(async () => (await tabsInHerdr()).join() === "first,build", "a keyCode 229 Enter that submits the form renames the tab");
+  page.off("request", onTabRename);
   // One new neighbour puts build between two tabs for both adjacent move actions.
   await herdrRpc("pane.focus", { pane_id: createdTab.pane_id });
   const neighbour = await herdrRpc<{ tab: { tab_id: string } }>("tab.create", { workspace_id: created.workspace_id, label: "neighbour", focus: false });
@@ -1943,8 +1963,9 @@ try {
   const tabSheet = tabPhonePage.getByRole("dialog", { name: "build", exact: true });
   await tabSheet.waitFor();
   const touchTabItems = await tabSheet.locator(".row-sheet-item").allTextContents();
-  assert.deepEqual(touchTabItems.slice(-6), ["Move tab left", "Move tab right", "Move to workspace…", "New tab with agent…", "Rename tab", "Close tab"], "a tab between siblings offers both adjacent moves on touch");
+  assert.deepEqual(touchTabItems.slice(-5), ["Move tab left", "Move tab right", "Move to workspace…", "New tab with agent…", "Close tab"], "a tab between siblings offers both adjacent moves on touch");
   assert.ok(touchTabItems.includes("Rename pane") && touchTabItems.includes("Close pane"), "the touch menu carries the open pane's actions");
+  assert.equal(touchTabItems[0], "Rename tab", "a one-pane tab's touch menu leads with Rename tab, before the pane's own Rename pane");
   await tabSheet.getByRole("button", { name: "Cancel", exact: true }).tap();
   await tabSheet.waitFor({ state: "detached" });
   if (tabPhoneEvidence) await tabPhoneEvidence.finish();
