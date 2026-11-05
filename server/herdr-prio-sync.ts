@@ -116,6 +116,8 @@ export class HerdrPrioSync {
   private stopped = false;
   /** why the last pass failed, said once until a pass works again */
   private down: string | null = null;
+  /** the first pass that worked was said */
+  private announced = false;
 
   constructor(private readonly deps: HerdrPrioSyncDeps) {
     this.now = deps.now ?? Date.now;
@@ -185,6 +187,8 @@ export class HerdrPrioSync {
     }
     if (failed !== null) { this.fail(failed); return; }
     if (this.down !== null) this.deps.log?.("herdr prio sync: herdr takes the sidebar order again");
+    else if (!this.announced) this.deps.log?.(`herdr prio sync: herdr's sidebar follows Importance order, ${rows.length} panes reported as ${PRIO_SOURCE}`);
+    this.announced = true;
     this.down = null;
   }
 

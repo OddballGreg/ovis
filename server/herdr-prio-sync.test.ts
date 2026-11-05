@@ -152,6 +152,7 @@ describe("the sync", () => {
       { pane_id: "b", source: PRIO_SOURCE, tokens: { prio: "P2", rank: "0002" }, ttl_ms: TOKEN_TTL_MS },
     ]);
     expect(TOKEN_TTL_MS).toBe(3 * REREPORT_MS);
+    expect(h.logs).toEqual([`herdr prio sync: herdr's sidebar follows Importance order, 2 panes reported as ${PRIO_SOURCE}`]);
     h.reports.length = 0;
     h.advance(1_000);
     await h.sync.sync();
