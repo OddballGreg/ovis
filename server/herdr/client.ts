@@ -12,7 +12,7 @@ import type {
   PaneFindResponse,
   PaneFindMatch,
 } from "../../shared/protocol.ts";
-import type { AgentInfo, AgentManifestInfo, AgentStartParams, PaneInfo, PaneLayoutSnapshot, PaneProcessInfo, PaneScrollInfo, TabInfo, WorkspaceInfo } from "../../shared/herdr-api.generated.ts";
+import type { AgentInfo, AgentManifestInfo, AgentStartParams, PaneInfo, PaneLayoutSnapshot, PaneProcessInfo, PaneReportMetadataParams, PaneScrollInfo, TabInfo, WorkspaceInfo } from "../../shared/herdr-api.generated.ts";
 import type { HerdrMethod, HerdrMethods, SingleHerdrMethod, UntypedHerdrMethod } from "./methods.ts";
 import type { HerdrIdentity } from "../../shared/machines.ts";
 
@@ -506,6 +506,14 @@ export async function agentStart(
     socketPath,
     options.timeoutMs,
   );
+}
+
+/**
+ * Display metadata a source reports on a pane (`herdr pane report-metadata`). herdr keeps one
+ * token map per pane: a token is the last report's whatever its source, and leaves after `ttl_ms`.
+ */
+export async function paneReportMetadata(params: PaneReportMetadataParams, socketPath?: string): Promise<void> {
+  await herdrRpc("pane.report_metadata", params, socketPath);
 }
 
 export async function paneRename(paneId: string, label: string | null, socketPath?: string): Promise<void> {

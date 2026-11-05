@@ -41,6 +41,7 @@ const ROOTS: Record<string, string[]> = {
     "PaneReadParams",
     "PaneSendTextParams",
     "PaneSendKeysParams",
+    "PaneReportMetadataParams",
     "EventsSubscribeParams",
     "Subscription",
   ],
