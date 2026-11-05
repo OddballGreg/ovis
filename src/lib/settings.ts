@@ -11,6 +11,7 @@ import { createContext, createElement, useCallback, useContext, useEffect, useMe
 import { DEFAULT_THEME, terminalColors, themeColor as themeTableColor, type ThemeId, type ThemeEntry } from "./themes.ts";
 import { LANGUAGE_SETTINGS, LOCALE_TAGS, resolveLanguage, setCurrentLanguage, type Language, type LanguageSetting } from "./i18n.ts";
 import type { AlertPrefs, DoneAlerts } from "../../shared/notify-policy.ts";
+import { DEFAULT_IMPORTANCE_AGING, sanitizeImportanceAging, type ImportanceAging } from "../../shared/importance-order.ts";
 import { chatFontStack, sanitizeFontFamily } from "./fontFamily.ts";
 import { fontScale, sanitizeUiFontSize, uiFontStack } from "./typography.ts";
 import { sanitizeKeyBarExtras, type KeyBarExtra } from "./keys.ts";
@@ -29,17 +30,9 @@ export type SidebarRows = "one" | "two";
  */
 export type AgentOrder = "workspace" | "activity" | "waiting" | "importance";
 export const AGENT_ORDERS: readonly AgentOrder[] = ["workspace", "activity", "waiting", "importance"];
-/**
- * Importance order's aging: minutes a P1, P2 or P3 agent waits before it goes first in its band, and how many times
- * that wait lifts it into its group's most urgent band, P1 at most, so nothing passes a P0. P0 has no wait to
- * serve: it goes by longest wait at once.
- */
-export interface ImportanceAging { p1: number; p2: number; p3: number; factor: number }
-export const DEFAULT_IMPORTANCE_AGING: ImportanceAging = { p1: 15, p2: 30, p3: 60, factor: 4 };
+export { DEFAULT_IMPORTANCE_AGING, sanitizeImportanceAging, type ImportanceAging };
 export const IMPORTANCE_AGING_MINUTES: readonly number[] = [5, 10, 15, 20, 30, 45, 60, 90, 120, 240];
 export const IMPORTANCE_AGING_FACTORS: readonly number[] = [2, 3, 4, 6, 8];
-const IMPORTANCE_AGING_MAX_MINUTES = 24 * 60;
-const IMPORTANCE_AGING_MAX_FACTOR = 20;
 /** what an agent row is named by: its agent's title, or its tab's name when the tab was renamed (the title then goes under it) */
 export type AgentRowTitle = "agent" | "tab";
 /** where the Agents list sits in the sidebar: docked above the footer, or straight after the last workspace in one scroll with it */
@@ -537,18 +530,6 @@ export function chatLaneWidth(paneWidth: number, rootFontPx: number = ROOT_FONT_
 }
 
 /** Whole minutes for each band, capped at a day, and a factor capped at 20; a value under 1 or not a number takes the default. */
-export function sanitizeImportanceAging(raw: unknown): ImportanceAging {
-  const record = typeof raw === "object" && raw !== null && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
-  const within = (value: unknown, max: number, fallback: number): number =>
-    typeof value === "number" && Number.isFinite(value) && value >= 1 ? Math.min(max, Math.round(value)) : fallback;
-  return {
-    p1: within(record["p1"], IMPORTANCE_AGING_MAX_MINUTES, DEFAULT_IMPORTANCE_AGING.p1),
-    p2: within(record["p2"], IMPORTANCE_AGING_MAX_MINUTES, DEFAULT_IMPORTANCE_AGING.p2),
-    p3: within(record["p3"], IMPORTANCE_AGING_MAX_MINUTES, DEFAULT_IMPORTANCE_AGING.p3),
-    factor: within(record["factor"], IMPORTANCE_AGING_MAX_FACTOR, DEFAULT_IMPORTANCE_AGING.factor),
-  };
-}
-
 /** Only known keys with the right type survive: a stale or hand-edited record never breaks the UI. */
 export function sanitizeSettings(raw: unknown): Settings {
   const record = typeof raw === "object" && raw !== null ? (raw as Record<string, unknown>) : {};

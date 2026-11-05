@@ -1,4 +1,4 @@
-import type { AgentInfo, AgentTarget, PaneProcessInfo, PaneProcessInfoParams, PaneSendKeysParams, PaneSendTextParams } from "../../shared/herdr-api.generated.ts";
+import type { AgentInfo, AgentTarget, PaneProcessInfo, PaneProcessInfoParams, PaneReportMetadataParams, PaneSendKeysParams, PaneSendTextParams } from "../../shared/herdr-api.generated.ts";
 
 /**
  * The herdr methods `herdrRpc` knows the shape of: each method's params and its raw answer
@@ -17,6 +17,7 @@ export interface HerdrMethods {
   "agent.get": { params: AgentTarget; result: { type?: "agent_info"; agent: AgentInfo } };
   "pane.send_text": { params: PaneSendTextParams; result: { type?: "ok" } };
   "pane.send_keys": { params: PaneSendKeysParams; result: { type?: "ok" } };
+  "pane.report_metadata": { params: PaneReportMetadataParams; result: { type?: "ok" } };
 }
 
 export type HerdrMethod = keyof HerdrMethods;

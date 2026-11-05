@@ -170,6 +170,22 @@ export interface PaneReadResult {
   workspace_id: string;
 }
 
+export interface PaneReportMetadataParams {
+  agent?: string | null;
+  applies_to_source?: string | null;
+  clear_display_agent?: boolean;
+  clear_state_labels?: boolean;
+  clear_title?: boolean;
+  display_agent?: string | null;
+  pane_id: string;
+  seq?: number | null;
+  source: string;
+  state_labels?: Record<string, unknown>;
+  title?: string | null;
+  tokens?: Record<string, unknown>;
+  ttl_ms?: number | null;
+}
+
 export interface PaneScrollInfo {
   max_offset_from_bottom: number;
   offset_from_bottom: number;
