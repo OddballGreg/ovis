@@ -135,8 +135,12 @@ export function opencodeV1Mode(env: Env = process.env): OpencodeV1Mode {
  * Whether a health check's version is OpenCode 1.x: `1.x`, or a build of a 1.x branch, which ends
  * in the version it was built from (`0.0.0-<branch>-v1.x.y`, or with a further `-…`).
  */
-export function opencodeV1Version(version: unknown): boolean {
-  return typeof version === "string" && /^(?:1\.\d|0\.0\.0-(?:.*-)?v1\.\d+\.\d+(?:-|$))/.test(version);
+export function opencodeV1Version(version: unknown, env: Env = process.env): boolean {
+  if (typeof version !== "string") return false;
+  if (/^(?:1\.\d|0\.0\.0-(?:.*-)?v1\.\d+\.\d+(?:-|$))/.test(version)) return true;
+  // A local build from a branch whose name carries no base version (0.0.0-<branch>-<stamp>) says
+  // nothing about it; OVIS_OPENCODE_ASSUME_V1=1 is the owner saying their builds are 1.x.
+  return env["OVIS_OPENCODE_ASSUME_V1"] === "1" && /^0\.0\.0-/.test(version) && !/(?:^|-)v(?!1\.)\d+\.\d+\.\d+(?:-|$)/.test(version);
 }
 
 interface Answer { status: number; body: string; headers: IncomingHttpHeaders }

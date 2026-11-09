@@ -5,11 +5,13 @@
 import { join } from "node:path";
 import type { AgentStatus, HerdrPane, PlanSummary, ServerMessage, SessionSnapshot } from "../../shared/protocol.ts";
 import { alertStatus, paneAlertsMuted, paneTitle } from "../../shared/notify-policy.ts";
+import { sanitizeImportanceAging } from "../../shared/importance-order.ts";
 import { BackgroundWait } from "../background-wait.ts";
 import { ClaudeSubagentStatus } from "../claude-subagents.ts";
 import { codexOpenRollout, paneCodexHome } from "../codex.ts";
 import { startStatusCollector } from "../collector.ts";
 import { CompletionTracker, type OmoRest } from "../completion.ts";
+import { servingCore } from "../herdr-core/runtime.ts";
 import { Finishes, herdrLifetime } from "../finishes.ts";
 import { claudePanePid, claudePaneSession, forgetPaneTranscriptState } from "../conversation.ts";
 import { openCodeNativeState, openCodeVerificationCheckpoint, releaseOpenCodePane, trackVerifiedOpenCodePanes } from "../opencode-native.ts";
@@ -20,7 +22,7 @@ import { processStartUpperBoundAsync } from "../process-start.ts";
 import type { DeviceStore } from "../devices.ts";
 import { createGjcStatus, gjcPanes, readOmoSnapshot, reconcileProviderStatus } from "../gjc-status.ts";
 import type { HerdrMachineProfile } from "../herdr-profiles.ts";
-import { paneGet, paneProcessInfo, sessionSnapshot } from "../herdr/client.ts";
+import { paneGet, paneProcessInfo, paneReportMetadata, sessionSnapshot } from "../herdr/client.ts";
 import { resolveAgent } from "../pane-context.ts";
 import { launchedAgents } from "../launched-agents.ts";
 import { bridgeAgentNews, MachineManager } from "../machines.ts";
@@ -32,6 +34,7 @@ import type { PreferenceStore } from "../preferences.ts";
 import { onChatSubmitted, promptWaitEnded, type OpenCodePromptState } from "../prompt.ts";
 import { type AlertTiming, createPushService, defaultStateDir } from "../push.ts";
 import { SessionPlans } from "../session-plan.ts";
+import { HerdrPrioSync, prioSyncEnabled } from "../herdr-prio-sync.ts";
 import { memoryEndpoint, SessionImportance, WaitClocks, withImportance, type MemoryEndpoint } from "../session-importance.ts";
 import type { Telemetry } from "../telemetry.ts";
 import type { UsageLoginService } from "../usage-login.ts";
@@ -64,6 +67,8 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
     orderSequence?: OrderSequence;
     /** opencode-memory for Settings → Agents order → Importance (server/session-importance.ts); null turns it off, absent reads OVIS_MEMORY_URL */
     importance?: { endpoint?: MemoryEndpoint | null; fetch?: typeof fetch; pollMs?: number };
+    /** herdr's own sidebar in Importance order (server/herdr-prio-sync.ts); absent reads OVIS_HERDR_PRIO_SYNC */
+    herdrPrioSync?: boolean;
   };
   devices: DeviceStore;
   /** the preferences every browser shares (server/preferences.ts): web push reads the muted panes from it */
@@ -96,7 +101,8 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
   const stopMutes = preferences.subscribe(() => push.mutesChanged());
 
   /** `done` for agents herdr loses track of (server/completion.ts), kept across restarts */
-  const completions = new CompletionTracker(join(options.stateDir ?? defaultStateDir(), "completions.json"));
+  // on herdr-core every status is the program's own report (completion.ts reportedOnly)
+  const completions = new CompletionTracker(join(options.stateDir ?? defaultStateDir(), "completions.json"), undefined, servingCore);
   const finishes = new Finishes(options.herdrIdentity);
   /** the herdr identity that answered the lifecycle subscription, bound to that connection; null while it is closed (currentHerdrLifetime) */
   let liveHerdr: string | null = null;
@@ -244,12 +250,15 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
   });
   /** whether a browser watches: importance is asked of memory only then. The PC roster's listeners join once it exists */
   let watched = (): boolean => clients.size > 0;
+  /** herdr's sidebar follows Importance order (server/herdr-prio-sync.ts): memory is asked with no browser watching too */
+  const syncsPrio = (options.herdrPrioSync ?? prioSyncEnabled()) && !servingCore();
+  let prioSync: HerdrPrioSync | null = null;
   const importance = new SessionImportance({
     endpoint: options.importance?.endpoint === undefined ? memoryEndpoint() : options.importance.endpoint,
     fetch: options.importance?.fetch,
     pollMs: options.importance?.pollMs,
     now: options.statusNow,
-    active: () => watched(),
+    active: () => syncsPrio || watched(),
     onChange: () => broadcastAll({ type: "session-changed" }),
     log: (line) => console.log(line),
   });
@@ -290,6 +299,14 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
     options.openCodeState?.reconcile(named.panes, promptCheckpoint);
     return named;
   };
+  if (syncsPrio) {
+    prioSync = new HerdrPrioSync({
+      snapshot: () => clientSnapshot(),
+      aging: () => sanitizeImportanceAging(preferences.get().settings.importanceAging),
+      report: (params) => paneReportMetadata(params),
+      log: (line) => console.log(line),
+    });
+  }
   const backgroundOf = (paneId: string): number => omo.backgroundOf(paneId) || claudeAgents.countOf(paneId) || opencodeAgents.countOf(paneId);
   /** the snapshot clients get: finishes settled, OmO panes named, background tasks, waits and plan progress */
   const clientSnapshot = async (): Promise<SessionSnapshot> => {
@@ -346,6 +363,7 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
   if (machines) watched = () => clients.size > 0 || machines.watched();
 
   function broadcastAll(message: ServerMessage): void {
+    prioSync?.nudge();
     machines?.localMessage(message);
     for (const client of clients) send(client, message);
   }
@@ -607,6 +625,7 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
   waitTimer.unref?.();
   plans.start();
   importance.start();
+  prioSync?.start();
 
   // a verified OpenCode pane is tracked like a usage-login pane: closing it reaches onPaneEnded above
   const untrackOpenCode = trackVerifiedOpenCodePanes((paneId) => collector.trackPane(paneId));
@@ -622,5 +641,5 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
     const identity = finishes.herdrIdentity();
     return identity === null || identity !== liveHerdr ? undefined : herdrLifetime(identity);
   };
-  return { push, omo, gjc, claudeAgents, opencodeAgents, plans, importance, waitClocks, clientSnapshot, currentHerdrLifetime, queueHeld, countVisit, machines, broadcastAll, logPushError, collector: tracked, waitTimer };
+  return { push, omo, gjc, claudeAgents, opencodeAgents, plans, importance, prioSync, waitClocks, clientSnapshot, currentHerdrLifetime, queueHeld, countVisit, machines, broadcastAll, logPushError, collector: tracked, waitTimer };
 }

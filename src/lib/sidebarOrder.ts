@@ -1,7 +1,7 @@
 /** Activity order uses raw statuses and herdr recency; opened finishes use only bridge finish IDs. */
-import type { AgentStatus, HerdrPane, ImportanceLevel, PaneInfo, SessionSnapshot } from "../../shared/protocol.ts";
-import type { ImportanceAging } from "./settings.ts";
-import { knownStatus, paneStatus, type KnownStatus } from "./status.ts";
+import type { AgentStatus, HerdrPane, PaneInfo, SessionSnapshot } from "../../shared/protocol.ts";
+import { waitRank } from "../../shared/importance-order.ts";
+import { knownStatus, paneStatus } from "./status.ts";
 
 export type SeenRecord = Readonly<Record<string, number>>;
 
@@ -69,13 +69,6 @@ export function activityOrder<T>(rows: readonly T[], paneOf: (row: T) => Pick<Pa
 }
 
 /**
- * Longest wait's ranks: blocked, then unread and ready (one rank), then working (BG counts as
- * working). Unread and ready are not told apart for order because a herdr restart turns unread
- * finishes into ready ones without anyone opening them.
- */
-const WAIT_RANK: Readonly<Record<KnownStatus, number>> = { blocked: 0, done: 1, idle: 1, working: 2, waiting: 2, unknown: 3 };
-
-/**
  * Longest wait first: blocked, then unread finishes and ready agents together, then working;
  * within each, herdr's oldest state change first, then the order given.
  * `statusOf` is the status the row draws (shownStatus), not the raw one. This follows herdr's own
@@ -84,78 +77,9 @@ const WAIT_RANK: Readonly<Record<KnownStatus, number>> = { blocked: 0, done: 1, 
  */
 export function waitingOrder<T>(rows: readonly T[], paneOf: (row: T) => Pick<PaneInfo, "pane_id">, statusOf: (row: T) => AgentStatus | undefined, seqs: ReadonlyMap<string, number>): T[] {
   return rows
-    .map((row, index) => ({ row, index, rank: WAIT_RANK[knownStatus(statusOf(row))] ?? 3, changed: seqs.get(paneOf(row).pane_id) ?? Infinity }))
+    .map((row, index) => ({ row, index, rank: waitRank(statusOf(row)), changed: seqs.get(paneOf(row).pane_id) ?? Infinity }))
     .sort((a, b) => a.rank - b.rank || (a.changed === b.changed ? 0 : a.changed < b.changed ? -1 : 1) || a.index - b.index)
     .map((entry) => entry.row);
 }
 
-const BAND: Readonly<Record<ImportanceLevel, number>> = { P0: 0, P1: 1, P2: 2, P3: 3, P4: 4 };
-/** P4: a session parked by hand, which never ages and is never lifted */
-const PARKED_BAND = 4;
-/** whether a row's level parks it (lib/agentRoster.ts folds those rows into their own group) */
-export const isParked = (level: ImportanceLevel | undefined): boolean => level !== undefined && BAND[level] === PARKED_BAND;
-/** what a row memory said nothing of counts as */
-const NEUTRAL: ImportanceLevel = "P2";
-/** the least urgent band, where a group's top band starts before its rows are read */
-const LAST_BAND = 3;
-
-/**
- * A band's aging threshold in ms. P0 has none to wait out: a P0 with a known wait counts as aged
- * at once, so the P0 rows are ordered by longest wait, as every band ages in the objective
- * driver's order.
- */
-export function agingThresholdMs(band: number, aging: ImportanceAging): number {
-  return band === 1 ? aging.p1 * 60_000 : band === 2 ? aging.p2 * 60_000 : band === 3 ? aging.p3 * 60_000 : 0;
-}
-
-/** What Importance order makes of one row: its band, the band it competes in, and whether it has aged. */
-export interface ImportanceFacts { band: number; effectiveBand: number; aged: boolean; promoted: boolean; wait: number | undefined }
-
-/** The most urgent band a waiting row can be lifted into is P1, so no wait passes a P0. */
-const LIFT_CEILING = 1;
-
-/**
- * A row's facts against `topBand`, the most urgent band in its status group (drive_order_key's
- * `top_band`). A row lifted for its wait competes in `topBand`, or in P1 when `topBand` is P0.
- */
-export function importanceFacts(level: ImportanceLevel | undefined, wait: number | undefined, aging: ImportanceAging, topBand: number): ImportanceFacts {
-  const band = BAND[level ?? NEUTRAL];
-  if (band === PARKED_BAND) return { band, effectiveBand: band, aged: false, promoted: false, wait };
-  const threshold = agingThresholdMs(band, aging);
-  const aged = wait !== undefined && wait > threshold;
-  const target = Math.max(topBand, LIFT_CEILING);
-  const promoted = aged && wait > Math.max(1, aging.factor) * threshold && target < band;
-  return { band, effectiveBand: promoted ? target : band, aged, promoted, wait };
-}
-
-/**
- * Importance: Longest wait's groups (blocked, unread and ready, working), and in each the
- * opencode-memory band first (P0 before P3; none known counts as P2), modelled on the objective
- * driver's order (opencode-memory analysis/objective_loop.py drive_order_key). Within a band a row
- * that has waited past its band's threshold goes first, longest wait first (a P0 with a known wait always has); one
- * that waited `factor` times its threshold competes in its group's most urgent band as an aged row,
- * so a P3 is never starved. That band is P1 at most: no wait lifts a row above a P0, so a session
- * marked P0 stays first in its group however long the others have waited.
- * The rest keep Longest wait's order: herdr's oldest state change first, then the order given.
- * A parked row (P4) stands after every other row whatever its status, never ages and is never
- * lifted; the parked rows keep Longest wait's order among themselves.
- */
-export function importanceOrder<T>(rows: readonly T[], paneOf: (row: T) => Pick<PaneInfo, "pane_id">, statusOf: (row: T) => AgentStatus | undefined, seqs: ReadonlyMap<string, number>,
-  options: { importanceOf(row: T): ImportanceLevel | undefined; waitOf(row: T): number | undefined; aging: ImportanceAging }): T[] {
-  const entries = rows.map((row, index) => ({
-    row, index, rank: WAIT_RANK[knownStatus(statusOf(row))] ?? 3, changed: seqs.get(paneOf(row).pane_id) ?? Infinity,
-    level: options.importanceOf(row), wait: options.waitOf(row),
-  }));
-  const top = new Map<number, number>();
-  for (const entry of entries) top.set(entry.rank, Math.min(top.get(entry.rank) ?? LAST_BAND, BAND[entry.level ?? NEUTRAL]));
-  return entries
-    .map((entry) => ({ ...entry, parked: isParked(entry.level) ? 1 : 0, facts: importanceFacts(entry.level, entry.wait, options.aging, top.get(entry.rank) ?? LAST_BAND) }))
-    .sort((a, b) => a.parked - b.parked
-      || a.rank - b.rank
-      || a.facts.effectiveBand - b.facts.effectiveBand
-      || (a.facts.aged ? 0 : 1) - (b.facts.aged ? 0 : 1)
-      || (a.facts.aged && b.facts.aged ? (b.wait ?? 0) - (a.wait ?? 0) : 0)
-      || (a.changed === b.changed ? 0 : a.changed < b.changed ? -1 : 1)
-      || a.index - b.index)
-    .map((entry) => entry.row);
-}
+export { agingThresholdMs, importanceFacts, importanceOrder, isParked, type ImportanceFacts } from "../../shared/importance-order.ts";

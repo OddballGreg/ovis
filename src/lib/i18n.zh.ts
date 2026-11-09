@@ -12,6 +12,7 @@ import { SETUP_ZH } from "./i18n/setup.zh.ts";
 import { GUIDE_ZH } from "./i18n/guide.zh.ts";
 import { UPDATES_ZH } from "./i18n/updates.zh.ts";
 import { PALETTE_ZH } from "./i18n/palette.zh.ts";
+import { RELAY_ZH } from "./i18n/relay.zh.ts";
 
 /**
  * Simplified Chinese for every `t("…")` in src/ that no part in lib/i18n/ holds: keys more than
@@ -186,6 +187,7 @@ const BASE: Record<string, string> = {
   "New code": "新代码",
   "Paired: {name}.": "已配对：{name}。",
   "QR code that pairs a phone with code {code}": "使用代码 {code} 配对手机的二维码",
+  "Connect a phone": "连接手机",
   "Pairing code": "配对码",
   "Open this address on your phone": "在手机上打开此地址",
   "{agent} is ready": "{agent} 已就绪",
@@ -305,6 +307,7 @@ const BASE: Record<string, string> = {
   // t3code ports (a)
   // t3code ports (d)
   "Change PC": "切换电脑",
+  "Forget this PC": "忘记这台电脑",
   "Selected": "已选择",
   "Open Terminal": "打开终端",
   "Terminal keys": "终端按键",
@@ -322,6 +325,11 @@ const BASE: Record<string, string> = {
   "A dialog was left open in OpenCode.": "OpenCode 中仍有一个对话框处于打开状态。",
   "Couldn't switch the model in OpenCode. Choose it in the terminal with ctrl+x m.": "无法在 OpenCode 中切换模型。请在终端中按 ctrl+x m 选择。",
   "Model": "模型",
+  // the composer's OpenCode agent chip (components/OpencodeModelPicker.tsx)
+  "Agent: {agent}. Switch to {next}.": "代理: {agent}。切换到 {next}。",
+  "OpenCode is working. Switch the agent once it is idle.": "OpenCode 正在工作。请在空闲后再切换代理。",
+  "A dialog or a list is open in OpenCode. Close it in the terminal first.": "OpenCode 中有对话框或列表处于打开状态。请先在终端中关闭它。",
+  "Couldn't switch the agent in OpenCode. Press Tab in the terminal.": "无法在 OpenCode 中切换代理。请在终端中按 Tab。",
   // Recover unsent text (components/UnsentText.tsx)
   "Unsent text": "未发送的文本",
   "Text you had not sent when herdr restarted. A new herdr gives pane IDs out again, so it waits here rather than in a pane it was not written for. Nothing here is sent.": "herdr 重启时尚未发送的文本。新的 herdr 会重新分配面板 ID，因此这些文本保存在这里，而不会出现在不属于它的面板中。这里不会发送任何内容。",
@@ -365,6 +373,7 @@ export const ZH_PARTS: Record<string, Record<string, string>> = {
   guide: GUIDE_ZH,
   updates: UPDATES_ZH,
   palette: PALETTE_ZH,
+  relay: RELAY_ZH,
 };
 
 export const ZH: Record<string, string> = Object.assign({}, ...Object.values(ZH_PARTS));

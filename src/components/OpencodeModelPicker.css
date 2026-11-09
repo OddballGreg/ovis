@@ -72,6 +72,56 @@
   }
 }
 
+/* the agent the TUI's footer names, before the model: Plan (it only reads and plans) in the theme's
+   warning colour, so a session left in Plan is seen; a click moves the TUI to the other agent */
+.oc-agent-toggle {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: var(--chip-h);
+  padding: 0 var(--space-2);
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-pill);
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}
+
+.oc-agent-toggle svg {
+  width: 12px;
+  height: 12px;
+  flex: none;
+}
+
+.oc-agent-toggle.is-plan {
+  background: color-mix(in srgb, var(--notice) 16%, transparent);
+  color: var(--notice);
+  font-weight: var(--fw-semibold);
+}
+
+.oc-agent-toggle.is-error {
+  color: var(--status-blocked);
+}
+
+.oc-agent-toggle:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+@media (hover: hover) {
+  .oc-agent-toggle:not(:disabled):hover {
+    background: var(--bg-hover);
+    color: var(--text-strong);
+  }
+
+  .oc-agent-toggle.is-plan:not(:disabled):hover {
+    background: color-mix(in srgb, var(--notice) 26%, transparent);
+    color: var(--notice);
+  }
+}
+
 /* --oc-model-room is the measured room above the card (OpencodeModelPicker.tsx): the list keeps to it and scrolls */
 .oc-model-menu {
   position: absolute;

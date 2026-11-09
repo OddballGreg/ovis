@@ -1,5 +1,5 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Check, Cpu, LoaderCircle } from "lucide-react";
+import { Check, Cpu, LoaderCircle, NotebookPen, Wrench } from "lucide-react";
 
 import "./OpencodeModelPicker.css";
 
@@ -11,6 +11,15 @@ import { usePhoneSheetBack } from "../lib/sheetHistory.ts";
 import type { OpencodeModelCatalog } from "../../shared/protocol.ts";
 
 export type Switch = { kind: "idle" } | { kind: "switching"; name: string } | { kind: "failed"; code: string | null; detail: string; leftOpen?: boolean };
+
+/** Where the agent chip's last switch stands. */
+export type AgentSwitch = { kind: "idle" } | { kind: "switching" } | { kind: "failed"; code: string | null };
+
+/** The agent a click on the chip moves to: Build from Plan, Plan from Build or any other. */
+export const nextAgent = (agent: string): string => agent.trim().split(/\s+/u)[0]!.toLowerCase() === "plan" ? "build" : "plan";
+
+/** Whether the footer's agent is Plan, which only reads and plans: drawn in the theme's warning colour. */
+export const isPlanAgent = (agent: string): boolean => agent.trim().split(/\s+/u)[0]!.toLowerCase() === "plan";
 
 /** The failures that only a hand in the terminal can get past: the chip offers the terminal for them. */
 const TERMINAL_FAILURES = new Set(["not_ready", "pane_error", "dialog_not_opened", "model_not_found", "not_confirmed", "timeout", "dialog_open"]);
@@ -37,14 +46,15 @@ export function OpencodeModelPicker({ paneId, busy, disabled, onOpenTerminal, on
   /** the model the TUI's footer names now (its id, name and reasoning level), or null once the pane's models are no longer listed: the composer's pill draws it at once, not after the next reply; a read that cannot see the footer's model reports nothing, so the last one stays; a footer naming a model the list lacks reports null */
   onCurrent?: ((model: TuiModel | null) => void) | undefined;
   /** what the first render starts from, before any read (a test renders it without effects) */
-  initial?: { catalog?: OpencodeModelCatalog; open?: boolean; query?: string; state?: Switch };
+  initial?: { catalog?: OpencodeModelCatalog; open?: boolean; query?: string; state?: Switch; agentState?: AgentSwitch };
 }) {
   const t = useT();
-  const { fetchPaneOpencodeModels, selectPaneOpencodeModel } = useMachineApi();
+  const { fetchPaneOpencodeModels, selectPaneOpencodeModel, selectPaneOpencodeAgent } = useMachineApi();
   const [catalog, setCatalog] = useState<OpencodeModelCatalog | null>(initial?.catalog ?? null);
   const [open, setOpen] = useState(initial?.open ?? false);
   const [query, setQuery] = useState(initial?.query ?? "");
   const [state, setState] = useState<Switch>(initial?.state ?? { kind: "idle" });
+  const [agentState, setAgentState] = useState<AgentSwitch>(initial?.agentState ?? { kind: "idle" });
   const [reload, setReload] = useState(0);
   const root = useRef<HTMLSpanElement>(null);
   const toggle = useRef<HTMLButtonElement>(null);
@@ -119,8 +129,13 @@ export function OpencodeModelPicker({ paneId, busy, disabled, onOpenTerminal, on
     else if (shownName !== null && shownId !== null) onCurrent?.({ id: shownId, name: shownName, variant: shownVariant });
   }, [onCurrent, available, unmatched, shownName, shownId, shownVariant]);
   useEffect(() => () => onCurrent?.(null), [onCurrent]);
+  // a new agent in the footer (switched here or in the terminal) is no longer the switch that failed
+  const footerAgent = catalog?.agent ?? null;
+  useEffect(() => { setAgentState((was) => was.kind === "failed" ? { kind: "idle" } : was); }, [footerAgent]);
+  // no models listed any more: the list is not left open behind the agent chip
+  useEffect(() => { if (available === false) setOpen(false); }, [available]);
 
-  if (catalog === null || !catalog.available) return null;
+  if (catalog === null || (!catalog.available && !catalog.agent)) return null;
 
   const current = catalog.current;
   const currentName = opencodeModelName(catalog, current);
@@ -153,7 +168,39 @@ export function OpencodeModelPicker({ paneId, busy, disabled, onOpenTerminal, on
   const terminalOffered = state.kind === "failed" && onOpenTerminal !== undefined && (state.leftOpen === true || (state.code !== null && TERMINAL_FAILURES.has(state.code)));
   const label = currentName ?? t("Model");
 
+  // the agent the footer names (Build, Plan): a click moves the TUI to the other with Tab (POST /api/pane/opencode-agent)
+  const agent = catalog.agent ?? null;
+  const agentSwitching = agentState.kind === "switching";
+  const flip = async (): Promise<void> => {
+    if (agent === null || agentSwitching || blocked) return;
+    setAgentState({ kind: "switching" });
+    try {
+      const shown = await selectPaneOpencodeAgent({ pane_id: paneId, agent: nextAgent(agent) });
+      if (shown) setCatalog((was) => was === null ? was : { ...was, agent: shown });
+      setAgentState({ kind: "idle" });
+    } catch (error) {
+      setAgentState({ kind: "failed", code: error instanceof ApiError ? error.code : null });
+    } finally {
+      setReload((count) => count + 1);
+    }
+  };
+  const agentFailure = agentState.kind !== "failed" ? null
+    : agentState.code === "busy" ? t("OpenCode is working. Switch the agent once it is idle.")
+    : agentState.code === "dialog_open" || agentState.code === "popup_open" ? t("A dialog or a list is open in OpenCode. Close it in the terminal first.")
+    : t("Couldn't switch the agent in OpenCode. Press Tab in the terminal.");
+  const agentTitle = agent === null ? "" : `${t("Agent: {agent}. Switch to {next}.", { agent, next: nextAgent(agent) === "plan" ? "Plan" : "Build" })}${agentFailure === null ? "" : ` ${agentFailure}`}`;
+  const agentChip = agent === null ? null : <button type="button" className={`oc-agent-toggle${isPlanAgent(agent) ? " is-plan" : ""}${agentFailure !== null ? " is-error" : ""}`}
+    disabled={blocked || agentSwitching} aria-label={agentTitle} title={agentTitle} onClick={() => { void flip(); }}>
+    {agentSwitching ? <LoaderCircle className="oc-model-progress" aria-hidden="true" /> : isPlanAgent(agent) ? <NotebookPen aria-hidden="true" /> : <Wrench aria-hidden="true" />}
+    <span className="oc-agent-label">{agent}</span>
+    {agentFailure !== null && <span className="visually-hidden" role="status">{agentFailure}</span>}
+  </button>;
+
+  // without the HTTP source no model is listed, but the footer's agent is still read: the chip alone
+  if (!catalog.available) return <span className="oc-model">{agentChip}</span>;
+
   return <span className="oc-model" ref={root}>
+    {agentChip}
     <button type="button" ref={toggle} className="oc-model-toggle" aria-expanded={open} aria-controls={id}
       aria-label={currentName === null ? t("Choose the OpenCode model") : t("Model: {model}", { model: currentName })}
       title={currentName === null ? t("Choose the OpenCode model") : t("Model: {model}", { model: currentName })}

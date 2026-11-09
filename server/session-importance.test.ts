@@ -236,6 +236,11 @@ describe("session importance provider", () => {
     const route = (body: unknown) => handleImportanceRequest(new Request("http://127.0.0.1/api/agent/importance", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }), "/api/agent/importance", importance);
     const ok = (await route({ pane_id: "p1", level: "P1", ttl_hours: 4 }))!;
     expect([ok.status, await ok.json()]).toEqual([200, { ok: true }]);
+    const parked = (await route({ pane_id: "p1", level: "P4" }))!;
+    expect([parked.status, await parked.json()]).toEqual([200, { ok: true }]);
+    expect(memory.calls.filter((call) => call.url.endsWith("_set")).at(-1)?.body).toEqual({ session_id: "ses_a", level: "P4" });
+    const beyond = (await route({ pane_id: "p1", level: "P5" }))!;
+    expect((await beyond.json() as { error: { code: string } }).error.code).toBe("invalid_level");
     const refused = (await route({ pane_id: "p1", level: "P3" }))!;
     expect([refused.status, await refused.json()]).toEqual([502, { error: { code: "memory_refused", message: "opencode-memory refused: override refused" } }]);
     expect(await handleImportanceRequest(new Request("http://127.0.0.1/api/other"), "/api/other", importance)).toBeNull();

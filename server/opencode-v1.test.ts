@@ -239,8 +239,15 @@ describe("where the HTTP source is", () => {
   });
 
   it("knows OpenCode 1.x by its health check's version", () => {
-    for (const version of ["1.19.0", "1.0.0-beta.3", "0.0.0-fix/some-branch-v1.19.0-202610240522", "0.0.0-dev-v1.19.0", "0.0.0-v1.2.3"]) expect(opencodeV1Version(version)).toBe(true);
-    for (const version of ["2.0.0", "0.9.1", "0.0.0-dev-202610240522", "0.0.0-dev-v1.19.0.1", "0.0.0-dev-v1.19", "0.0.0-dev-v10.1.0", "0.0.0-try-v1.2.3x", "2.0.0-dev-v1.2.3", "", undefined, 1]) expect(opencodeV1Version(version)).toBe(false);
+    for (const version of ["1.19.0", "1.0.0-beta.3", "0.0.0-fix/some-branch-v1.19.0-202610240522", "0.0.0-dev-v1.19.0", "0.0.0-v1.2.3"]) expect(opencodeV1Version(version, {})).toBe(true);
+    for (const version of ["2.0.0", "0.9.1", "0.0.0-dev-202610240522", "0.0.0-dev-v1.19.0.1", "0.0.0-dev-v1.19", "0.0.0-dev-v10.1.0", "0.0.0-try-v1.2.3x", "2.0.0-dev-v1.2.3", "", undefined, 1]) expect(opencodeV1Version(version, {})).toBe(false);
+  });
+
+  it("takes an unlabelled local build as 1.x only when OVIS_OPENCODE_ASSUME_V1=1 says so", () => {
+    const assume = { OVIS_OPENCODE_ASSUME_V1: "1" };
+    for (const version of ["0.0.0-fix/gitlab-split-system-cache-202611021019", "0.0.0-dev-202610240522", "0.0.0-fix/some-branch-v1.19.0-202610240522"]) expect(opencodeV1Version(version, assume)).toBe(true);
+    for (const version of ["2.0.0", "0.9.1", "0.0.0-dev-v2.0.0-202611021019", "0.0.0-dev-v10.1.0", "2.0.0-dev-202611021019", "", undefined]) expect(opencodeV1Version(version, assume)).toBe(false);
+    expect(opencodeV1Version("0.0.0-fix/gitlab-split-system-cache-202611021019", { OVIS_OPENCODE_ASSUME_V1: "0" })).toBe(false);
   });
 
   it("sends the password it was given", async () => {
