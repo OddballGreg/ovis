@@ -89,7 +89,11 @@ export function waitingOrder<T>(rows: readonly T[], paneOf: (row: T) => Pick<Pan
     .map((entry) => entry.row);
 }
 
-const BAND: Readonly<Record<ImportanceLevel, number>> = { P0: 0, P1: 1, P2: 2, P3: 3 };
+const BAND: Readonly<Record<ImportanceLevel, number>> = { P0: 0, P1: 1, P2: 2, P3: 3, P4: 4 };
+/** P4: a session parked by hand, which never ages and is never lifted */
+const PARKED_BAND = 4;
+/** whether a row's level parks it (lib/agentRoster.ts folds those rows into their own group) */
+export const isParked = (level: ImportanceLevel | undefined): boolean => level !== undefined && BAND[level] === PARKED_BAND;
 /** what a row memory said nothing of counts as */
 const NEUTRAL: ImportanceLevel = "P2";
 /** the least urgent band, where a group's top band starts before its rows are read */
@@ -116,6 +120,7 @@ const LIFT_CEILING = 1;
  */
 export function importanceFacts(level: ImportanceLevel | undefined, wait: number | undefined, aging: ImportanceAging, topBand: number): ImportanceFacts {
   const band = BAND[level ?? NEUTRAL];
+  if (band === PARKED_BAND) return { band, effectiveBand: band, aged: false, promoted: false, wait };
   const threshold = agingThresholdMs(band, aging);
   const aged = wait !== undefined && wait > threshold;
   const target = Math.max(topBand, LIFT_CEILING);
@@ -132,6 +137,8 @@ export function importanceFacts(level: ImportanceLevel | undefined, wait: number
  * so a P3 is never starved. That band is P1 at most: no wait lifts a row above a P0, so a session
  * marked P0 stays first in its group however long the others have waited.
  * The rest keep Longest wait's order: herdr's oldest state change first, then the order given.
+ * A parked row (P4) stands after every other row whatever its status, never ages and is never
+ * lifted; the parked rows keep Longest wait's order among themselves.
  */
 export function importanceOrder<T>(rows: readonly T[], paneOf: (row: T) => Pick<PaneInfo, "pane_id">, statusOf: (row: T) => AgentStatus | undefined, seqs: ReadonlyMap<string, number>,
   options: { importanceOf(row: T): ImportanceLevel | undefined; waitOf(row: T): number | undefined; aging: ImportanceAging }): T[] {
@@ -142,8 +149,9 @@ export function importanceOrder<T>(rows: readonly T[], paneOf: (row: T) => Pick<
   const top = new Map<number, number>();
   for (const entry of entries) top.set(entry.rank, Math.min(top.get(entry.rank) ?? LAST_BAND, BAND[entry.level ?? NEUTRAL]));
   return entries
-    .map((entry) => ({ ...entry, facts: importanceFacts(entry.level, entry.wait, options.aging, top.get(entry.rank) ?? LAST_BAND) }))
-    .sort((a, b) => a.rank - b.rank
+    .map((entry) => ({ ...entry, parked: isParked(entry.level) ? 1 : 0, facts: importanceFacts(entry.level, entry.wait, options.aging, top.get(entry.rank) ?? LAST_BAND) }))
+    .sort((a, b) => a.parked - b.parked
+      || a.rank - b.rank
       || a.facts.effectiveBand - b.facts.effectiveBand
       || (a.facts.aged ? 0 : 1) - (b.facts.aged ? 0 : 1)
       || (a.facts.aged && b.facts.aged ? (b.wait ?? 0) - (a.wait ?? 0) : 0)

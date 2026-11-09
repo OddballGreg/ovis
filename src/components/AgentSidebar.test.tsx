@@ -329,3 +329,91 @@ describe("AgentSidebar fold memory", () => {
     expect((await sidebar.remount(inactive)).expanded()).toBe(true);
   });
 });
+
+describe("AgentSidebar Parked group", () => {
+  const descriptors = new Map<string, PropertyDescriptor | undefined>();
+  let renderer: ReactTestRenderer | undefined;
+  let stored: Map<string, string>;
+
+  beforeEach(() => {
+    for (const key of ["window", "document", "navigator", "getComputedStyle", "IS_REACT_ACT_ENVIRONMENT"]) {
+      descriptors.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
+    }
+    stored = new Map();
+    const events = new EventTarget();
+    Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
+    Object.defineProperty(globalThis, "navigator", { configurable: true, value: { languages: ["en-US"] } });
+    Object.defineProperty(globalThis, "window", { configurable: true, value: {
+      localStorage: { getItem: (key: string) => stored.get(key) ?? null, setItem: (key: string, value: string) => { stored.set(key, value); }, removeItem: (key: string) => { stored.delete(key); } },
+      matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
+      addEventListener: events.addEventListener.bind(events),
+      removeEventListener: events.removeEventListener.bind(events),
+      requestAnimationFrame: () => 1,
+      cancelAnimationFrame() {},
+      setInterval: () => 1,
+      clearInterval() {},
+      location: { href: "http://localhost/" },
+    } });
+    Object.defineProperty(globalThis, "document", { configurable: true, value: {
+      body: { nodeType: 1, children: [] },
+      documentElement: { dataset: {}, style: { setProperty() {}, removeProperty() {} } },
+      querySelector: () => null,
+      addEventListener: events.addEventListener.bind(events),
+      removeEventListener: events.removeEventListener.bind(events),
+    } });
+    Object.defineProperty(globalThis, "getComputedStyle", { configurable: true, value: () => ({ getPropertyValue: () => "" }) });
+  });
+
+  afterEach(async () => {
+    await act(async () => { renderer?.unmount(); });
+    renderer = undefined;
+    for (const [key, descriptor] of descriptors) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else Reflect.deleteProperty(globalThis, key);
+    }
+    descriptors.clear();
+  });
+
+  const inactive: SidebarFilter = { query: "", active: false, machines: new Map(), matches: 0 };
+  let updateSettings: ((patch: Partial<Settings>) => void) | undefined;
+  const SettingsProbe = () => { updateSettings = useSettings().update; return null; };
+  const parkedRoster = (): Machine[] => roster().map((machine) => machine.snapshot === null ? machine : {
+    ...machine,
+    snapshot: { ...machine.snapshot, panes: machine.snapshot.panes.map((pane) => pane.pane_id === paneId ? { ...pane, importance: { level: "P4" as const, source: "override", reason: "parked P4" } } : pane) },
+  });
+
+  async function mount() {
+    await act(async () => {
+      renderer = create(<SettingsProvider>
+        <SettingsProbe />
+        <SidebarFilterProvider value={{ filter: inactive, reportBranches: () => {} }}>
+          <AgentSidebar machines={parkedRoster()} selectedMachineId="local" selectedPaneId={null} stateWord={(machine) => machine.state} onSelect={() => {}} />
+        </SidebarFilterProvider>
+      </SettingsProvider>);
+    });
+    if (!renderer) throw new Error("sidebar did not mount");
+    return renderer;
+  }
+  const parkedPanes = (mounted: ReactTestRenderer): string[] =>
+    mounted.root.findAll((node) => node.type === "ul" && String(node.props.className).includes("agent-list-parked"))
+      .flatMap((list) => list.findAll((node) => node.type === "li").map((li) => String(li.props["data-pane"])));
+
+  it("folds the parked rows into a Parked group at the bottom in Importance order only, and remembers it opened", async () => {
+    const mounted = await mount();
+    // Workspaces order: no Parked group
+    expect(mounted.root.findAll((node) => node.props["data-testid"] === "agent-parked-toggle")).toHaveLength(0);
+    await act(async () => { updateSettings?.({ agentOrder: "importance" }); });
+    const toggle = () => mounted.root.find((node) => node.type === "button" && node.props["data-testid"] === "agent-parked-toggle");
+    expect(toggle().props["aria-expanded"]).toBe(false);
+    expect(parkedPanes(mounted)).toEqual([paneId]);
+    const list = mounted.root.find((node) => node.type === "ul" && String(node.props.className).includes("agent-list-parked"));
+    expect(list.props.hidden).toBe(true);
+    // the parked row is not among the other rows
+    const others = mounted.root.findAll((node) => node.type === "ul" && node.props.className === "agent-list")
+      .flatMap((ul) => ul.findAll((node) => node.type === "li").map((li) => String(li.props["data-pane"])));
+    expect(others).not.toContain(paneId);
+    await act(async () => { toggle().props.onClick(); });
+    expect(toggle().props["aria-expanded"]).toBe(true);
+    expect(stored.get("ovis:agents-parked-open")).toBe("1");
+  });
+});

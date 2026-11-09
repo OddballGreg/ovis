@@ -55,6 +55,8 @@ export const SIDEBAR_JA: Record<string, string> = {
   "No importance from opencode-memory, so it counts as P2": "opencode-memory から重要度がないため P2 として扱います",
   "Importance {level}": "重要度 {level}",
   "Importance was not set: {reason}": "重要度を設定できませんでした: {reason}",
+  "Parked": "保留中",
+  "Importance: P4 (parked)": "重要度: P4（保留）",
   "Importance: Auto": "重要度: 自動",
   "Importance: {level}": "重要度: {level}",
 };

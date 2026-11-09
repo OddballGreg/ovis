@@ -7,7 +7,7 @@ import type { Machine } from "../../shared/machines.ts";
 import type { AgentStatus, HerdrPane } from "../../shared/protocol.ts";
 import { DEFAULT_IMPORTANCE_AGING, type AgentOrder, type ImportanceAging } from "./settings.ts";
 import { sidebarAgents, type SidebarAgent } from "./sidebarAgents.ts";
-import { activityOrder, importanceOrder, waitingOrder } from "./sidebarOrder.ts";
+import { activityOrder, importanceOrder, isParked, waitingOrder } from "./sidebarOrder.ts";
 import { sidebarPinKey, splitPinnedRows } from "./sidebarPins.ts";
 
 export interface AgentRow { machine: Machine; entry: SidebarAgent }
@@ -36,8 +36,12 @@ export function paneWaitMs(pane: Pick<HerdrPane, "agent_status" | "wait">, now: 
   return wait.status === pane.agent_status ? Math.max(0, now - wait.since) : 0;
 }
 
-/** Every PC's agent rows as the list draws them: the pinned ones first, then the rest in source order. */
-export function agentRoster(machines: readonly Machine[], options: AgentRosterOptions): { pinned: AgentRow[]; rest: AgentRow[] } {
+/**
+ * Every PC's agent rows as the list draws them: the pinned ones first, then the rest in source order.
+ * In Importance order the parked rows (P4) that are not pinned leave `rest` for `parked`, which the
+ * list draws last, folded; in any other order `parked` is empty.
+ */
+export function agentRoster(machines: readonly Machine[], options: AgentRosterOptions): { pinned: AgentRow[]; rest: AgentRow[]; parked: AgentRow[] } {
   const now = options.now ?? Date.now();
   const rows = machines.flatMap((machine) => {
     const agents = sidebarAgents(machine.snapshot);
@@ -51,5 +55,8 @@ export function agentRoster(machines: readonly Machine[], options: AgentRosterOp
       : agents;
     return ordered.map((entry): AgentRow => ({ machine, entry }));
   });
-  return splitPinnedRows(rows, options.pinned, ({ machine, entry }) => sidebarPinKey(machine.id, entry.pane.pane_id));
+  const { pinned, rest } = splitPinnedRows(rows, options.pinned, ({ machine, entry }) => sidebarPinKey(machine.id, entry.pane.pane_id));
+  if (options.order !== "importance") return { pinned, rest, parked: [] };
+  const parked = (row: AgentRow): boolean => isParked(row.entry.pane.importance?.level);
+  return { pinned, rest: rest.filter((row) => !parked(row)), parked: rest.filter(parked) };
 }

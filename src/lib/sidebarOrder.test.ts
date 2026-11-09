@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { AgentStatus, HerdrPane, SessionSnapshot } from "../../shared/protocol.ts";
 import machines from "../../site/demo/fixtures/machines.json";
-import { activityOrder, agingThresholdMs, importanceFacts, importanceOrder, isSeenDone, liveSeqs, newSeqMemory, shownStatus, stateSeqs, waitingOrder } from "./sidebarOrder.ts";
+import { activityOrder, agingThresholdMs, importanceFacts, isParked, importanceOrder, isSeenDone, liveSeqs, newSeqMemory, shownStatus, stateSeqs, waitingOrder } from "./sidebarOrder.ts";
 import { DEFAULT_IMPORTANCE_AGING, DEFAULT_SETTINGS, sanitizeImportanceAging, sanitizeSettings, telemetrySettingsSnapshot } from "./settings.ts";
 import type { ImportanceLevel } from "../../shared/protocol.ts";
 
@@ -224,6 +224,28 @@ describe("Importance order", () => {
     expect(importanceFacts("P3", 239 * MIN, DEFAULT_IMPORTANCE_AGING, 0)).toMatchObject({ promoted: false, effectiveBand: 3 });
     expect(importanceFacts("P1", 10_000 * MIN, DEFAULT_IMPORTANCE_AGING, 0)).toMatchObject({ promoted: false, effectiveBand: 1 });
     expect(importanceFacts("P2", 121 * MIN, DEFAULT_IMPORTANCE_AGING, 0)).toMatchObject({ promoted: true, effectiveBand: 1 });
+  });
+
+  it("puts a parked row (P4) after every other row, whatever its status, and never ages or lifts it", () => {
+    expect(order([
+      { id: "blocked-p4", status: "blocked", level: "P4", wait: 10_000, seq: 1 },
+      { id: "working-p3", status: "working", level: "P3", seq: 2 },
+      { id: "idle-p4", status: "idle", level: "P4", wait: 5, seq: 3 },
+      { id: "idle-none", status: "idle", seq: 4 },
+    ])).toEqual(["idle-none", "working-p3", "blocked-p4", "idle-p4"]);
+    expect(importanceFacts("P4", 100_000 * MIN, DEFAULT_IMPORTANCE_AGING, 0)).toEqual({ band: 4, effectiveBand: 4, aged: false, promoted: false, wait: 100_000 * MIN });
+    expect(isParked("P4")).toBe(true);
+    expect(isParked("P3")).toBe(false);
+    expect(isParked(undefined)).toBe(false);
+  });
+
+  it("does not let a parked row lower its group's top band", () => {
+    // with only a P4 beside it, a starved P3 has no more urgent band to be lifted into
+    expect(importanceFacts("P3", 241 * MIN, DEFAULT_IMPORTANCE_AGING, 3)).toMatchObject({ promoted: false, effectiveBand: 3 });
+    expect(order([
+      { id: "p4", status: "idle", level: "P4", seq: 1 },
+      { id: "p3-starved", status: "idle", level: "P3", wait: 241, seq: 2 },
+    ])).toEqual(["p3-starved", "p4"]);
   });
 
   it("keeps a P0 first in its group however long the other rows have waited", () => {

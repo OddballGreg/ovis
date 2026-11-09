@@ -56,9 +56,14 @@ export type HerdrPane = PaneInfo & {
   wait?: PaneWait;
 };
 
-/** P0 is the most urgent band, P3 the least; a pane memory knows nothing of counts as P2. */
-export type ImportanceLevel = "P0" | "P1" | "P2" | "P3";
-export const IMPORTANCE_LEVELS: readonly ImportanceLevel[] = ["P0", "P1", "P2", "P3"];
+/**
+ * P0 is the most urgent band, P3 the least; a pane memory knows nothing of counts as P2. P4 is a
+ * parked session, set only by hand: it stands after every P3, in its own folded group, and never ages.
+ */
+export type ImportanceLevel = "P0" | "P1" | "P2" | "P3" | "P4";
+export const IMPORTANCE_LEVELS: readonly ImportanceLevel[] = ["P0", "P1", "P2", "P3", "P4"];
+/** the band of a session parked by hand */
+export const PARKED_LEVEL: ImportanceLevel = "P4";
 export const isImportanceLevel = (value: unknown): value is ImportanceLevel => typeof value === "string" && (IMPORTANCE_LEVELS as readonly string[]).includes(value);
 export interface PaneImportance {
   level: ImportanceLevel;
