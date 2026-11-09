@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { HerdrPane, SessionSnapshot } from "../shared/protocol.ts";
-import { memoryEndpoint, paneSessionId, SessionImportance, unwrapToolResult, WaitClocks, withImportance, type MemoryEndpoint } from "./session-importance.ts";
+import { memoryEndpoint, paneSessionId, SessionImportance, STALE_GRACE_MS, unwrapToolResult, WaitClocks, withImportance, type MemoryEndpoint } from "./session-importance.ts";
 import { handleImportanceRequest } from "./importance-routes.ts";
 
 const dirs: string[] = [];
@@ -92,12 +92,13 @@ describe("session importance provider", () => {
     expect(lines).toHaveLength(1);
   });
 
-  it("drops what it knew when memory goes away, and takes it back when memory answers again", async () => {
+  it("keeps what it knew while memory is away for the grace window, says so once, and takes the next answer", async () => {
     let now = 0;
     let up = true;
+    let level = "P1";
     const memory = fakeMemory(() => {
       if (!up) throw new TypeError("fetch failed: connection refused");
-      return json(JSON.stringify({ sessions: { ses_a: { level: "P1", source: "objective", reason: "objective #85" } } }));
+      return json(JSON.stringify({ sessions: { ses_a: { level, source: "objective", reason: "objective #85" } } }));
     });
     const { importance, changes, lines } = provider(memory.fetch, { now: () => now });
     importance.refresh([pane("p1", "ses_a")]);
@@ -105,17 +106,104 @@ describe("session importance provider", () => {
     expect(importance.of(pane("p1", "ses_a"))?.level).toBe("P1");
     up = false; now += 45_000;
     await importance.poll();
-    expect(importance.of(pane("p1", "ses_a"))).toBeUndefined();
+    expect(importance.of(pane("p1", "ses_a"))?.level).toBe("P1");
+    expect(changes()).toBe(1);
+    expect(lines.at(-1)).toContain("keeping opencode-memory's last levels");
     expect(lines.at(-1)).toContain("not reachable");
     // backed off: 45 s x 2^0 after the first failure
     now += 10_000;
     await importance.poll();
     expect(memory.calls).toHaveLength(2);
-    up = true; now += 60_000;
+    now += 50_000;
     await importance.poll();
+    expect(memory.calls).toHaveLength(3);
     expect(importance.of(pane("p1", "ses_a"))?.level).toBe("P1");
+    expect(lines).toHaveLength(1);
+    up = true; level = "P3"; now += 120_000;
+    await importance.poll();
+    expect(importance.of(pane("p1", "ses_a"))?.level).toBe("P3");
+    expect(changes()).toBe(2);
+    expect(lines.at(-1)).toContain("answers again");
+  });
+
+  it("keeps what it knew through an answer without sessions inside the grace window", async () => {
+    let now = 0;
+    let good = true;
+    const memory = fakeMemory(() => good ? json({ sessions: { ses_a: { level: "P4", source: "override", reason: "parked" } } }) : json({ ok: true }));
+    const { importance, changes } = provider(memory.fetch, { now: () => now });
+    importance.refresh([pane("p1", "ses_a")]);
+    await importance.poll();
+    good = false; now += 45_000;
+    await importance.poll();
+    expect(importance.of(pane("p1", "ses_a"))?.level).toBe("P4");
+    expect(changes()).toBe(1);
+  });
+
+  it("drops what it knew once memory has not answered for the grace window, and takes it back when memory answers again", async () => {
+    let now = 0;
+    let up = true;
+    const memory = fakeMemory(() => {
+      if (!up) throw new TypeError("fetch failed: connection refused");
+      return json({ sessions: { ses_a: { level: "P0", source: "queue", reason: "!1" }, ses_b: { level: "P1", source: "queue", reason: "!2" } } });
+    });
+    const { importance, changes, lines } = provider(memory.fetch, { now: () => now });
+    importance.refresh([pane("p1", "ses_a"), pane("p2", "ses_b")]);
+    await importance.poll();
+    up = false;
+    now += 45_000;
+    await importance.poll();
+    expect(importance.of(pane("p1", "ses_a"))?.level).toBe("P0");
+    now = STALE_GRACE_MS - 1;
+    await importance.poll();
+    expect(importance.of(pane("p1", "ses_a"))?.level).toBe("P0");
+    expect(changes()).toBe(1);
+    now = STALE_GRACE_MS + 15 * 60_000;
+    await importance.poll();
+    expect(importance.of(pane("p1", "ses_a"))).toBeUndefined();
+    expect(importance.of(pane("p2", "ses_b"))).toBeUndefined();
+    expect(changes()).toBe(2);
+    expect(lines.at(-1)).toContain("neutral (P2)");
+    expect(lines.filter((line) => line.includes("keeping"))).toHaveLength(1);
+    // still away: neutral is said once
+    now += 16 * 60_000;
+    await importance.poll();
+    expect(lines.filter((line) => line.includes("neutral (P2)"))).toHaveLength(1);
+    up = true; now += 16 * 60_000;
+    await importance.poll();
+    expect(importance.of(pane("p1", "ses_a"))?.level).toBe("P0");
     expect(changes()).toBe(3);
     expect(lines.at(-1)).toContain("answers again");
+  });
+
+  it("drops what it knew at once when memory no longer has the tool", async () => {
+    let now = 0;
+    let has = true;
+    const memory = fakeMemory(() => has ? json({ sessions: { ses_a: { level: "P0", source: "queue", reason: "!1" } } }) : json({ error: "Unknown tool", message: "Unknown tool: session_importance" }, 404));
+    const { importance, changes, lines } = provider(memory.fetch, { now: () => now });
+    importance.refresh([pane("p1", "ses_a")]);
+    await importance.poll();
+    has = false; now += 45_000;
+    await importance.poll();
+    expect(importance.of(pane("p1", "ses_a"))).toBeUndefined();
+    expect(changes()).toBe(2);
+    expect(lines.at(-1)).toContain("neutral (P2)");
+  });
+
+  it("makes a session a later answer leaves out neutral, after a failure too", async () => {
+    let now = 0;
+    let answer: () => Response = () => json({ sessions: { ses_a: { level: "P0", source: "queue", reason: "!1" } } });
+    const memory = fakeMemory(() => answer());
+    const { importance } = provider(memory.fetch, { now: () => now });
+    importance.refresh([pane("p1", "ses_a")]);
+    await importance.poll();
+    answer = () => json({ error: "boom" }, 500);
+    now += 45_000;
+    await importance.poll();
+    expect(importance.of(pane("p1", "ses_a"))?.level).toBe("P0");
+    answer = () => json({ sessions: {} });
+    now += 120_000;
+    await importance.poll();
+    expect(importance.of(pane("p1", "ses_a"))).toBeUndefined();
   });
 
   it("asks nothing while no browser watches, and nothing about a snapshot without sessions", async () => {
