@@ -82,4 +82,4 @@ export function waitingOrder<T>(rows: readonly T[], paneOf: (row: T) => Pick<Pan
     .map((entry) => entry.row);
 }
 
-export { agingThresholdMs, importanceFacts, importanceOrder, type ImportanceFacts } from "../../shared/importance-order.ts";
+export { agingThresholdMs, importanceFacts, importanceOrder, isParked, type ImportanceFacts } from "../../shared/importance-order.ts";

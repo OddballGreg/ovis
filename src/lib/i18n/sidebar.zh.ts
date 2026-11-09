@@ -55,6 +55,8 @@ export const SIDEBAR_ZH: Record<string, string> = {
   "No importance from opencode-memory, so it counts as P2": "opencode-memory 未给出重要度，按 P2 计",
   "Importance {level}": "重要度 {level}",
   "Importance was not set: {reason}": "未能设置重要度：{reason}",
+  "Parked": "已搁置",
+  "Importance: P4 (parked)": "重要度：P4（搁置）",
   "Importance: Auto": "重要度：自动",
   "Importance: {level}": "重要度：{level}",
 };

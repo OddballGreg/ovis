@@ -118,6 +118,20 @@ describe("herdr's sidebar order", () => {
       { pane_id: "w1:p2", tokens: { prio: "P2", rank: "0003" } },
     ]);
   });
+
+  it("reports a parked pane as P4, after every other pane, never aged or lifted", () => {
+    expect(prioTokens(snapshotOf([
+      { id: "blocked-p4", status: "blocked", level: "P4", wait: 100_000, seq: 1 },
+      { id: "working-p3", status: "working", level: "P3", seq: 2 },
+      { id: "idle-p4", status: "idle", level: "P4", wait: 1, seq: 3 },
+      { id: "idle-none", status: "idle", seq: 4 },
+    ]), DEFAULT_IMPORTANCE_AGING, NOW)).toEqual([
+      { pane_id: "idle-none", tokens: { prio: "P2", rank: "0001" } },
+      { pane_id: "working-p3", tokens: { prio: "P3", rank: "0002" } },
+      { pane_id: "blocked-p4", tokens: { prio: "P4", rank: "0003" } },
+      { pane_id: "idle-p4", tokens: { prio: "P4", rank: "0004" } },
+    ]);
+  });
 });
 
 describe("the sync", () => {

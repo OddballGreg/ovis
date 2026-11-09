@@ -58,6 +58,25 @@ describe("agent roster", () => {
     expect(split.rest.map(({ entry }) => entry.pane.pane_id)).toEqual(["b", "c", "d", "a"]);
   });
 
+  it("moves the unpinned parked rows (P4) to their own group in Importance order only", () => {
+    const local = machine("local", "connected", [["a", "blocked"], ["b", "idle"], ["c", "idle"]]);
+    const extra: Record<string, Partial<HerdrPane>> = {
+      a: { importance: { level: "P4", source: "override", reason: "parked P4" } },
+      b: { importance: { level: "P3", source: "queue", reason: "low" } },
+      c: { importance: { level: "P4", source: "override", reason: "parked P4" } },
+    };
+    local.snapshot = { ...local.snapshot!, panes: local.snapshot!.panes.map((pane) => ({ ...pane, ...extra[pane.pane_id] })) };
+    const seqs = new Map([["a", 1], ["b", 2], ["c", 3]]);
+    const ids = (rows: { entry: { pane: HerdrPane } }[]) => rows.map(({ entry }) => entry.pane.pane_id);
+    const importance = agentRoster([local], { order: "importance", seqs: () => seqs, status: (_id, pane) => pane.agent_status, pinned: [sidebarPinKey("local", "c")] });
+    expect(ids(importance.pinned)).toEqual(["c"]);
+    expect(ids(importance.rest)).toEqual(["b"]);
+    expect(ids(importance.parked)).toEqual(["a"]);
+    const activity = agentRoster([local], { order: "activity", seqs: () => seqs, status: (_id, pane) => pane.agent_status, pinned: [] });
+    expect(activity.parked).toEqual([]);
+    expect(ids(activity.rest)).toHaveLength(3);
+  });
+
   it("reads a pane's wait only from a clock stamped for its current status", () => {
     expect(paneWaitMs({ agent_status: "idle", wait: { since: 1000, status: "idle" } }, 61_000)).toBe(60_000);
     expect(paneWaitMs({ agent_status: "working", wait: { since: 1000, status: "idle" } }, 61_000)).toBe(0);

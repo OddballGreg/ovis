@@ -341,6 +341,40 @@
 
 .agent-importance.is-p0 { font-weight: 600; }
 
+/* a parked row (P4): dimmer than a neutral one, dashed so it reads as set aside */
+.agent-importance.is-p4 {
+  border-style: dashed;
+  opacity: 0.7;
+}
+
+/* Importance order's Parked group: the P4 rows, after every other row, folded until opened */
+.agent-parked-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  width: 100%;
+  margin-top: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  border: 0;
+  background: none;
+  color: var(--text-dim);
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-semibold);
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.agent-parked-toggle:disabled { cursor: default; }
+
+.agent-parked-toggle svg {
+  flex: none;
+  width: 1em;
+  height: 1em;
+}
+
+.agent-list-parked .agent-item { opacity: 0.75; }
+
 .agent-importance.is-neutral {
   border-color: transparent;
 }

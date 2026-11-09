@@ -52,6 +52,17 @@ describe("session importance provider", () => {
     expect(changes()).toBe(1);
   });
 
+  it("takes a parked session (P4), its override inherited across a rotation included", async () => {
+    const parked = { level: "P4", source: "override", reason: "parked P4 inherited from ses_old", override: { level: "P4", expires_at: null, inherited_from: "ses_old" } };
+    const memory = fakeMemory(() => json({ sessions: { ses_a: parked } }));
+    const { importance } = provider(memory.fetch);
+    importance.refresh([pane("p1", "ses_a")]);
+    await importance.poll();
+    expect(importance.of(pane("p1", "ses_a"))).toEqual({ level: "P4", source: "override", reason: "parked P4 inherited from ses_old", override: { level: "P4", expires_at: null } });
+    expect(await importance.set("p1", "P4")).toEqual({ ok: true });
+    expect(memory.calls.find((call) => call.url.endsWith("/session_importance_set"))?.body).toEqual({ session_id: "ses_a", level: "P4" });
+  });
+
   it("unwraps a result sent as a JSON string, under result, or as MCP text content", () => {
     const inner = { sessions: { ses_a: { level: "P1" } } };
     expect(unwrapToolResult(JSON.stringify(inner))).toEqual(inner);
@@ -225,6 +236,11 @@ describe("session importance provider", () => {
     const route = (body: unknown) => handleImportanceRequest(new Request("http://127.0.0.1/api/agent/importance", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }), "/api/agent/importance", importance);
     const ok = (await route({ pane_id: "p1", level: "P1", ttl_hours: 4 }))!;
     expect([ok.status, await ok.json()]).toEqual([200, { ok: true }]);
+    const parked = (await route({ pane_id: "p1", level: "P4" }))!;
+    expect([parked.status, await parked.json()]).toEqual([200, { ok: true }]);
+    expect(memory.calls.filter((call) => call.url.endsWith("_set")).at(-1)?.body).toEqual({ session_id: "ses_a", level: "P4" });
+    const beyond = (await route({ pane_id: "p1", level: "P5" }))!;
+    expect((await beyond.json() as { error: { code: string } }).error.code).toBe("invalid_level");
     const refused = (await route({ pane_id: "p1", level: "P3" }))!;
     expect([refused.status, await refused.json()]).toEqual([502, { error: { code: "memory_refused", message: "opencode-memory refused: override refused" } }]);
     expect(await handleImportanceRequest(new Request("http://127.0.0.1/api/other"), "/api/other", importance)).toBeNull();

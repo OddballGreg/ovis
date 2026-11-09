@@ -4,7 +4,7 @@ import { Bell, BellOff, ChevronDown, ChevronRight, Ellipsis, Flag, Pin, PinOff, 
 import type { Machine } from "../../shared/machines.ts";
 import { paneStorageId } from "../../shared/machines.ts";
 import { paneTokenValues } from "../../shared/pane-tokens.ts";
-import { IMPORTANCE_LEVELS, type AgentStatus, type ImportanceLevel, type PaneImportance, type PlanSummary } from "../../shared/protocol.ts";
+import { IMPORTANCE_LEVELS, PARKED_LEVEL, type AgentStatus, type ImportanceLevel, type PaneImportance, type PlanSummary } from "../../shared/protocol.ts";
 import { setAgentImportance } from "../lib/api.ts";
 import { userErrorMessage } from "../lib/userError.ts";
 import { currentAgentRowTokens, subscribeAgentRowTokens } from "../lib/agentRowTokens.ts";
@@ -110,6 +110,8 @@ const inDrawer = (): boolean => window.matchMedia?.(DRAWER_QUERY).matches === tr
 const startsFolded = (fold: AgentsDrawerFold): boolean => fold === "folded" && inDrawer();
 /** the reader's fold of the list, kept on this device as a PC's fold is (MachineSidebar.tsx): a phone and a desktop each keep their own */
 const FOLD_KEY = "ovis:agents-collapsed";
+/** whether the reader opened the Parked group (Importance order's P4 rows), kept on this device; folded by default */
+const PARKED_OPEN_KEY = "ovis:agents-parked-open";
 
 /** the fold the reader left on this device, or null with none kept */
 function storedFold(): boolean | null {
@@ -175,16 +177,22 @@ export function AgentSidebar({ machines, selectedMachineId, selectedPaneId, stat
     return () => window.clearInterval(timer);
   }, [order]);
   const roster = useMemo(() => agentRoster(machines, { order, seqs: activity.seqs, status: activity.status, pinned, now, aging }), [machines, order, activity, pinned, now, aging]);
-  const allRows = useMemo(() => [...roster.pinned, ...roster.rest], [roster]);
+  const allRows = useMemo(() => [...roster.pinned, ...roster.rest, ...roster.parked], [roster]);
   // the sidebar's filter (lib/sidebarFilter.ts) keeps the matched rows and the selected one, in the same
   // order and cards; the pins and their pruning go on reading every row
   const { filter } = useSidebarFilter();
   const split = useMemo(() => {
     if (!filter.active) return roster;
     const kept = ({ machine, entry }: AgentRow): boolean => machineFilter(filter, machine.id)?.panes.has(entry.pane.pane_id) === true;
-    return { pinned: roster.pinned.filter(kept), rest: roster.rest.filter(kept) };
+    return { pinned: roster.pinned.filter(kept), rest: roster.rest.filter(kept), parked: roster.parked.filter(kept) };
   }, [roster, filter]);
-  const rows = useMemo(() => [...split.pinned, ...split.rest], [split]);
+  const rows = useMemo(() => [...split.pinned, ...split.rest, ...split.parked], [split]);
+  // the Parked group starts folded; under the filter it opens, so a parked match is seen
+  const [parkedOpen, setParkedOpen] = useState(() => {
+    try { return window.localStorage.getItem(PARKED_OPEN_KEY) === "1"; } catch { return false; }
+  });
+  const parkedShown = parkedOpen || filter.active;
+  const parkedListId = useId();
   // a folded list (a phone's starts so) opens while the filter keeps rows in it, so a match or the selection is
   // seen, not only kept; its caret then folds and opens it for the filter's time, the list's own fold untouched
   const [filterFold, setFilterFold] = useState<boolean | null>(null);
@@ -337,6 +345,17 @@ export function AgentSidebar({ machines, selectedMachineId, selectedPaneId, stat
           <ul className="agent-list agent-list-pinned sidebar-pinned" aria-label={t("Pinned")}>{split.pinned.map(agentItem)}</ul>
         </>}
         {split.rest.length > 0 && <ul className="agent-list">{split.rest.map(agentItem)}</ul>}
+        {split.parked.length > 0 && <>
+          <button type="button" className="agent-parked-toggle" aria-expanded={parkedShown} aria-controls={parkedListId} disabled={filter.active} data-testid="agent-parked-toggle" onClick={() => {
+            setParkedOpen(!parkedOpen);
+            try { window.localStorage.setItem(PARKED_OPEN_KEY, parkedOpen ? "0" : "1"); } catch { /* private mode: this page keeps it */ }
+          }}>
+            {parkedShown ? <ChevronDown aria-hidden="true" /> : <ChevronRight aria-hidden="true" />}
+            <span>{t("Parked")}</span>
+            <span className="agent-section-count">{split.parked.length}</span>
+          </button>
+          <ul className="agent-list agent-list-parked" id={parkedListId} aria-label={t("Parked")} hidden={!parkedShown}>{split.parked.map(agentItem)}</ul>
+        </>}
       </>}
     </div>
     {menu && menuShown && <RowMenu anchor={menu.anchor} point={menu.point} restoreFocusTo={menu.previousFocus} title={menuShown.title} subtitle={menuShown.context} detail={menuShown.tokens.join(" · ") || undefined} onClose={closeMenu} items={[
@@ -349,7 +368,7 @@ export function AgentSidebar({ machines, selectedMachineId, selectedPaneId, stat
         run: () => toggleMute(menuRow.machine.id, menuRow.entry.pane.pane_id),
       }]),
       ...(!menuSession || menuRow === undefined ? [] : [null, ...IMPORTANCE_LEVELS].map((level, index) => ({
-        id: `importance-${level ?? "auto"}`, label: level === null ? t("Importance: Auto") : t("Importance: {level}", { level }), icon: Flag,
+        id: `importance-${level ?? "auto"}`, label: level === null ? t("Importance: Auto") : level === PARKED_LEVEL ? t("Importance: P4 (parked)") : t("Importance: {level}", { level }), icon: Flag,
         divider: index === 0, current: menuOverride === level, disabled: watching,
         run: () => setImportance(menuRow.machine.id, menuRow.entry.pane.pane_id, level),
       }))),
