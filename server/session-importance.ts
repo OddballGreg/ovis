@@ -1,9 +1,12 @@
 /**
  * How much each agent pane matters, for Settings → Agents order → Importance. A pane running an
  * OpenCode session (`agent_session` kind `id`, a `ses_` id) is asked about at opencode-memory's
- * `session_importance` tool, at most every POLL_MS and only while a browser watches; memory that
- * is down, refuses or does not know the tool yet leaves every pane neutral (P2), which orders the
- * list as Longest wait does. The wait clocks stamp when this server first saw each pane in its
+ * `session_importance` tool, at most every POLL_MS and only while a browser watches. Memory that
+ * is slow, down or refuses keeps the levels of its last answer for STALE_GRACE_MS after that
+ * answer, so one missed ask does not flip every pane (and herdr's sidebar) to neutral; once the
+ * window has passed with no answer, every pane is neutral (P2), which orders the list as Longest
+ * wait does. Memory that does not know the tool leaves every pane neutral at once. A session an
+ * answer leaves out is neutral. The wait clocks stamp when this server first saw each pane in its
  * current state, and are kept beside the shared preferences so a restart keeps them.
  */
 import { existsSync, readFileSync } from "node:fs";
@@ -17,6 +20,8 @@ const REQUEST_TIMEOUT_MS = 8_000;
 /** memory without the tool yet is asked again this much later */
 const MISSING_TOOL_BACKOFF_MS = 10 * 60_000;
 const MAX_BACKOFF_MS = 15 * 60_000;
+/** how long after memory's last answer its levels are still served while it does not answer */
+export const STALE_GRACE_MS = 10 * 60_000;
 const MAX_SESSIONS = 200;
 const MAX_REASON = 300;
 /** a session_importance answer for MAX_SESSIONS is a few tens of KiB; anything much larger is not one */
@@ -137,6 +142,10 @@ export class SessionImportance {
   private failures = 0;
   /** why memory is not answering, said once when it stops and once when it is back */
   private down: string | null = null;
+  /** when memory last gave importance; null before its first answer */
+  private lastAnswer: number | null = null;
+  /** the levels kept are from an answer before an ask memory did not answer */
+  private stale = false;
   private readonly now: () => number;
   private readonly fetcher: typeof fetch;
   private readonly pollMs: number;
@@ -199,14 +208,12 @@ export class SessionImportance {
   private async ask(ids: string[]): Promise<void> {
     const answer = await this.call("session_importance", { session_ids: ids });
     if (!answer.ok) {
-      this.fail(answer.missing ? MISSING_TOOL_BACKOFF_MS : Math.min(MAX_BACKOFF_MS, this.pollMs * 2 ** this.failures), answer.why);
-      this.replace(new Map());
+      this.fail(answer.missing ? MISSING_TOOL_BACKOFF_MS : Math.min(MAX_BACKOFF_MS, this.pollMs * 2 ** this.failures), answer.why, answer.missing);
       return;
     }
     const sessions = typeof answer.value === "object" && answer.value !== null ? (answer.value as Record<string, unknown>)["sessions"] : undefined;
     if (typeof sessions !== "object" || sessions === null) {
-      this.fail(Math.min(MAX_BACKOFF_MS, this.pollMs * 2 ** this.failures), "memory's answer has no sessions");
-      this.replace(new Map());
+      this.fail(Math.min(MAX_BACKOFF_MS, this.pollMs * 2 ** this.failures), "memory's answer has no sessions", false);
       return;
     }
     const next = new Map<string, PaneImportance>();
@@ -215,15 +222,26 @@ export class SessionImportance {
       if (importance) next.set(id, importance);
     }
     if (this.down !== null) this.deps.log?.("importance: opencode-memory answers again");
-    this.down = null; this.failures = 0; this.retryAt = 0;
+    this.down = null; this.stale = false; this.failures = 0; this.retryAt = 0;
+    this.lastAnswer = this.now();
     this.replace(next);
   }
 
-  private fail(backoffMs: number, why: string): void {
+  /** An ask memory did not answer: its last levels stay for the grace window, then every pane is neutral. `missing`: it has no such tool. */
+  private fail(backoffMs: number, why: string, missing: boolean): void {
+    const now = this.now();
     this.failures = Math.min(this.failures + 1, 10);
-    this.retryAt = this.now() + backoffMs;
-    if (this.down !== why) this.deps.log?.(`importance: every agent is neutral (P2) until opencode-memory gives importance again: ${why}`);
+    this.retryAt = now + backoffMs;
+    if (!missing && this.levels.size > 0 && this.lastAnswer !== null && now - this.lastAnswer < STALE_GRACE_MS) {
+      if (!this.stale) this.deps.log?.(`importance: keeping opencode-memory's last levels for up to ${STALE_GRACE_MS / 60_000} min after its last answer: ${why}`);
+      this.stale = true;
+      this.down = why;
+      return;
+    }
+    if (this.down !== why || this.stale) this.deps.log?.(`importance: every agent is neutral (P2) until opencode-memory gives importance again: ${why}`);
     this.down = why;
+    this.stale = false;
+    this.replace(new Map());
   }
 
   private replace(next: Map<string, PaneImportance>): void {
